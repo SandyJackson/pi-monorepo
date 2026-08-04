@@ -24,10 +24,10 @@ import { readSessionAnswer } from "./pi-session.ts";
 const POLL_INTERVAL_MS = 800;
 
 /**
- * Number of consecutive idle polls required before declaring completion.
+ * Number of consecutive settled polls required before declaring completion.
  * ~1.6s stability guard against transient idle/retry-hold blips.
  */
-const STABLE_IDLE_POLLS = 2;
+const STABLE_SETTLED_POLLS = 2;
 
 /** Herdr permits agent names of at most 32 ASCII slug characters. */
 const PANE_LABEL_MAX_LENGTH = 32;
@@ -256,7 +256,8 @@ export class HerdrBackend implements SubagentBackend {
 		options: WaitForCompletionOptions,
 	): Promise<SubagentOutcome> {
 		const deadline = Date.now() + options.timeoutMs;
-		let stableIdle = 0;
+		let observedActive = false;
+		let stableSettled = 0;
 
 		for (;;) {
 			if (options.signal?.aborted) return { reason: "aborted" };
@@ -289,8 +290,14 @@ export class HerdrBackend implements SubagentBackend {
 			}
 
 			const hasFinalText = answerText !== null && answerText.trim().length > 0;
-			if (status === "idle") stableIdle += 1;
-			else stableIdle = 0;
+			if (status === "working" || status === "blocked") {
+				observedActive = true;
+				stableSettled = 0;
+			} else if (observedActive && (status === "idle" || status === "done")) {
+				stableSettled += 1;
+			} else {
+				stableSettled = 0;
+			}
 
 			options.onProgress?.(
 				hasFinalText
@@ -298,11 +305,8 @@ export class HerdrBackend implements SubagentBackend {
 					: `watching:${status} — ${spawned.displayTarget}`,
 			);
 
-			if (status === "done") {
-				return { reason: "completed", answerText };
-			}
-			if (status === "idle" && stableIdle >= STABLE_IDLE_POLLS) {
-				// Pane went idle and stayed idle — complete with whatever we have.
+			if (observedActive && stableSettled >= STABLE_SETTLED_POLLS) {
+				// Pane settled after doing work — complete with whatever we have.
 				return { reason: "completed", answerText };
 			}
 
