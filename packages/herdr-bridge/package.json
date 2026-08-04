@@ -1,0 +1,16 @@
+{
+  "name": "@pi-workspace/herdr-bridge",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@pi-workspace/herdr-contract": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.81.1",
+    "@pi-workspace/herdr-contract": "workspace:*"
+  }
+}

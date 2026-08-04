@@ -13,9 +13,9 @@ describe("Pi workspace package", () => {
     expect(packageJson.keywords).toContain("pi-package");
   });
 
-  it("declares pi extensions path", () => {
+  it("declares pi extensions", () => {
     expect(packageJson.pi?.extensions).toBeDefined();
-    expect(packageJson.pi?.extensions).toContain("./extensions");
+    expect(packageJson.pi?.extensions.length).toBeGreaterThan(0);
   });
 
   it("declares pi skills path", () => {
@@ -31,5 +31,13 @@ describe("Pi workspace package", () => {
     expect(packageJson.devDependencies?.["@earendil-works/pi-coding-agent"]).toBeDefined();
     expect(packageJson.devDependencies?.["@earendil-works/pi-ai"]).toBeDefined();
     expect(packageJson.devDependencies?.["@earendil-works/pi-tui"]).toBeDefined();
+  });
+
+  it("has workspace dependencies for extension packages", () => {
+    expect(packageJson.dependencies?.["@pi-workspace/herdr-contract"]).toBeDefined();
+    expect(packageJson.dependencies?.["@pi-workspace/bash-permission"]).toBeDefined();
+    expect(packageJson.dependencies?.["@pi-workspace/herdr-subagent"]).toBeDefined();
+    expect(packageJson.dependencies?.["@pi-workspace/herdr-bridge"]).toBeDefined();
+    expect(packageJson.dependencies?.["@pi-workspace/session-auto-name"]).toBeDefined();
   });
 });

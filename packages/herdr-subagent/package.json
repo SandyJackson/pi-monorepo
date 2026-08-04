@@ -1,0 +1,17 @@
+{
+  "name": "@pi-workspace/herdr-subagent",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.81.1",
+    "typebox": "*",
+    "@types/node": "^22.0.0"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@pi-workspace/bash-permission",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./lib/*": "./lib/*.ts"
+  },
+  "dependencies": {
+    "tree-sitter": "^0.22.4",
+    "tree-sitter-bash": "^0.23.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.81.1",
+    "@types/node": "^22.0.0"
+  }
+}

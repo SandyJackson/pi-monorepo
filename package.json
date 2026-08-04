@@ -6,8 +6,20 @@
     "node": ">=22"
   },
   "pi": {
-    "extensions": ["./extensions"],
+    "extensions": [
+      "./packages/bash-permission/index.ts",
+      "./packages/herdr-subagent/index.ts",
+      "./packages/herdr-bridge/index.ts",
+      "./packages/session-auto-name/index.ts"
+    ],
     "skills": ["./skills"]
+  },
+  "dependencies": {
+    "@pi-workspace/herdr-contract": "workspace:*",
+    "@pi-workspace/bash-permission": "workspace:*",
+    "@pi-workspace/herdr-subagent": "workspace:*",
+    "@pi-workspace/herdr-bridge": "workspace:*",
+    "@pi-workspace/session-auto-name": "workspace:*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.81.1",
