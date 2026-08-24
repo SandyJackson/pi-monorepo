@@ -1,8 +1,6 @@
-import { createConnection } from "node:net";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentConfig } from "./agents.ts";
 import type {
 	SubagentInvocation,
 	SpawnedSubagent,
@@ -15,6 +13,11 @@ import type {
 	WaitForCompletionOptions,
 } from "./subagent-runner.ts";
 import { readSessionAnswer } from "./pi-session.ts";
+import {
+	createHerdrRpc,
+	HerdrRpcResponseError,
+	type HerdrRpcCall,
+} from "./herdr/rpc.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -49,8 +52,6 @@ const PANE_READINESS_RETRY_DELAY_MS = 250;
 
 /** Conservative fallback before removing a prompt file without a session signal. */
 const PROMPT_CLEANUP_FALLBACK_MS = 60_000;
-
-
 
 interface HerdrEnv {
 	socketPath: string;
@@ -116,19 +117,6 @@ interface HerdrPaneSplitResult {
 	pane?: HerdrPaneInfo;
 }
 
-/** Herdr JSON-RPC error shape. */
-type HerdrRpcError = string | {
-	code?: string | number;
-	message?: string;
-};
-
-/** The Herdr server returned an explicit JSON-RPC error response. */
-class HerdrRpcResponseError extends Error {
-	constructor(message: string, readonly code?: string | number) {
-		super(message);
-	}
-}
-
 /** The Herdr server processed agent.start and confirmed that it failed. */
 class ConfirmedLaunchFailure extends Error {}
 
@@ -143,9 +131,15 @@ export class HerdrBackend implements SubagentBackend {
 	/** Serializes tab provisioning within this Pi process for one Herdr workspace. */
 	private static readonly subagentsTabLocks = new Map<string, Promise<void>>();
 
-	private constructor(private readonly env: HerdrEnv) {}
+	private constructor(
+		private readonly env: HerdrEnv,
+		private readonly callRpc: HerdrRpcCall,
+	) {}
 
-	static fromEnv(env: NodeJS.ProcessEnv = process.env): BackendSelection {
+	static fromEnv(
+		env: NodeJS.ProcessEnv = process.env,
+		rpcCall?: HerdrRpcCall,
+	): BackendSelection {
 		if (env.HERDR_ENV !== "1" || !env.HERDR_SOCKET_PATH || !env.HERDR_PANE_ID) {
 			return {
 				ok: false,
@@ -171,11 +165,14 @@ export class HerdrBackend implements SubagentBackend {
 
 		return {
 			ok: true,
-			backend: new HerdrBackend({
-				socketPath: env.HERDR_SOCKET_PATH,
-				paneId: env.HERDR_PANE_ID,
-				workspaceId: env.HERDR_WORKSPACE_ID,
-			}),
+			backend: new HerdrBackend(
+				{
+					socketPath: env.HERDR_SOCKET_PATH,
+					paneId: env.HERDR_PANE_ID,
+					workspaceId: env.HERDR_WORKSPACE_ID,
+				},
+				rpcCall ?? createHerdrRpc(env.HERDR_SOCKET_PATH),
+			),
 		};
 	}
 
@@ -266,7 +263,7 @@ export class HerdrBackend implements SubagentBackend {
 			let sessionPath: string | null = null;
 
 			try {
-				const info = (await this.rpcCall("agent.get", { target: spawned.id }, DEFAULT_RPC_TIMEOUT, options.signal)) as HerdrAgentInfo | undefined;
+				const info = (await this.callRpc("agent.get", { target: spawned.id }, DEFAULT_RPC_TIMEOUT, options.signal)) as HerdrAgentInfo | undefined;
 				status = info?.agent?.agent_status ?? info?.agent_status ?? "unknown";
 				const raw = info?.agent?.agent_session?.value ?? info?.agent?.agent_session?.path ?? null;
 				sessionPath = typeof raw === "string" && raw.length > 0 ? raw : null;
@@ -352,14 +349,14 @@ export class HerdrBackend implements SubagentBackend {
 		cwd: string,
 		signal?: AbortSignal,
 	): Promise<{ id: string; rootPaneId?: string; existingPaneId?: string }> {
-		const listResult = (await this.rpcCall("tab.list", { workspace_id: workspaceId }, DEFAULT_RPC_TIMEOUT, signal)) as HerdrTabListResult;
+		const listResult = (await this.callRpc("tab.list", { workspace_id: workspaceId }, DEFAULT_RPC_TIMEOUT, signal)) as HerdrTabListResult;
 		const existingTab = listResult.tabs?.find((tab) => isSubagentsTabLabel(tab.label) && tab.tab_id);
 		if (existingTab?.tab_id) {
 			const existingPaneId = await this.findAnyTabPane(existingTab.tab_id, workspaceId, signal);
 			return { id: existingTab.tab_id, existingPaneId };
 		}
 
-		const createResult = (await this.rpcCall(
+		const createResult = (await this.callRpc(
 			"tab.create",
 			{
 				workspace_id: workspaceId,
@@ -383,7 +380,7 @@ export class HerdrBackend implements SubagentBackend {
 	}
 
 	private async findAnyTabPane(tabId: string, workspaceId: string, signal?: AbortSignal): Promise<string> {
-		const result = (await this.rpcCall("pane.list", { workspace_id: workspaceId }, DEFAULT_RPC_TIMEOUT, signal)) as HerdrPaneListResult;
+		const result = (await this.callRpc("pane.list", { workspace_id: workspaceId }, DEFAULT_RPC_TIMEOUT, signal)) as HerdrPaneListResult;
 		const paneId = result.panes?.find((pane) => pane.tab_id === tabId)?.pane_id;
 		if (!paneId) throw new Error(`subagents tab ${tabId} has no root pane`);
 		return paneId;
@@ -396,7 +393,7 @@ export class HerdrBackend implements SubagentBackend {
 		workspaceId: string,
 		signal?: AbortSignal,
 	): Promise<string> {
-		const result = (await this.rpcCall(
+		const result = (await this.callRpc(
 			"pane.split",
 			{ target_pane_id: targetPaneId, direction, cwd, workspace_id: workspaceId, focus: false },
 			DEFAULT_RPC_TIMEOUT,
@@ -408,7 +405,7 @@ export class HerdrBackend implements SubagentBackend {
 	}
 
 	private async listAgentNames(signal?: AbortSignal): Promise<Set<string>> {
-		const result = (await this.rpcCall("agent.list", {}, DEFAULT_RPC_TIMEOUT, signal)) as HerdrAgentListResult;
+		const result = (await this.callRpc("agent.list", {}, DEFAULT_RPC_TIMEOUT, signal)) as HerdrAgentListResult;
 		if (!Array.isArray(result.agents)) {
 			throw new Error(`agent.list returned no agents array:\n${JSON.stringify(result).slice(0, 300)}`);
 		}
@@ -472,7 +469,7 @@ export class HerdrBackend implements SubagentBackend {
 			let raw: unknown;
 			try {
 				raw = await retryWithDelay(
-					() => this.rpcCall("agent.start", startParams, START_RPC_TIMEOUT, signal),
+					() => this.callRpc("agent.start", startParams, START_RPC_TIMEOUT, signal),
 					isTransientPaneReadinessError,
 					{
 						maxAttempts: PANE_READINESS_RETRY_ATTEMPTS,
@@ -547,96 +544,6 @@ export class HerdrBackend implements SubagentBackend {
 		return spawned;
 	}
 
-	/**
-	 * Make a JSON-RPC call to Herdr over its Unix domain socket.
-	 *
-	 * The socket transport uses newline-delimited JSON. Each request carries a
-	 * unique id and the method/params payload; the response is matched by id.
-	 */
-	private rpcCall(
-		method: string,
-		params: unknown,
-		timeoutMs = DEFAULT_RPC_TIMEOUT,
-		signal?: AbortSignal,
-	): Promise<unknown> {
-		if (signal?.aborted) return Promise.reject(new Error(`herdr rpc aborted (${method})`));
-
-		const id = `pi-sub:${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-
-		return new Promise((resolve, reject) => {
-			let buffer = "";
-			let resolved = false;
-			let timer: ReturnType<typeof setTimeout> | undefined;
-
-			const socket = createConnection(this.env.socketPath);
-
-			let onAbort: () => void = () => {};
-
-			const settle = (complete: () => void) => {
-				if (resolved) return;
-				resolved = true;
-				clearTimeout(timer);
-				signal?.removeEventListener("abort", onAbort);
-				try {
-					socket.destroy();
-				} catch {
-					/* ignore */
-				}
-				complete();
-			};
-
-			onAbort = () => settle(() => reject(new Error(`herdr rpc aborted (${method})`)));
-
-			const onLine = (line: string) => {
-				if (!line.trim()) return;
-				let parsed: Record<string, unknown>;
-				try {
-					parsed = JSON.parse(line) as Record<string, unknown>;
-				} catch {
-					return;
-				}
-				if (parsed?.id !== id) return;
-				settle(() => {
-					if (parsed.error) {
-						const err = parsed.error as HerdrRpcError;
-						const msg =
-							typeof err === "string"
-								? err
-								: err.message ?? JSON.stringify(err);
-						reject(new HerdrRpcResponseError(msg, typeof err === "string" ? undefined : err.code));
-					} else {
-						resolve(parsed.result);
-					}
-				});
-			};
-
-			socket.on("connect", () => {
-				socket.write(`${JSON.stringify({ id, method, params })}\n`);
-			});
-
-			socket.on("data", (data: Buffer) => {
-				buffer += data.toString();
-				const lines = buffer.split("\n");
-				buffer = lines.pop() ?? "";
-				for (const line of lines) onLine(line);
-			});
-
-			socket.on("error", (err) =>
-				settle(() => reject(new Error(`herdr socket error: ${err.message}`))),
-			);
-
-			socket.on("end", () => {
-				if (buffer.trim()) onLine(buffer);
-				settle(() => reject(new Error("herdr socket closed without response")));
-			});
-
-			timer = setTimeout(() => {
-				settle(() => reject(new Error(`herdr rpc timeout after ${timeoutMs}ms (${method})`)));
-			}, timeoutMs);
-			timer.unref?.();
-			signal?.addEventListener("abort", onAbort, { once: true });
-		});
-	}
 }
 
 /** Return early on cancellation without breaking the lock's queued successor chain. */
