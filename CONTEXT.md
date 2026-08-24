@@ -24,6 +24,24 @@ A child workspace package containing one extension entrypoint, its supporting so
 **Managed extension**:
 An extension whose source and lifecycle are owned by an external integration. The Pi workspace may depend on its events or behavior but does not install, update, or overwrite it.
 
+**Visible subagent**:
+A child Pi agent operating in a Herdr-managed pane, where its work remains observable and can be taken over interactively.
+
+**Visible subagent session**:
+The persistent Pi session hosting a visible subagent. A session may outlive an individual delegated task and support later turns.
+
+**Subagent delegation**:
+A request from a parent Pi session to execute one or more delegated tasks as visible subagents. The delegation is distinct from each individual task it contains.
+
+**Delegated task**:
+One turn assigned to a visible subagent, consisting of an agent, instruction, and optional working-directory selection. The task settles independently of the lifetime of its visible subagent session.
+
+**Delegated task number**:
+The one-based position assigned once to a delegated task within its subagent delegation. It is the task's canonical identity throughout that delegation; the visible subagent session reference identifies the persistent session beyond it.
+
+**Delegated task outcome**:
+The single terminal result of a delegated task, such as completion, timeout, abort, session closure, or an execution failure. Outcomes retain the order and delegated task numbers of their tasks.
+
 **Bash policy**:
 The versioned set of rules that determines whether a bash command is allowed, requires approval, or is denied for the workspace and its agents.
 
@@ -43,3 +61,6 @@ A Pi installation created from the workspace's GitHub package source, allowing a
 
 **Workspace agent**:
 An agent definition owned by the Pi workspace and synchronized into Pi's existing global agent directory for runtime discovery. It is distinct from project-local agents; when names collide, project agents override workspace agents, which override user agents.
+
+**Callable agent catalog**:
+The session-scoped snapshot of agent definitions available for subagent delegation. It combines global discovery with trusted project-local overrides and refreshes with Pi's session lifecycle.
