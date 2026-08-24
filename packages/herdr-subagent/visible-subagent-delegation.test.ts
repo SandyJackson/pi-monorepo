@@ -4,19 +4,18 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	advanceObservationPoll,
-	createScriptedHerdrTracker,
+	createScriptedHerdr,
 	runnerOptionsFor,
 	standardLaunchResponse,
 	waitForRpcCount,
 	type RpcResponse,
-	type ScriptedHerdr,
+	type ScriptedHerdrRpc,
 } from "./herdr-test-support.js";
 import { runSubagents } from "./subagent-runner.js";
 
 type HerdrAgentStatus = "idle" | "done" | "working" | "blocked" | "unknown";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-const herdrServers = createScriptedHerdrTracker();
 const ACTIVE_STATUSES: HerdrAgentStatus[] = ["working", "blocked"];
 let agentDir: string;
 let sessionDir: string;
@@ -45,7 +44,6 @@ afterEach(async () => {
 	else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 	fs.rmSync(agentDir, { recursive: true, force: true });
 	fs.rmSync(sessionDir, { recursive: true, force: true });
-	await herdrServers.closeAll();
 	vi.restoreAllMocks();
 });
 
@@ -74,7 +72,7 @@ function observationResponse(status: HerdrAgentStatus, sessionPath?: string): Rp
 }
 
 function delegate(
-	herdr: ScriptedHerdr,
+	herdr: ScriptedHerdrRpc,
 	tasks: Array<{ agent: string; task: string }>,
 	signal?: AbortSignal,
 	timeout?: number,
@@ -113,7 +111,7 @@ describe("visible subagent delegation presentation", () => {
 	])("presents a completed single delegated task without a wrapper", async ({ answerText, expected }) => {
 		const statuses: HerdrAgentStatus[] = ["working", "idle", "idle"];
 		const sessionPath = answerText === null ? undefined : writeSessionAnswer("single", answerText);
-		const herdr = await herdrServers.start((request) => {
+		const herdr = createScriptedHerdr((request) => {
 			const standardResponse = standardLaunchResponse(request);
 			if (standardResponse) return standardResponse;
 			if (request.method === "agent.start") return { result: { pane_id: "child-pane" } };
@@ -141,7 +139,7 @@ describe("visible subagent delegation presentation", () => {
 			["child-beta", ["working", "idle", "idle"]],
 		]);
 		let launchedCount = 0;
-		const herdr = await herdrServers.start((request) => {
+		const herdr = createScriptedHerdr((request) => {
 			const standardResponse = standardLaunchResponse(request);
 			if (standardResponse) return standardResponse;
 			if (request.method === "agent.start") {
@@ -193,7 +191,7 @@ describe("visible subagent launch outcomes", () => {
 			expectedText: "subagent launch state is unknown; inspect the subagents tab.",
 		},
 	])("classifies $name", async ({ launchResponse, expectedText }) => {
-		const herdr = await herdrServers.start((request) =>
+		const herdr = createScriptedHerdr((request) =>
 			standardLaunchResponse(request) ?? launchResponse);
 
 		const result = await delegate(herdr, [{ agent: "alpha", task: "Review this" }]);
@@ -202,7 +200,7 @@ describe("visible subagent launch outcomes", () => {
 	});
 
 	it("distinguishes an explicit rejection from a launch RPC timeout", async () => {
-		const herdr = await herdrServers.start((request) =>
+		const herdr = createScriptedHerdr((request) =>
 			standardLaunchResponse(request) ?? { leavePending: true });
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 		const delegation = delegate(herdr, [{ agent: "alpha", task: "Review this" }]);
@@ -221,7 +219,7 @@ describe("delegated task observation", () => {
 		"ignores startup idle and settles after %s activity followed by two settled observations",
 		async (activeStatus) => {
 			const statuses: HerdrAgentStatus[] = ["idle", "idle", activeStatus, "done", "done"];
-			const herdr = await herdrServers.start((request) => {
+			const herdr = createScriptedHerdr((request) => {
 				const standardResponse = standardLaunchResponse(request);
 				if (standardResponse) return standardResponse;
 				if (request.method === "agent.start") return { result: { pane_id: "child-pane" } };
@@ -250,7 +248,7 @@ describe("delegated task observation", () => {
 	it("lets completion win when the second settled observation occurs at the timeout boundary", async () => {
 		let observationCount = 0;
 		const sessionPath = writeSessionAnswer("boundary", "boundary answer");
-		const herdr = await herdrServers.start((request) => {
+		const herdr = createScriptedHerdr((request) => {
 			const standardResponse = standardLaunchResponse(request);
 			if (standardResponse) return standardResponse;
 			if (request.method === "agent.start") return { result: { pane_id: "boundary-pane" } };
@@ -274,7 +272,7 @@ describe("delegated task observation", () => {
 	});
 
 	it("distinguishes pane closure from a recoverable non-closure observation failure", async () => {
-		const closedHerdr = await herdrServers.start((request) => {
+		const closedHerdr = createScriptedHerdr((request) => {
 			const standardResponse = standardLaunchResponse(request);
 			if (standardResponse) return standardResponse;
 			if (request.method === "agent.start") return { result: { pane_id: "closed-pane" } };
@@ -288,7 +286,7 @@ describe("delegated task observation", () => {
 			observationResponse("idle"),
 			observationResponse("idle"),
 		];
-		const transientHerdr = await herdrServers.start((request) => {
+		const transientHerdr = createScriptedHerdr((request) => {
 			const standardResponse = standardLaunchResponse(request);
 			if (standardResponse) return standardResponse;
 			if (request.method === "agent.start") return { result: { pane_id: "recovering-pane" } };
@@ -308,7 +306,7 @@ describe("delegated task observation", () => {
 	});
 
 	it("timeout stops observation without closing the visible subagent session", async () => {
-		const herdr = await herdrServers.start((request) => {
+		const herdr = createScriptedHerdr((request) => {
 			const standardResponse = standardLaunchResponse(request);
 			if (standardResponse) return standardResponse;
 			if (request.method === "agent.start") return { result: { pane_id: "timed-out-pane" } };
@@ -329,12 +327,12 @@ describe("delegated task observation", () => {
 		expect(resultText(await delegation)).toBe(
 			"delegation timed out after 1m, pane timed-out-pane still live",
 		);
-		expect(herdr.methods).not.toContain("pane.close");
-		expect(herdr.methods).not.toContain("agent.stop");
+		expect(herdr.calledMethods).not.toContain("pane.close");
+		expect(herdr.calledMethods).not.toContain("agent.stop");
 	});
 
 	it("distinguishes cancellation before launch from cancellation while observing a visible subagent session", async () => {
-		const beforeLaunchHerdr = await herdrServers.start((request) =>
+		const beforeLaunchHerdr = createScriptedHerdr((request) =>
 			standardLaunchResponse(request) ?? { result: { pane_id: "unused-pane" } });
 		const beforeLaunch = await delegate(
 			beforeLaunchHerdr,
@@ -342,7 +340,7 @@ describe("delegated task observation", () => {
 			AbortSignal.abort(),
 		);
 
-		const observingHerdr = await herdrServers.start((request) => {
+		const observingHerdr = createScriptedHerdr((request) => {
 			const standardResponse = standardLaunchResponse(request);
 			if (standardResponse) return standardResponse;
 			if (request.method === "agent.start") return { result: { pane_id: "live-pane" } };
@@ -363,16 +361,16 @@ describe("delegated task observation", () => {
 		expect(resultText(beforeLaunch)).not.toContain("still running");
 		expect(resultText(observingResult)).toContain("pane live-pane");
 		expect(resultText(observingResult)).toContain("still running");
-		expect(beforeLaunchHerdr.methods).toEqual([]);
-		expect(observingHerdr.methods).not.toContain("pane.close");
-		expect(observingHerdr.methods).not.toContain("agent.stop");
+		expect(beforeLaunchHerdr.calledMethods).toEqual([]);
+		expect(observingHerdr.calledMethods).not.toContain("pane.close");
+		expect(observingHerdr.calledMethods).not.toContain("agent.stop");
 	});
 });
 
 describe("startup prompt resource lifetime", () => {
 	it("removes prompt resources immediately after confirmed launch failure", async () => {
 		const promptDirectoriesBeforeLaunch = promptDirectories();
-		const herdr = await herdrServers.start((request) =>
+		const herdr = createScriptedHerdr((request) =>
 			standardLaunchResponse(request) ?? {
 				error: { code: "launch_rejected", message: "launch denied" },
 			});
@@ -386,7 +384,7 @@ describe("startup prompt resource lifetime", () => {
 		const promptDirectoriesBeforeLaunch = promptDirectories();
 		const statuses: HerdrAgentStatus[] = ["working", "idle", "idle"];
 		const sessionPath = writeSessionAnswer("prompted", "prompted answer");
-		const herdr = await herdrServers.start((request) => {
+		const herdr = createScriptedHerdr((request) => {
 			const standardResponse = standardLaunchResponse(request);
 			if (standardResponse) return standardResponse;
 			if (request.method === "agent.start") return { result: { pane_id: "prompted-pane" } };
@@ -406,7 +404,7 @@ describe("startup prompt resource lifetime", () => {
 
 	it("releases a confirmed launch prompt through the 60-second fallback", async () => {
 		const promptDirectoriesBeforeLaunch = promptDirectories();
-		const herdr = await herdrServers.start((request) => {
+		const herdr = createScriptedHerdr((request) => {
 			const standardResponse = standardLaunchResponse(request);
 			if (standardResponse) return standardResponse;
 			if (request.method === "agent.start") return { result: { pane_id: "live-prompted-pane" } };
@@ -433,7 +431,7 @@ describe("startup prompt resource lifetime", () => {
 
 	it("releases an indeterminate launch prompt through the 60-second fallback", async () => {
 		const promptDirectoriesBeforeLaunch = promptDirectories();
-		const herdr = await herdrServers.start((request) =>
+		const herdr = createScriptedHerdr((request) =>
 			standardLaunchResponse(request) ?? { result: {} });
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 		await delegate(herdr, [{ agent: "prompted", task: "Review this" }]);

@@ -1,14 +1,13 @@
-import * as fs from "node:fs";
-import { createServer, type Server, type Socket } from "node:net";
-import * as os from "node:os";
-import * as path from "node:path";
 import { expect, vi } from "vitest";
 import { discoverUserAgents } from "./agents.js";
 import { HerdrBackend } from "./herdr-backend.js";
+import {
+	HerdrRpcResponseError,
+	type HerdrRpcCall,
+} from "./herdr/rpc.js";
 import type { RunnerOptions } from "./subagent-runner.js";
 
 export interface RpcRequest {
-	id: string;
 	method: string;
 	params: Record<string, unknown>;
 }
@@ -19,97 +18,89 @@ export type RpcResponse =
 	| { closeWithoutResponse: true }
 	| { leavePending: true };
 
-export interface ScriptedHerdr {
-	socketPath: string;
-	methods: string[];
-	close(): Promise<void>;
+export interface ScriptedHerdrRpc {
+	calledMethods: string[];
+	rpcCall: HerdrRpcCall;
 }
 
-export interface ScriptedHerdrTracker {
-	start(respondToRequest: (request: RpcRequest) => RpcResponse): Promise<ScriptedHerdr>;
-	closeAll(): Promise<void>;
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
 }
 
-function isRpcRequest(value: unknown): value is RpcRequest {
-	return typeof value === "object" && value !== null &&
-		"id" in value && typeof value.id === "string" &&
-		"method" in value && typeof value.method === "string" &&
-		"params" in value && typeof value.params === "object" && value.params !== null;
-}
-
-async function startScriptedHerdr(
+function createScriptedRpc(
 	respondToRequest: (request: RpcRequest) => RpcResponse,
-): Promise<ScriptedHerdr> {
-	const socketPath = path.join(
-		fs.mkdtempSync(path.join(os.tmpdir(), "scripted-herdr-")),
-		"herdr.sock",
-	);
-	const methods: string[] = [];
-	const sockets = new Set<Socket>();
-	const server: Server = createServer((socket) => {
-		sockets.add(socket);
-		socket.on("close", () => sockets.delete(socket));
-		let buffer = "";
-		socket.on("data", (chunk: Buffer) => {
-			buffer += chunk.toString();
-			const lines = buffer.split("\n");
-			buffer = lines.pop() ?? "";
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				const parsed: unknown = JSON.parse(line);
-				if (!isRpcRequest(parsed)) {
-					socket.end();
-					continue;
-				}
-				methods.push(parsed.method);
-				const response = respondToRequest(parsed);
-				if ("closeWithoutResponse" in response) {
-					socket.end();
-				} else if (!("leavePending" in response)) {
-					socket.write(`${JSON.stringify({ id: parsed.id, ...response })}\n`);
-				}
-			}
+	calledMethods: string[],
+): HerdrRpcCall {
+	return (method, params, timeoutMs, signal) => {
+		const request: RpcRequest = {
+			method,
+			params: isRecord(params) ? params : {},
+		};
+		calledMethods.push(method);
+
+		if (signal?.aborted) return Promise.reject(new Error(`herdr rpc aborted (${method})`));
+
+		let response: RpcResponse;
+		try {
+			response = respondToRequest(request);
+		} catch (error: unknown) {
+			return Promise.reject(error);
+		}
+
+		if ("result" in response) return Promise.resolve(response.result);
+		if ("error" in response) {
+			return Promise.reject(
+				new HerdrRpcResponseError(response.error.message, response.error.code),
+			);
+		}
+		if ("closeWithoutResponse" in response) {
+			return Promise.reject(new Error("herdr socket closed without response"));
+		}
+
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let onAbort: () => void = () => {};
+
+			const settle = (complete: () => void) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				complete();
+			};
+
+			onAbort = () => settle(() => reject(new Error(`herdr rpc aborted (${method})`)));
+			timer = setTimeout(() => {
+				settle(() => reject(new Error(`herdr rpc timeout after ${timeoutMs}ms (${method})`)));
+			}, timeoutMs);
+			timer.unref?.();
+			signal?.addEventListener("abort", onAbort, { once: true });
+			if (signal?.aborted) onAbort();
 		});
-	});
-	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(socketPath, resolve);
-	});
-
-	return {
-		socketPath,
-		methods,
-		close: async () => {
-			for (const socket of sockets) socket.destroy();
-			await new Promise<void>((resolve, reject) => {
-				server.close((error) => error ? reject(error) : resolve());
-			});
-			fs.rmSync(path.dirname(socketPath), { recursive: true, force: true });
-		},
 	};
 }
 
-export function createScriptedHerdrTracker(): ScriptedHerdrTracker {
-	const openServers: ScriptedHerdr[] = [];
+export function createScriptedHerdr(
+	respondToRequest: (request: RpcRequest) => RpcResponse,
+): ScriptedHerdrRpc {
+	const calledMethods: string[] = [];
 	return {
-		start: async (respondToRequest) => {
-			const herdr = await startScriptedHerdr(respondToRequest);
-			openServers.push(herdr);
-			return herdr;
-		},
-		closeAll: async () => {
-			while (openServers.length > 0) await openServers.pop()?.close();
-		},
+		calledMethods,
+		rpcCall: createScriptedRpc(respondToRequest, calledMethods),
 	};
 }
 
-export function runnerOptionsFor(herdr: ScriptedHerdr): RunnerOptions {
-	const selection = HerdrBackend.fromEnv({
-		HERDR_ENV: "1",
-		HERDR_SOCKET_PATH: herdr.socketPath,
-		HERDR_PANE_ID: "parent-pane",
-		HERDR_WORKSPACE_ID: "workspace-1",
-	});
+export function runnerOptionsFor(herdr: ScriptedHerdrRpc): RunnerOptions {
+	const selection = HerdrBackend.fromEnv(
+		{
+			HERDR_ENV: "1",
+			HERDR_SOCKET_PATH: "/tmp/scripted-herdr.sock",
+			HERDR_PANE_ID: "parent-pane",
+			HERDR_WORKSPACE_ID: "workspace-1",
+		},
+		herdr.rpcCall,
+	);
 	if (!selection.ok) throw new Error(selection.message);
 	return {
 		agents: discoverUserAgents(),
@@ -134,15 +125,15 @@ export function standardLaunchResponse(request: RpcRequest): RpcResponse | undef
 	}
 }
 
-export async function waitForRpcCount(herdr: ScriptedHerdr, count: number): Promise<void> {
-	for (let attempt = 0; attempt < 20 && herdr.methods.length < count; attempt++) {
+export async function waitForRpcCount(herdr: ScriptedHerdrRpc, count: number): Promise<void> {
+	for (let attempt = 0; attempt < 20 && herdr.calledMethods.length < count; attempt++) {
 		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
-	expect(herdr.methods.length).toBeGreaterThanOrEqual(count);
+	expect(herdr.calledMethods.length).toBeGreaterThanOrEqual(count);
 }
 
 export async function advanceObservationPoll(
-	herdr: ScriptedHerdr,
+	herdr: ScriptedHerdrRpc,
 	expectedRpcCount: number,
 ): Promise<void> {
 	await vi.advanceTimersByTimeAsync(800);
