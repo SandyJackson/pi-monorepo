@@ -13,10 +13,7 @@
 
 import type { AgentConfig, AgentScope } from "./agents.ts";
 import {
-	discoverUserAgents,
-	discoverProjectAgents,
 	formatMergedAgentList,
-	mergeAgentLists,
 	resolveAgent,
 } from "./agents.ts";
 // ---------------------------------------------------------------------------
@@ -139,6 +136,8 @@ export type BackendSelection =
  * to the runner, so the runner does not need to import Pi SDK types.
  */
 export interface RunnerOptions {
+	/** Agents available for this Pi session lifecycle. */
+	agents: AgentConfig[];
 	/** The parent session's working directory. */
 	parentCwd: string;
 	/**
@@ -583,7 +582,7 @@ export async function runSubagents(
 		const agent = (taskParam.agent as string).trim();
 		const task = (taskParam.task as string).trim();
 		const taskCwd = typeof taskParam.cwd === "string" ? taskParam.cwd : options.parentCwd;
-		const resolved = resolveAgent(agent, scope, options.parentCwd);
+		const resolved = resolveAgent(agent, options.agents, scope);
 		if ("error" in resolved) {
 			return {
 				content: [{ type: "text", text: resolved.error }],
@@ -638,14 +637,6 @@ export async function runSubagents(
 // ---------------------------------------------------------------------------
 
 async function listAgents(options: RunnerOptions): Promise<RunResult> {
-	const scope = internalScope(options.includeProjectAgents);
-
-	const userAgents = scope !== "project" ? discoverUserAgents() : [];
-	const projectAgents =
-		scope === "project" || scope === "both"
-			? discoverProjectAgents(options.parentCwd)
-			: [];
-
 	const trustNote =
 		!options.includeProjectAgents
 			? "\n\nProject-local agents are hidden because the parent project is not trusted. Use /trust to trust this project."
@@ -655,7 +646,7 @@ async function listAgents(options: RunnerOptions): Promise<RunResult> {
 		content: [
 			{
 				type: "text",
-				text: `Available agents:\n\n${formatMergedAgentList(mergeAgentLists(userAgents, projectAgents))}${trustNote}`,
+				text: `Available agents:\n\n${formatMergedAgentList(options.agents)}${trustNote}`,
 			},
 		],
 		details: {},

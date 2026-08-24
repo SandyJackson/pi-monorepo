@@ -3,6 +3,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { expect, vi } from "vitest";
+import { discoverUserAgents } from "./agents.js";
 import { HerdrBackend } from "./herdr-backend.js";
 import type { RunnerOptions } from "./subagent-runner.js";
 
@@ -111,6 +112,7 @@ export function runnerOptionsFor(herdr: ScriptedHerdr): RunnerOptions {
 	});
 	if (!selection.ok) throw new Error(selection.message);
 	return {
+		agents: discoverUserAgents(),
 		parentCwd: process.cwd(),
 		includeProjectAgents: false,
 		detectAutoBackend: () => selection,

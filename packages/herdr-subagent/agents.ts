@@ -194,46 +194,28 @@ export function discoverProjectAgents(cwd: string): AgentConfig[] {
 }
 
 /**
- * Resolve an agent by name, applying scope rules.
+ * Resolve an agent by name from a previously merged agent list.
  *
  * Returns the matched AgentConfig, or an error object with a formatted
  * message listing all available agents in the requested scope.
  */
 export function resolveAgent(
 	name: string,
+	agents: AgentConfig[],
 	scope: AgentScope,
-	cwd: string,
 ): AgentConfig | { error: string } {
-	const userAgents = scope !== "project" ? discoverUserAgents() : [];
-	const projectAgents =
-		scope === "project" || scope === "both" ? discoverProjectAgents(cwd) : [];
-
-	const userMap = new Map<string, AgentConfig>();
-	const projectMap = new Map<string, AgentConfig>();
-	for (const agent of userAgents) userMap.set(agent.name, agent);
-	for (const agent of projectAgents) projectMap.set(agent.name, agent);
-
-	let config: AgentConfig | undefined;
-
-	if (scope === "both") {
-		// Project overrides user when names collide
-		config = projectMap.get(name) ?? userMap.get(name);
-	} else if (scope === "project") {
-		config = projectMap.get(name);
-	} else {
-		// "user" (default)
-		config = userMap.get(name);
-	}
+	const config = agents.find((agent) => agent.name === name);
 
 	if (!config) {
-		if (userAgents.length === 0 && projectAgents.length === 0) {
+		if (agents.length === 0) {
 			return {
 				error: `No agents found in scope "${scope}". ` +
 					`Expected agent files in ${scope === "project" ? `the nearest ${CONFIG_DIR_NAME}/agents/ directory` : `${path.join(getAgentDir(), AGENTS_DIR_NAME)}/`}.`,
 			};
 		}
-		const formatted = formatMergedAgentList(mergeAgentLists(userAgents, projectAgents));
-		return { error: `Unknown agent "${name}". Available agents:\n${formatted}` };
+		return {
+			error: `Unknown agent "${name}". Available agents:\n${formatMergedAgentList(agents)}`,
+		};
 	}
 
 	return config;

@@ -111,6 +111,7 @@ export default function (pi: ExtensionAPI) {
 				_ctx: ExtensionContext,
 			) {
 				const options: RunnerOptions = {
+					agents: mergedAgents,
 					parentCwd: sessionCwd,
 					includeProjectAgents,
 					detectAutoBackend: () => HerdrBackend.fromEnv(),
