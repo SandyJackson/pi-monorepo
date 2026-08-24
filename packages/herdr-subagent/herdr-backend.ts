@@ -454,7 +454,7 @@ export class HerdrBackend implements SubagentBackend {
 			}
 			argv.push("--append-system-prompt", tmpPath);
 		}
-		argv.push(invocation.task);
+		argv.push(sanitizeArgForHerdr(invocation.task));
 
 		let label = "";
 		let paneId: string | null = null;
@@ -718,6 +718,15 @@ function markPromptConsumed(spawned: SpawnedSubagent): void {
 /** Herdr 0.7 displays numbered tab labels as, for example, "[4] subagents". */
 function isSubagentsTabLabel(label: string | undefined): boolean {
 	return label === "subagents" || /^\[\d+\] subagents$/.test(label ?? "");
+}
+
+/**
+ * Sanitize a string for use as a Herdr agent argument.
+ * Herdr rejects arguments containing control characters (newlines, tabs, etc.).
+ * This replaces control characters with spaces to preserve readability.
+ */
+function sanitizeArgForHerdr(value: string): string {
+	return value.replace(/[\x00-\x1f\x7f]/g, " ");
 }
 
 // ---------------------------------------------------------------------------
