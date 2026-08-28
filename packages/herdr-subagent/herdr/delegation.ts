@@ -25,12 +25,12 @@ export interface DelegatedTaskExecution {
 }
 
 /** The injected Herdr runtime context used by the delegation operation. */
-export interface HerdrDelegationContext {
+interface HerdrDelegationContext {
   rpc: HerdrRpcCall;
   workspaceId: string;
 }
 
-export interface HerdrDelegationOptions extends HerdrDelegationContext {
+interface HerdrDelegationOptions extends HerdrDelegationContext {
   /** Per-task timeout, starting at each task's confirmed launch. */
   timeoutMs?: number;
   signal?: AbortSignal;

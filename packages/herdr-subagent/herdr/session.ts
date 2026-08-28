@@ -24,7 +24,7 @@ export type DelegatedTaskOutcome =
   | { status: "launch_indeterminate"; error: string; possiblePaneId: string }
   | { status: "observation_failed"; session: VisibleSubagentSessionRef; error: string };
 
-export interface AgentConfigForSession {
+interface AgentConfigForSession {
   name: string;
   model?: string;
   tools?: string[];
@@ -53,7 +53,7 @@ export interface ObserveTurnOptions {
  * handle whose `observeTurn` watches the initial turn — or the launch ended
  * in a terminal outcome that needs no observation.
  */
-export type DelegatedTaskLaunch =
+type DelegatedTaskLaunch =
   | {
       status: "launched";
       session: VisibleSubagentSessionRef;
