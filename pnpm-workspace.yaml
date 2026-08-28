@@ -4,6 +4,7 @@ packages:
 allowBuilds:
   '@google/genai': true
   esbuild: true
+  lefthook: true
   protobufjs: true
   tree-sitter: true
   tree-sitter-bash: true

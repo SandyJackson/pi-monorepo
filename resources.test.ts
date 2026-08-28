@@ -4,9 +4,10 @@
  * These tests ensure that all expected skills and agents are present,
  * properly formatted, and contain required fields.
  */
-import { describe, it, expect } from "vitest";
+
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { describe, expect, it } from "vitest";
 
 const ROOT = import.meta.dirname;
 
@@ -65,17 +66,17 @@ function readMarkdown(p: string): string {
 function parseFrontmatter(content: string): Record<string, unknown> {
   const match = content.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return {};
-  
+
   const fm: Record<string, unknown> = {};
   const lines = match[1].split("\n");
-  
+
   for (const line of lines) {
     const colonIdx = line.indexOf(":");
     if (colonIdx === -1) continue;
-    
+
     const key = line.slice(0, colonIdx).trim();
     let value: string | string[] = line.slice(colonIdx + 1).trim();
-    
+
     // Handle arrays like [bash-permission]
     if (value.startsWith("[") && value.endsWith("]")) {
       value = value
@@ -83,15 +84,11 @@ function parseFrontmatter(content: string): Record<string, unknown> {
         .split(",")
         .map((s) => s.trim());
     }
-    
+
     fm[key] = value;
   }
-  
-  return fm;
-}
 
-function getSkillDir(name: string): string {
-  return path.join(ROOT, "skills", name);
+  return fm;
 }
 
 function getSkillFile(name: string): string {
@@ -110,7 +107,7 @@ describe("Skills inventory", () => {
   it("all expected skills are present", () => {
     const skillsDir = path.join(ROOT, "skills");
     expect(exists(skillsDir)).toBe(true);
-    
+
     const actual = fs.readdirSync(skillsDir);
     for (const expected of EXPECTED_SKILLS) {
       expect(actual).toContain(expected);
@@ -132,7 +129,7 @@ describe("Skills inventory", () => {
     it(`${skill} has SKILL.md`, () => {
       const skillFile = getSkillFile(skill);
       expect(exists(skillFile)).toBe(true);
-      
+
       const content = readMarkdown(skillFile);
       expect(content.length).toBeGreaterThan(0);
     });
@@ -141,7 +138,7 @@ describe("Skills inventory", () => {
       const skillFile = getSkillFile(skill);
       const content = readMarkdown(skillFile);
       const fm = parseFrontmatter(content);
-      
+
       expect(fm.description).toBeDefined();
       expect(typeof fm.description).toBe("string");
       expect((fm.description as string).length).toBeGreaterThan(0);
@@ -153,7 +150,7 @@ describe("Agents inventory", () => {
   it("all expected agents are present", () => {
     const agentsDir = path.join(ROOT, "agents");
     expect(exists(agentsDir)).toBe(true);
-    
+
     const actual = fs.readdirSync(agentsDir);
     for (const expected of EXPECTED_AGENTS) {
       expect(actual).toContain(`${expected}.md`);
@@ -173,7 +170,7 @@ describe("Agents inventory", () => {
     it(`${agent} has markdown file`, () => {
       const agentFile = getAgentFile(agent);
       expect(exists(agentFile)).toBe(true);
-      
+
       const content = readMarkdown(agentFile);
       expect(content.length).toBeGreaterThan(0);
     });
@@ -182,7 +179,7 @@ describe("Agents inventory", () => {
       const agentFile = getAgentFile(agent);
       const content = readMarkdown(agentFile);
       const fm = parseFrontmatter(content);
-      
+
       expect(fm.description).toBeDefined();
       expect(typeof fm.description).toBe("string");
       expect((fm.description as string).length).toBeGreaterThan(0);
@@ -191,7 +188,7 @@ describe("Agents inventory", () => {
     it(`${agent} has system prompt body`, () => {
       const agentFile = getAgentFile(agent);
       const content = readMarkdown(agentFile);
-      
+
       // Content after frontmatter
       const body = content.replace(/^---\n[\s\S]*?\n---\n?/, "");
       expect(body.length).toBeGreaterThan(0);

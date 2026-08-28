@@ -1,11 +1,9 @@
-import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { describe, expect, it } from "vitest";
 
 describe("Pi workspace package", () => {
-  const packageJson = JSON.parse(
-    readFileSync(join(import.meta.dirname, "package.json"), "utf-8")
-  );
+  const packageJson = JSON.parse(readFileSync(join(import.meta.dirname, "package.json"), "utf-8"));
 
   it("has required pi package fields", () => {
     expect(packageJson.name).toBe("pi-workspace");

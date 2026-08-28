@@ -1,7 +1,16 @@
 {
   "name": "pi-workspace",
   "private": true,
-  "keywords": ["pi-package"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "prepare": "lefthook install"
+  },
+  "keywords": [
+    "pi-package"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -12,22 +21,26 @@
       "./packages/herdr-bridge/index.ts",
       "./packages/session-auto-name/index.ts"
     ],
-    "skills": ["./skills"]
+    "skills": [
+      "./skills"
+    ]
   },
   "dependencies": {
-    "@pi-workspace/herdr-contract": "workspace:*",
     "@pi-workspace/bash-permission": "workspace:*",
-    "@pi-workspace/herdr-subagent": "workspace:*",
     "@pi-workspace/herdr-bridge": "workspace:*",
+    "@pi-workspace/herdr-contract": "workspace:*",
+    "@pi-workspace/herdr-subagent": "workspace:*",
     "@pi-workspace/session-auto-name": "workspace:*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.81.1",
+    "@biomejs/biome": "^2.5.10",
     "@earendil-works/pi-ai": "0.81.1",
+    "@earendil-works/pi-coding-agent": "0.81.1",
     "@earendil-works/pi-tui": "0.81.1",
+    "@types/node": "^22.0.0",
+    "lefthook": "^2.1.10",
     "typebox": "*",
     "typescript": "^7",
-    "@types/node": "^22.0.0",
     "vitest": "^3.0.0"
   }
 }
