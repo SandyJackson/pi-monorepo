@@ -35,6 +35,10 @@ interface DelegatedHerdrOptions {
 	statuses?: Map<string, HerdrAgentStatus[]>;
 	/** pane.split result pane ids in call order. */
 	splitPaneIds?: string[];
+	/** 1-based pane.split calls that fail instead of creating a pane. */
+	failingSplitCalls?: number[];
+	/** The discovered tab's pane, when the tab is not created here. */
+	existingPane?: { paneId: string; tabId: string };
 	agentStart?: (request: { paneId: string }) => RpcResponse;
 	tabList?: RpcResponse;
 }
@@ -44,16 +48,24 @@ interface DelegatedHerdrOptions {
  * agent.start echoes the target pane back as the new child pane id.
  */
 function createDelegatedHerdr(options: DelegatedHerdrOptions = {}) {
-	const { statuses = new Map(), splitPaneIds = [], agentStart, tabList } = options;
+	const { statuses = new Map(), splitPaneIds = [], failingSplitCalls, existingPane, agentStart, tabList } = options;
+	const existing = existingPane ?? { paneId: "existing-pane", tabId: "subagent-tab" };
 	let splitCall = 0;
+	let splitIdCall = 0;
 	return createScriptedHerdr((request) => {
 		if (request.method === "tab.list") return tabList ?? { result: { tabs: [{ tab_id: "subagent-tab", label: "subagents" }] } };
-		if (request.method === "pane.list") return { result: { panes: [{ pane_id: "existing-pane", tab_id: "subagent-tab" }] } };
+		if (request.method === "pane.list") return { result: { panes: [{ pane_id: existing.paneId, tab_id: existing.tabId }] } };
 		if (request.method === "tab.create") {
 			return { result: { type: "tab_created", tab: { tab_id: "new-tab" }, root_pane: { pane_id: "root-pane" } } };
 		}
 		if (request.method === "pane.split") {
-			const paneId = splitPaneIds[splitCall++] ?? `split-${splitCall}`;
+			splitCall += 1;
+			if (failingSplitCalls?.includes(splitCall)) {
+				return { error: { code: "split_failed", message: "cannot split" } };
+			}
+			// Failed splits consume no pane id.
+			splitIdCall += 1;
+			const paneId = splitPaneIds[splitIdCall - 1] ?? `split-${splitIdCall}`;
 			return { result: { type: "pane_info", pane: { pane_id: paneId } } };
 		}
 		if (request.method === "agent.list") return { result: { agents: [] } };
@@ -70,20 +82,20 @@ function createDelegatedHerdr(options: DelegatedHerdrOptions = {}) {
 	});
 }
 
-/** Wrap a herdr's rpc to record agent.start target panes. */
-function recordingStartPaneIds(herdr: ReturnType<typeof createScriptedHerdr>): {
-	rpc: typeof herdr.rpcCall;
-	startPaneIds: string[];
-} {
-	const startPaneIds: string[] = [];
-	const originalRpc = herdr.rpcCall;
-	const rpc: typeof originalRpc = (method, params, timeoutMs, signal) => {
-		if (method === "agent.start") {
-			startPaneIds.push((params as { pane_id: string }).pane_id);
-		}
-		return originalRpc(method, params, timeoutMs, signal);
+/** Wrap a herdr's rpc to record a picked value from each matching call. */
+function recordRpc<T>(
+	herdr: ReturnType<typeof createScriptedHerdr>,
+	method: string,
+	pick: (params: Record<string, unknown>) => T,
+	wrapped?: typeof herdr.rpcCall,
+): { rpc: typeof herdr.rpcCall; records: T[] } {
+	const records: T[] = [];
+	const next = wrapped ?? herdr.rpcCall;
+	const rpc: typeof next = (m, params, timeoutMs, signal) => {
+		if (m === method) records.push(pick(params as Record<string, unknown>));
+		return next(m, params, timeoutMs, signal);
 	};
-	return { rpc, startPaneIds };
+	return { rpc, records };
 }
 
 function delegate(
@@ -212,18 +224,13 @@ describe("herdr/delegation — workspace and launch invariants", () => {
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 
-		const splitDirections: Array<{ target: unknown; direction: unknown }> = [];
-		const originalRpc = herdr.rpcCall;
-		const recordingRpc: typeof originalRpc = (method, params, timeoutMs, signal) => {
-			if (method === "pane.split") {
-				const p = params as { target_pane_id?: unknown; direction?: unknown };
-				splitDirections.push({ target: p.target_pane_id, direction: p.direction });
-			}
-			return originalRpc(method, params, timeoutMs, signal);
-		};
+		const { rpc, records: splitDirections } = recordRpc(herdr, "pane.split", (p) => ({
+			target: p.target_pane_id,
+			direction: p.direction,
+		}));
 
 		const tasks = [1, 2, 3].map((n) => taskRecord(n, `Task ${n}`, n % 2 ? "alpha" : "beta"));
-		const delegation = delegate(herdr, tasks, { rpc: recordingRpc });
+		const delegation = delegate(herdr, tasks, { rpc });
 		for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(800);
 
 		const results = await delegation;
@@ -253,7 +260,7 @@ describe("herdr/delegation — workspace and launch invariants", () => {
 			},
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const { rpc, startPaneIds } = recordingStartPaneIds(herdr);
+		const { rpc, records: startPaneIds } = recordRpc(herdr, "agent.start", (p) => p.pane_id as string);
 
 		const tasks = [1, 2, 3].map((n) => taskRecord(n, `Task ${n}`, n % 2 ? "alpha" : "beta"));
 		const delegation = delegate(herdr, tasks, { rpc });
@@ -281,7 +288,7 @@ describe("herdr/delegation — workspace and launch invariants", () => {
 				paneId === "pane-1" ? { result: {} } : { result: { pane_id: paneId } },
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const { rpc, startPaneIds } = recordingStartPaneIds(herdr);
+		const { rpc, records: startPaneIds } = recordRpc(herdr, "agent.start", (p) => p.pane_id as string);
 
 		const tasks = [taskRecord(1, "First"), taskRecord(2, "Second", "beta")];
 		const delegation = delegate(herdr, tasks, { rpc });
@@ -295,17 +302,11 @@ describe("herdr/delegation — workspace and launch invariants", () => {
 	it("matches plain and numbered subagents tab labels", async () => {
 		// Herdr 0.7 displays numbered tab labels as, for example, "[4] subagents";
 		// such a tab must be reused instead of creating a duplicate.
-		const statuses = new Map<string, HerdrAgentStatus[]>([
-			["pane-1", ["working", "idle", "idle"]],
-		]);
-		const herdr = createScriptedHerdr((request) => {
-			if (request.method === "tab.list") return { result: { tabs: [{ tab_id: "numbered-tab", label: "[4] subagents" }] } };
-			if (request.method === "pane.list") return { result: { panes: [{ pane_id: "numbered-pane", tab_id: "numbered-tab" }] } };
-			if (request.method === "pane.split") return { result: { type: "pane_info", pane: { pane_id: "pane-1" } } };
-			if (request.method === "agent.list") return { result: { agents: [] } };
-			if (request.method === "agent.start") return { result: { pane_id: "pane-1" } };
-			if (request.method === "agent.get") return { result: { agent: { agent_status: statuses.get("pane-1")?.shift() ?? "working" } } };
-			return { result: {} };
+		const herdr = createDelegatedHerdr({
+			statuses: new Map<string, HerdrAgentStatus[]>([["pane-1", ["working", "idle", "idle"]]]),
+			tabList: { result: { tabs: [{ tab_id: "numbered-tab", label: "[4] subagents" }] } },
+			existingPane: { paneId: "numbered-pane", tabId: "numbered-tab" },
+			splitPaneIds: ["pane-1"],
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 
@@ -321,28 +322,14 @@ describe("herdr/delegation — workspace and launch invariants", () => {
 	});
 
 	it("continues with siblings after a pane.split failure", async () => {
-		const statuses = new Map<string, HerdrAgentStatus[]>([
-			["pane-2", ["working", "idle", "idle"]],
-			["pane-3", ["working", "idle", "idle"]],
-		]);
-		let splitCalls = 0;
-		const herdr = createScriptedHerdr((request) => {
-			if (request.method === "tab.list") return { result: { tabs: [{ tab_id: "subagent-tab", label: "subagents" }] } };
-			if (request.method === "pane.list") return { result: { panes: [{ pane_id: "existing-pane", tab_id: "subagent-tab" }] } };
-			if (request.method === "pane.split") {
-				splitCalls += 1;
-				// The first split (task 1) fails; later siblings still launch.
-				if (splitCalls === 1) return { error: { code: "split_failed", message: "cannot split" } };
-				const paneId = splitCalls === 2 ? "pane-2" : "pane-3";
-				return { result: { type: "pane_info", pane: { pane_id: paneId } } };
-			}
-			if (request.method === "agent.list") return { result: { agents: [] } };
-			if (request.method === "agent.start") return { result: { pane_id: (request.params as { pane_id: string }).pane_id } };
-			if (request.method === "agent.get") {
-				const target = (request.params as { target: string }).target;
-				return { result: { agent: { agent_status: statuses.get(target)?.shift() ?? "working" } } };
-			}
-			return { result: {} };
+		const herdr = createDelegatedHerdr({
+			statuses: new Map<string, HerdrAgentStatus[]>([
+				["pane-2", ["working", "idle", "idle"]],
+				["pane-3", ["working", "idle", "idle"]],
+			]),
+			// The first split (task 1) fails; later siblings still launch.
+			splitPaneIds: ["pane-2", "pane-3"],
+			failingSplitCalls: [1],
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 
@@ -360,11 +347,10 @@ describe("herdr/delegation — workspace and launch invariants", () => {
 	});
 
 	it("never reuses a pane whose cwd differs from the next task", async () => {
-		const statuses = new Map<string, HerdrAgentStatus[]>([
-			["pane-2", ["working", "idle", "idle"]],
-		]);
 		const herdr = createDelegatedHerdr({
-			statuses,
+			statuses: new Map<string, HerdrAgentStatus[]>([
+				["pane-2", ["working", "idle", "idle"]],
+			]),
 			splitPaneIds: ["pane-1", "pane-2"],
 			agentStart: ({ paneId }) =>
 				paneId === "pane-1"
@@ -372,27 +358,20 @@ describe("herdr/delegation — workspace and launch invariants", () => {
 					: { result: { pane_id: paneId } },
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const { rpc, startPaneIds } = recordingStartPaneIds(herdr);
-
-		const splitCwds: Array<string | undefined> = [];
-		const recordingRpc: typeof rpc = (method, params, timeoutMs, signal) => {
-			if (method === "pane.split") {
-				splitCwds.push((params as { cwd?: string }).cwd);
-			}
-			return rpc(method, params, timeoutMs, signal);
-		};
+		const starts = recordRpc(herdr, "agent.start", (p) => p.pane_id as string);
+		const splits = recordRpc(herdr, "pane.split", (p) => p.cwd as string | undefined, starts.rpc);
 
 		// Task 1 fails; task 2 has a different cwd, so it must split its own pane
 		// instead of reusing task 1's (which carries task 1's directory).
 		const task2 = { ...taskRecord(2, "Second", "beta"), cwd: "/tmp/other-project" };
 		const tasks = [taskRecord(1, "First"), task2];
-		const delegation = delegate(herdr, tasks, { rpc: recordingRpc });
+		const delegation = delegate(herdr, tasks, { rpc: splits.rpc });
 		for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(800);
 
 		const results = await delegation;
 		expect(results.map((result) => result.outcome.status)).toEqual(["launch_failed", "completed"]);
-		expect(startPaneIds).toEqual(["pane-1", "pane-2"]);
-		expect(splitCwds).toEqual(["/tmp/project", "/tmp/other-project"]);
+		expect(starts.records).toEqual(["pane-1", "pane-2"]);
+		expect(splits.records).toEqual(["/tmp/project", "/tmp/other-project"]);
 	});
 
 	it("throws when shared workspace provisioning fails, before any launch", async () => {

@@ -3,6 +3,7 @@ import { createHerdrRpc } from "./rpc.ts";
 import {
 	launchDelegatedTask,
 	sleep,
+	DEFAULT_RPC_TIMEOUT,
 	DEFAULT_TURN_TIMEOUT_MS,
 	type DelegatedTask,
 	type DelegatedTaskOutcome,
@@ -44,7 +45,6 @@ export interface HerdrDelegationOptions extends HerdrDelegationContext {
 export const MAX_DELEGATED_TASKS = 8;
 
 const INTER_LAUNCH_PAUSE_MS = 250;
-const DEFAULT_RPC_TIMEOUT = 5000;
 
 // ---------------------------------------------------------------------------
 // Environment — the only place that validates the Herdr runtime environment
@@ -59,11 +59,11 @@ const DEFAULT_RPC_TIMEOUT = 5000;
 export function herdrDelegationEnvironment(
 	env: NodeJS.ProcessEnv = process.env,
 ): HerdrDelegationContext {
-	if (env.HERDR_ENV !== "1" || !env.HERDR_SOCKET_PATH || !env.HERDR_PANE_ID) {
+	if (env.HERDR_ENV !== "1" || !env.HERDR_SOCKET_PATH) {
 		throw new Error(
 			[
 				"herdr-subagent requires this pi to run inside Herdr.",
-				"HERDR_ENV, HERDR_SOCKET_PATH, and HERDR_PANE_ID must be set.",
+				"HERDR_ENV and HERDR_SOCKET_PATH must be set.",
 				"Launch pi from a Herdr-managed pane, then delegate.",
 			].join(" "),
 		);
@@ -143,7 +143,7 @@ async function findOrCreateSubagentsTab(
 	return { rootPaneId };
 }
 
-const workspaceLocks = new Map<string, Promise<undefined>>();
+const workspaceLocks = new Map<string, Promise<unknown>>();
 
 /**
  * Serialize shared tab provisioning and child pane placement across this Pi
@@ -164,15 +164,10 @@ function withWorkspaceLock<T>(
 		if (signal?.aborted) return undefined;
 		return action();
 	});
-	const queueTail = result.then(
-		() => undefined,
-		() => undefined,
-	);
-	workspaceLocks.set(workspaceId, queueTail);
-	void queueTail.finally(() => {
-		if (workspaceLocks.get(workspaceId) === queueTail) {
-			workspaceLocks.delete(workspaceId);
-		}
+	const tail = result.catch(() => { });
+	workspaceLocks.set(workspaceId, tail);
+	void tail.finally(() => {
+		if (workspaceLocks.get(workspaceId) === tail) workspaceLocks.delete(workspaceId);
 	});
 
 	return result;
@@ -302,21 +297,16 @@ export async function executeHerdrDelegation(
 
 			const launch = await launchDelegatedTask({ rpc, targetPaneId, task, signal });
 			if (launch.status === "launched") {
-				startObservation(index, task, launch.session, launch.observeTurn);
-				// The pane now holds a child; later children need a new split.
+				startObservation(index, task.taskNumber, launch.session, launch.observeTurn);
+			} else {
+				outcomes[index] = launch;
+			}
+			// A launched (or possibly launched) task occupies the pane; only a
+			// confirmed failure leaves it free for a same-cwd sibling to reuse.
+			if (launch.status !== "launch_failed") {
 				targetPaneId = undefined;
 				targetPaneCwd = undefined;
 				hasPlacedChild = true;
-			} else {
-				outcomes[index] = launch;
-				if (launch.status === "launch_indeterminate") {
-					// The target may now contain a child; never try it again.
-					targetPaneId = undefined;
-					targetPaneCwd = undefined;
-					hasPlacedChild = true;
-				}
-				// A confirmed launch failure left the target pane free; the next
-				// sibling with a matching cwd may reuse it.
 			}
 
 			if (index < tasks.length - 1) await sleep(INTER_LAUNCH_PAUSE_MS, signal);
@@ -342,14 +332,14 @@ export async function executeHerdrDelegation(
 
 	function startObservation(
 		index: number,
-		task: DelegatedTaskRecord,
+		taskNumber: number,
 		session: VisibleSubagentSessionRef,
 		observeTurn: (observeOptions?: ObserveTurnOptions) => Promise<DelegatedTaskOutcome>,
 	): void {
 		// Attach rejection handling before the next launch: observation is
 		// expected to resolve with an outcome, but a defect must not reject the
 		// whole delegation.
-		const promise = observeTurn({ timeoutMs, signal, onProgress: (line) => onProgress?.({ taskNumber: task.taskNumber, line }) })
+		const promise = observeTurn({ timeoutMs, signal, onProgress: (line) => onProgress?.({ taskNumber, line }) })
 			.then((outcome) => {
 				outcomes[index] = outcome;
 			})

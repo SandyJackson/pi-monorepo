@@ -55,10 +55,10 @@ export interface ObserveTurnOptions {
  */
 export type DelegatedTaskLaunch =
 	| {
-			status: "launched";
-			session: VisibleSubagentSessionRef;
-			observeTurn(options?: ObserveTurnOptions): Promise<DelegatedTaskOutcome>;
-	  }
+		status: "launched";
+		session: VisibleSubagentSessionRef;
+		observeTurn(options?: ObserveTurnOptions): Promise<DelegatedTaskOutcome>;
+	}
 	| Extract<DelegatedTaskOutcome, { status: "launch_failed" | "launch_indeterminate" }>
 	| Extract<DelegatedTaskOutcome, { status: "aborted"; stage: "before_launch" }>;
 
@@ -81,7 +81,7 @@ const MAX_NAME_ALLOCATION_ATTEMPTS = 100;
 const PANE_READINESS_RETRY_ATTEMPTS = 10;
 const PANE_READINESS_RETRY_DELAY_MS = 250;
 const PROMPT_CLEANUP_FALLBACK_MS = 60_000;
-const DEFAULT_RPC_TIMEOUT = 5000;
+export const DEFAULT_RPC_TIMEOUT = 5000;
 const START_RPC_TIMEOUT = 15_000;
 
 /** Default per-task timeout, measured from confirmed launch. */
@@ -146,8 +146,8 @@ interface HerdrAgentInfo {
 	agent_session?: { value?: string; path?: string };
 }
 
-class ConfirmedLaunchFailure extends Error {}
-class IndeterminateLaunchFailure extends Error {}
+class ConfirmedLaunchFailure extends Error { }
+class IndeterminateLaunchFailure extends Error { }
 
 
 // ---------------------------------------------------------------------------
@@ -165,9 +165,9 @@ function createPromptLease(body: string): PromptLease {
 	if (!body) {
 		return {
 			args: [] as string[],
-			confirmConsumed: () => {},
-			releaseNow: () => {},
-			releaseWhenConsumedOrExpired: () => {},
+			confirmConsumed: () => { },
+			releaseNow: () => { },
+			releaseWhenConsumedOrExpired: () => { },
 		};
 	}
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
@@ -181,7 +181,7 @@ function createPromptLease(body: string): PromptLease {
 		if (cleaned) return;
 		cleaned = true;
 		clearTimeout(timer);
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+		try { fs.rmSync(dir, { recursive: true, force: true }); } catch { }
 	};
 
 	try {
@@ -357,17 +357,6 @@ function pollDelay(deadline: number, signal?: AbortSignal): Promise<void> {
 }
 
 async function observeTurnUntilSettled(options: ObserveTurnUntilSettledOptions): Promise<DelegatedTaskOutcome> {
-	try {
-		return await observeTurnLoop(options);
-	} finally {
-		// The observation ended — possibly without ever observing a session
-		// path. Consumed prompts are already released; the rest expire via the
-		// conservative fallback timer.
-		options.promptLease.releaseWhenConsumedOrExpired();
-	}
-}
-
-async function observeTurnLoop(options: ObserveTurnUntilSettledOptions): Promise<DelegatedTaskOutcome> {
 	const { rpc, session, deadline, signal, onProgress, promptLease } = options;
 	const paneId = session.paneId;
 
@@ -376,59 +365,66 @@ async function observeTurnLoop(options: ObserveTurnUntilSettledOptions): Promise
 	let observedSession = session;
 	let answer: SessionAnswerRef | null = null;
 
-	for (;;) {
-		if (signal?.aborted) return { status: "aborted", stage: "observing", session: observedSession };
+	try {
+		for (;;) {
+			if (signal?.aborted) return { status: "aborted", stage: "observing", session: observedSession };
 
-		let status: string | null = null;
-		let sessionPath: string | null = null;
+			let status: string | null = null;
+			let sessionPath: string | null = null;
 
-		try {
-			const info = (await rpc("agent.get", { target: paneId }, DEFAULT_RPC_TIMEOUT, signal)) as unknown;
-			const observed = readAgentObservation(info);
-			if ("invalid" in observed) return { status: "observation_failed", session: observedSession, error: observed.invalid };
-			status = observed.status;
-			sessionPath = observed.sessionPath;
-		} catch (err) {
-			if (isSessionClosedError(err)) return { status: "session_closed", session: observedSession };
-			if (err instanceof HerdrRpcResponseError) return { status: "observation_failed", session: observedSession, error: err.message };
-			const errorMessage = String(err instanceof Error ? err.message : err);
-			if (errorMessage.includes("aborted") && signal?.aborted) return { status: "aborted", stage: "observing", session: observedSession };
-			if (Date.now() >= deadline) {
-				// fall through to timeout check below
-			} else {
-				onProgress?.(`watching:unknown — pane ${paneId}`);
-				if (Date.now() >= deadline) return { status: "timed_out", session: observedSession };
-				await pollDelay(deadline, signal);
-				continue;
-			}
-		}
-
-		if (sessionPath) {
-			promptLease.confirmConsumed();
 			try {
-				const sessionSnapshot = inspectSession(sessionPath);
-				if (sessionSnapshot.pi) observedSession = { paneId, label: session.label, pi: { id: sessionSnapshot.pi.id, path: sessionSnapshot.pi.path, cwd: sessionSnapshot.pi.cwd } };
-				if (sessionSnapshot.answer) answer = sessionSnapshot.answer;
-			} catch {}
+				const info = (await rpc("agent.get", { target: paneId }, DEFAULT_RPC_TIMEOUT, signal)) as unknown;
+				const observed = readAgentObservation(info);
+				if ("invalid" in observed) return { status: "observation_failed", session: observedSession, error: observed.invalid };
+				status = observed.status;
+				sessionPath = observed.sessionPath;
+			} catch (err) {
+				if (isSessionClosedError(err)) return { status: "session_closed", session: observedSession };
+				if (err instanceof HerdrRpcResponseError) return { status: "observation_failed", session: observedSession, error: err.message };
+				const errorMessage = String(err instanceof Error ? err.message : err);
+				if (errorMessage.includes("aborted") && signal?.aborted) return { status: "aborted", stage: "observing", session: observedSession };
+				if (Date.now() >= deadline) {
+					// fall through to timeout check below
+				} else {
+					onProgress?.(`watching:unknown — pane ${paneId}`);
+					if (Date.now() >= deadline) return { status: "timed_out", session: observedSession };
+					await pollDelay(deadline, signal);
+					continue;
+				}
+			}
+
+			if (sessionPath) {
+				promptLease.confirmConsumed();
+				try {
+					const sessionSnapshot = inspectSession(sessionPath);
+					if (sessionSnapshot.pi) observedSession = { paneId, label: session.label, pi: { id: sessionSnapshot.pi.id, path: sessionSnapshot.pi.path, cwd: sessionSnapshot.pi.cwd } };
+					if (sessionSnapshot.answer) answer = sessionSnapshot.answer;
+				} catch {}
+			}
+
+			if (status === "working" || status === "blocked") {
+				hasObservedActivity = true;
+				consecutiveSettledPolls = 0;
+			} else if (hasObservedActivity && status !== null && (status === "idle" || status === "done")) {
+				consecutiveSettledPolls += 1;
+			} else {
+				consecutiveSettledPolls = 0;
+			}
+
+			onProgress?.(`watching:${status ?? "unknown"} — pane ${paneId}${answer ? " (final answer captured)" : ""}`);
+
+			if (hasObservedActivity && consecutiveSettledPolls >= STABLE_SETTLED_POLLS) {
+				return { status: "completed", session: observedSession, answer };
+			}
+			if (Date.now() >= deadline) return { status: "timed_out", session: observedSession };
+
+			await pollDelay(deadline, signal);
 		}
-
-		if (status === "working" || status === "blocked") {
-			hasObservedActivity = true;
-			consecutiveSettledPolls = 0;
-		} else if (hasObservedActivity && status !== null && (status === "idle" || status === "done")) {
-			consecutiveSettledPolls += 1;
-		} else {
-			consecutiveSettledPolls = 0;
-		}
-
-		onProgress?.(`watching:${status ?? "unknown"} — pane ${paneId}${answer ? " (final answer captured)" : ""}`);
-
-		if (hasObservedActivity && consecutiveSettledPolls >= STABLE_SETTLED_POLLS) {
-			return { status: "completed", session: observedSession, answer };
-		}
-		if (Date.now() >= deadline) return { status: "timed_out", session: observedSession };
-
-		await pollDelay(deadline, signal);
+	} finally {
+		// The observation ended — possibly without ever observing a session
+		// path. Consumed prompts are already released; the rest expire via the
+		// conservative fallback timer.
+		promptLease.releaseWhenConsumedOrExpired();
 	}
 }
 
@@ -470,15 +466,13 @@ export async function launchDelegatedTask(options: LaunchDelegatedTaskOptions): 
 			promptLease.releaseWhenConsumedOrExpired();
 			return { status: "launch_indeterminate", error: err.message, possiblePaneId: targetPaneId };
 		}
+		promptLease.releaseNow();
 		if (err instanceof ConfirmedLaunchFailure) {
-			promptLease.releaseNow();
 			return { status: "launch_failed", error: err.message };
 		}
 		if (signal?.aborted) {
-			promptLease.releaseNow();
 			return { status: "aborted", stage: "before_launch" };
 		}
-		promptLease.releaseNow();
 		return { status: "launch_failed", error: err instanceof Error ? err.message : String(err) };
 	}
 
