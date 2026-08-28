@@ -1,18 +1,37 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createScriptedHerdr,
 	standardLaunchResponse,
 } from "../herdr-test-support.ts";
-import { executeDelegatedTask } from "./session.ts";
+import {
+	launchDelegatedTask,
+	type DelegatedTaskOutcome,
+	type LaunchDelegatedTaskOptions,
+	type ObserveTurnOptions,
+} from "./session.ts";
 
 const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-session-tests-"));
+
+/** Prompt directories discovered by this test, removed at teardown. */
+const trackedPromptDirs: string[] = [];
+
+function trackPromptDir(dir: string): string {
+	trackedPromptDirs.push(dir);
+	return dir;
+}
 
 afterEach(() => {
 	vi.useRealTimers();
 	vi.restoreAllMocks();
+	// Best-effort removal of prompt directories this test created but whose
+	// fallback cleanup timers were still pending when fake timers were dropped.
+	// Only tracked directories are removed: other test files share os.tmpdir().
+	for (const dir of trackedPromptDirs.splice(0)) {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 function writeSessionFile(name: string, lines: string): string {
@@ -23,6 +42,16 @@ function writeSessionFile(name: string, lines: string): string {
 
 function jsonl(...objs: unknown[]): string {
 	return objs.map((o) => JSON.stringify(o)).join("\n") + "\n";
+}
+
+/** Launch a task and, when confirmed, observe its initial turn to settlement. */
+async function launchAndObserve(
+	options: LaunchDelegatedTaskOptions,
+	observeOptions: ObserveTurnOptions = {},
+): Promise<DelegatedTaskOutcome> {
+	const launch = await launchDelegatedTask(options);
+	if (launch.status !== "launched") return launch;
+	return launch.observeTurn({ signal: options.signal, ...observeOptions });
 }
 
 describe("herdr/session — launch invariants", () => {
@@ -42,18 +71,17 @@ describe("herdr/session — launch invariants", () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 		const controller = new AbortController();
 		const taskWithControls = "hello\x00world\x1f\x7f!";
-		const session = executeDelegatedTask({
+		const session = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
 			task: {
-				agentName: "alpha",
-				task: taskWithControls,
+				agent: "alpha",
+				instruction: taskWithControls,
 				cwd: "/tmp/project",
 				config: { name: "alpha", systemPromptBody: "prompt body", model: "openai/gpt-5", tools: ["read", "write"] },
 			},
-			timeoutMs: 2000,
 			signal: controller.signal,
-		});
+		}, { timeoutMs: 2000 });
 
 		await vi.advanceTimersByTimeAsync(0);
 		expect(capturedArgs).toMatchObject({
@@ -76,6 +104,8 @@ describe("herdr/session — launch invariants", () => {
 
 		controller.abort();
 		await session;
+		// Fire the pending prompt-fallback timer so teardown leaves nothing behind.
+		await vi.advanceTimersByTimeAsync(60_000);
 	});
 
 	it("caps label at 32 and retries name collisions up to 100", async () => {
@@ -98,13 +128,12 @@ describe("herdr/session — launch invariants", () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 		const controller = new AbortController();
 		const veryLong = "a".repeat(100);
-		const session = executeDelegatedTask({
+		const session = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: veryLong, cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
-			timeoutMs: 500,
+			task: { agent: "alpha", instruction: veryLong, cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 			signal: controller.signal,
-		});
+		}, { timeoutMs: 500 });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(startCalls).toBe(2);
 		controller.abort();
@@ -125,12 +154,11 @@ describe("herdr/session — launch invariants", () => {
 		});
 
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const session = executeDelegatedTask({
+		const session = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
-			timeoutMs: 1000,
-		});
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+		}, { timeoutMs: 1000 });
 		await vi.advanceTimersByTimeAsync(0);
 		await vi.advanceTimersByTimeAsync(300);
 		await vi.advanceTimersByTimeAsync(300);
@@ -142,42 +170,57 @@ describe("herdr/session — launch invariants", () => {
 
 	it("classifies confirmed launch failure vs indeterminate (no pane_id, transport loss)", async () => {
 		const confirmed = createScriptedHerdr((req) => standardLaunchResponse(req) ?? { error: { code: "launch_rejected", message: "denied" } });
-		const r1 = await executeDelegatedTask({
+		const r1 = await launchDelegatedTask({
 			rpc: confirmed.rpcCall,
 			targetPaneId: "target-pane",
-			
-			
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 		});
 		expect(r1.status).toBe("launch_failed");
 
 		const indeterminate = createScriptedHerdr((req) => standardLaunchResponse(req) ?? { result: {} });
-		const r2 = await executeDelegatedTask({
+		const r2 = await launchDelegatedTask({
 			rpc: indeterminate.rpcCall,
 			targetPaneId: "target-pane",
-			
-			
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 		});
 		expect(r2.status).toBe("launch_indeterminate");
 
 		const transport = createScriptedHerdr((req) => standardLaunchResponse(req) ?? { closeWithoutResponse: true });
-		const r3 = await executeDelegatedTask({
+		const r3 = await launchDelegatedTask({
 			rpc: transport.rpcCall,
 			targetPaneId: "target-pane",
-			
-			
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 		});
 		expect(r3.status).toBe("launch_indeterminate");
 	});
 
-	it("aborts before launch when signal already aborted", async () => {
-		const herdr = createScriptedHerdr((req) => standardLaunchResponse(req) ?? { result: { pane_id: "p" } });
-		const result = await executeDelegatedTask({
+	it("reports a confirmed session with observeTurn on successful launch", async () => {
+		const herdr = createScriptedHerdr((req) => {
+			const std = standardLaunchResponse(req);
+			if (std) return std;
+			if (req.method === "agent.start") return { result: { pane_id: "p-live" } };
+			return { result: { agent: { agent_status: "working" } } };
+		});
+		const controller = new AbortController();
+		const launch = await launchDelegatedTask({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			signal: controller.signal,
+		});
+		expect(launch.status).toBe("launched");
+		if (launch.status !== "launched") return;
+		expect(launch.session).toMatchObject({ paneId: "p-live" });
+		controller.abort();
+		await expect(launch.observeTurn({ signal: controller.signal })).resolves.toMatchObject({ status: "aborted", stage: "observing" });
+	});
+
+	it("aborts before launch when signal already aborted", async () => {
+		const herdr = createScriptedHerdr((req) => standardLaunchResponse(req) ?? { result: { pane_id: "p" } });
+		const result = await launchDelegatedTask({
+			rpc: herdr.rpcCall,
+			targetPaneId: "target-pane",
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body" } },
 			signal: AbortSignal.abort(),
 		});
 		expect(result).toEqual({ status: "aborted", stage: "before_launch" });
@@ -197,21 +240,57 @@ describe("herdr/session — prompt lease", () => {
 	it("empty body creates no file", async () => {
 		const before = promptDirs();
 		const herdr = createScriptedHerdr((req) => standardLaunchResponse(req) ?? { error: { code: "launch_rejected", message: "x" } });
-		await executeDelegatedTask({
+		await launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 		});
 		expect(promptDirs()).toEqual(before);
+	});
+
+	it("keeps the prompt until observation ends, then expires it via the fallback", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const before = promptDirs();
+		// The child never publishes a session path and keeps working.
+		const herdr = createScriptedHerdr((req) => {
+			const std = standardLaunchResponse(req);
+			if (std) return std;
+			if (req.method === "agent.start") return { result: { pane_id: "p-slow" } };
+			return { result: { agent: { agent_status: "working" } } };
+		});
+		const controller = new AbortController();
+		const session = launchAndObserve({
+			rpc: herdr.rpcCall,
+			targetPaneId: "target-pane",
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body-slow" } },
+			signal: controller.signal,
+		});
+		const dir = [...promptDirs()].find((e) => !before.has(e));
+		expect(dir).toBeDefined();
+		trackPromptDir(dir!);
+
+		// Well past 60 seconds of active observation, the prompt must remain:
+		// the fallback only applies after observation ends.
+		await vi.advanceTimersByTimeAsync(61_000);
+		expect(fs.existsSync(dir!)).toBe(true);
+
+		// Ending the observation requests cleanup; the fallback timer starts now.
+		controller.abort();
+		const result = await session;
+		expect(result.status).toBe("aborted");
+		expect(fs.existsSync(dir!)).toBe(true);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(fs.existsSync(dir!)).toBe(false);
+		vi.useRealTimers();
 	});
 
 	it("confirmed failure removes prompt immediately", async () => {
 		const before = promptDirs();
 		const herdr = createScriptedHerdr((req) => standardLaunchResponse(req) ?? { error: { code: "launch_rejected", message: "denied" } });
-		await executeDelegatedTask({
+		await launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body" } },
 		});
 		expect(promptDirs()).toEqual(before);
 	});
@@ -222,19 +301,18 @@ describe("herdr/session — prompt lease", () => {
 
 		// Indeterminate
 		const ind = createScriptedHerdr((req) => standardLaunchResponse(req) ?? { result: {} });
-		const p1 = executeDelegatedTask({
+		const p1 = launchAndObserve({
 			rpc: ind.rpcCall,
 			targetPaneId: "target-pane",
-			
-			
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body-ind" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body-ind" } },
 		});
 		await p1;
-		const dirInd = [...promptDirs()].find((e) => !before.has(e));
-		expect(dirInd).toBeDefined();
-		expect(fs.existsSync(dirInd!)).toBe(true);
+		const dir = [...promptDirs()].find((e) => !before.has(e));
+		expect(dir).toBeDefined();
+		trackPromptDir(dir!);
+		expect(fs.existsSync(dir!)).toBe(true);
 		await vi.advanceTimersByTimeAsync(60_000);
-		expect(fs.existsSync(dirInd!)).toBe(false);
+		expect(fs.existsSync(dir!)).toBe(false);
 
 		// Confirmed with session path → prompt removed on observation (session path confirms consumption)
 		const sessionPath = writeSessionFile(
@@ -251,16 +329,14 @@ describe("herdr/session — prompt lease", () => {
 			return { result: { agent: { agent_status: "idle", agent_session: { path: sessionPath } } } };
 		});
 		const before2 = promptDirs();
-		const session = executeDelegatedTask({
+		const session = launchAndObserve({
 			rpc: confirmed.rpcCall,
 			targetPaneId: "target-pane",
-			
-			
-			task: { agentName: "alpha", task: "t2", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body-conf" } },
-			timeoutMs: 5000,
-		});
+			task: { agent: "alpha", instruction: "t2", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body-conf" } },
+		}, { timeoutMs: 5000 });
 		const dirConf = [...promptDirs()].find((e) => !before2.has(e));
 		expect(dirConf).toBeDefined();
+		trackPromptDir(dirConf!);
 		await vi.advanceTimersByTimeAsync(0);
 		await vi.advanceTimersByTimeAsync(800);
 		await vi.advanceTimersByTimeAsync(800);
@@ -290,12 +366,11 @@ describe("herdr/session — observation", () => {
 			return { result: { agent: { agent_status: s, agent_session: { path: sessionPath } } } };
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const run = executeDelegatedTask({
+		const run = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
-			timeoutMs: 5000,
-		});
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+		}, { timeoutMs: 5000 });
 		await vi.advanceTimersByTimeAsync(0); // idle (startup) - not settled
 		await vi.advanceTimersByTimeAsync(800);
 		// idle
@@ -329,12 +404,11 @@ describe("herdr/session — observation", () => {
 			return { result: { agent: { agent_status: status, agent_session: { path: sessionPath } } } };
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const run = executeDelegatedTask({
+		const run = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
-			timeoutMs: 1600, // 2 polls = boundary
-		});
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+		}, { timeoutMs: 1600 }); // 2 polls = boundary
 		await vi.advanceTimersByTimeAsync(0); // working
 		await vi.advanceTimersByTimeAsync(800);
 		// idle
@@ -352,14 +426,11 @@ describe("herdr/session — observation", () => {
 			if (req.method === "agent.start") return { result: { pane_id: "p-closed" } };
 			return { error: { code: "not_found", message: "no such pane" } };
 		});
-		const rClosed = await executeDelegatedTask({
+		const rClosed = await launchAndObserve({
 			rpc: closed.rpcCall,
 			targetPaneId: "target-pane",
-			
-			
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
-			timeoutMs: 2000,
-		});
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			}, { timeoutMs: 2000 });
 		expect(rClosed).toMatchObject({ status: "session_closed" });
 
 		const transient = createScriptedHerdr((req) => {
@@ -369,14 +440,11 @@ describe("herdr/session — observation", () => {
 			return { closeWithoutResponse: true };
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const runTrans = executeDelegatedTask({
+		const runTrans = launchAndObserve({
 			rpc: transient.rpcCall,
 			targetPaneId: "target-pane",
-			
-			
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
-			timeoutMs: 1000,
-		});
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+		}, { timeoutMs: 1000 });
 		await vi.advanceTimersByTimeAsync(0);
 		// It should retry and then timeout, not observation_failed
 		await vi.advanceTimersByTimeAsync(1800);
@@ -390,10 +458,10 @@ describe("herdr/session — observation", () => {
 			if (req.method === "agent.start") return { result: { pane_id: "p-exp" } };
 			return { error: { code: "internal_error", message: "boom" } };
 		});
-		const rExp = await executeDelegatedTask({
+		const rExp = await launchAndObserve({
 			rpc: explicit.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 		});
 		expect(rExp).toMatchObject({ status: "observation_failed" });
 	});
@@ -406,12 +474,11 @@ describe("herdr/session — observation", () => {
 			return { result: { agent: { agent_status: "working", agent_session: {} } } };
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const run = executeDelegatedTask({
+		const run = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
-			timeoutMs: 800,
-		});
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+		}, { timeoutMs: 800 });
 		await vi.advanceTimersByTimeAsync(0);
 		await vi.advanceTimersByTimeAsync(1000);
 		const result = await run;
@@ -430,10 +497,10 @@ describe("herdr/session — observation", () => {
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 		const ctrl = new AbortController();
-		const run = executeDelegatedTask({
+		const run = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 			signal: ctrl.signal,
 		});
 		await vi.advanceTimersByTimeAsync(0);
@@ -453,12 +520,11 @@ describe("herdr/session — observation", () => {
 			return { result: { agent: { agent_status: "working", agent_session: { path: sessionPath } } } };
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const run = executeDelegatedTask({
+		const run = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
-			timeoutMs: 800,
-		});
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+		}, { timeoutMs: 800 });
 		await vi.advanceTimersByTimeAsync(0);
 		await vi.advanceTimersByTimeAsync(800);
 		const result = await run;
@@ -483,12 +549,11 @@ describe("herdr/session — observation", () => {
 			return { result: { agent: { agent_status: "idle", agent_session: { path: fullPath } } } };
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const run = executeDelegatedTask({
+		const run = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
-			timeoutMs: 5000,
-		});
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+		}, { timeoutMs: 5000 });
 		await vi.advanceTimersByTimeAsync(0);
 		await vi.advanceTimersByTimeAsync(800);
 		await vi.advanceTimersByTimeAsync(800);
@@ -507,12 +572,11 @@ describe("herdr/session — observation", () => {
 			if (req.method === "agent.start") return { result: { pane_id: "p-clean" } };
 			return { result: { agent: { agent_status: "working", agent_session: {} } } };
 		});
-		const run = executeDelegatedTask({
+		const run = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body-clean" } },
-			timeoutMs: 800,
-		});
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body-clean" } },
+		}, { timeoutMs: 800 });
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 		await vi.advanceTimersByTimeAsync(0);
 		await vi.advanceTimersByTimeAsync(800);
@@ -530,10 +594,10 @@ describe("herdr/session — observation", () => {
 			if (req.method === "agent.start") return { error: { code: "agent_name_taken", message: "taken" } };
 			return { result: {} };
 		});
-		const result = await executeDelegatedTask({
+		const result = await launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 		});
 		expect(result.status).toBe("launch_failed");
 	});
@@ -546,10 +610,10 @@ describe("herdr/session — observation", () => {
 			return { result: {} };
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-		const run = executeDelegatedTask({
+		const run = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 		});
 		const promise = run;
 		for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(250);
@@ -567,10 +631,10 @@ describe("herdr/session — observation", () => {
 		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 		const ctrl = new AbortController();
-		const run = executeDelegatedTask({
+		const run = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 			signal: ctrl.signal,
 		});
 		await vi.advanceTimersByTimeAsync(0);
@@ -590,10 +654,10 @@ describe("herdr/session — observation", () => {
 			return { result: {} };
 		});
 		const ctrl = new AbortController();
-		const run = executeDelegatedTask({
+		const run = launchAndObserve({
 			rpc: herdr.rpcCall,
 			targetPaneId: "target-pane",
-			task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body" } },
+			task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "body" } },
 			signal: ctrl.signal,
 		});
 		await new Promise<void>((r) => setTimeout(r, 0));
@@ -611,10 +675,10 @@ describe("herdr/session — observation", () => {
 				if (req.method === "agent.start") return { result: { pane_id: "p-mal" } };
 				return { result: malformed as unknown as Record<string, unknown> };
 			});
-			const result = await executeDelegatedTask({
+			const result = await launchAndObserve({
 				rpc: herdr.rpcCall,
 				targetPaneId: "target-pane",
-				task: { agentName: "alpha", task: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
+				task: { agent: "alpha", instruction: "t", cwd: "/tmp", config: { name: "alpha", systemPromptBody: "" } },
 			});
 			expect(result.status).toBe("observation_failed");
 		}
