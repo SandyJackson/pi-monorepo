@@ -31,14 +31,17 @@ const EXPECTED_SKILLS = [
   "handoff",
   "implement",
   "improve-codebase-architecture",
+  "ponytail-review",
   "prototype",
   "research",
   "resolving-merge-conflicts",
   "setup-matt-pocock-skills",
+  "shrink-images",
   "tdd",
   "to-spec",
   "to-tickets",
   "triage",
+  "unslop",
   "wayfinder",
 ];
 
