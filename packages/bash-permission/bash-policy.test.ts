@@ -1,14 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  parseConfig,
-  normalizePolicy,
-  mergeRules,
-  matchPattern,
-  evaluateCommand,
-  resolveAgentIdentity,
-  evaluate,
   type BashConfig,
   type BashRule,
+  evaluate,
+  evaluateCommand,
+  matchPattern,
+  mergeRules,
+  normalizePolicy,
+  parseConfig,
+  resolveAgentIdentity,
 } from "./lib/bash-policy.js";
 
 describe("bash-policy", () => {
@@ -132,7 +132,7 @@ describe("bash-policy", () => {
     });
 
     it("returns null for malformed tag", () => {
-      expect(resolveAgentIdentity('<active_agent name=foo/>')).toBeNull();
+      expect(resolveAgentIdentity("<active_agent name=foo/>")).toBeNull();
     });
   });
 

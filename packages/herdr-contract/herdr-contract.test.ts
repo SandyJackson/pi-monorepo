@@ -1,9 +1,5 @@
-import { describe, it, expect } from "vitest";
-import {
-  HERDR_BLOCKED_EVENT,
-  isHerdrBlockedPayload,
-  type HerdrBlockedPayload,
-} from "./index.js";
+import { describe, expect, it } from "vitest";
+import { HERDR_BLOCKED_EVENT, type HerdrBlockedPayload, isHerdrBlockedPayload } from "./index.js";
 
 describe("herdr-contract", () => {
   describe("event name", () => {

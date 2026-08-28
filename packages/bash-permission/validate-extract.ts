@@ -49,7 +49,7 @@ function extract(input: string): string[] {
   const result = extractCommands(input);
   if (result.error) {
     console.error(`  UNEXPECTED ERROR: ${result.error} for input: ${JSON.stringify(input)}`);
-    return ["__ERROR__" + result.error];
+    return [`__ERROR__${result.error}`];
   }
   return result.commands;
 }
@@ -73,21 +73,9 @@ assertDeepEqual(extract("/usr/bin/git diff HEAD"), ["/usr/bin/git diff HEAD"], "
 // --- AC2: Chained commands ---
 section("AC2: Chained commands (&&, ||, ;)");
 
-assertDeepEqual(
-  extract("git log && echo done"),
-  ["git log", "echo done"],
-  "&& chain",
-);
-assertDeepEqual(
-  extract("cd dir || mkdir dir"),
-  ["cd dir", "mkdir dir"],
-  "|| chain",
-);
-assertDeepEqual(
-  extract("cd dir; echo done"),
-  ["cd dir", "echo done"],
-  "semicolon chain",
-);
+assertDeepEqual(extract("git log && echo done"), ["git log", "echo done"], "&& chain");
+assertDeepEqual(extract("cd dir || mkdir dir"), ["cd dir", "mkdir dir"], "|| chain");
+assertDeepEqual(extract("cd dir; echo done"), ["cd dir", "echo done"], "semicolon chain");
 assertDeepEqual(
   extract("git add . && git commit -m 'feat' && git push"),
   ["git add .", "git commit -m 'feat'", "git push"],
@@ -97,35 +85,19 @@ assertDeepEqual(
 // --- AC3: Pipeline commands ---
 section("AC3: Pipeline commands");
 
-assertDeepEqual(
-  extract("git log | grep fix"),
-  ["git log", "grep fix"],
-  "simple pipe",
-);
+assertDeepEqual(extract("git log | grep fix"), ["git log", "grep fix"], "simple pipe");
 assertDeepEqual(
   extract("cat file | grep foo | head -5"),
   ["cat file", "grep foo", "head -5"],
   "triple pipe",
 );
-assertDeepEqual(
-  extract("echo a | echo b"),
-  ["echo a", "echo b"],
-  "two-element pipe",
-);
+assertDeepEqual(extract("echo a | echo b"), ["echo a", "echo b"], "two-element pipe");
 
 // --- AC4: Subshell commands ---
 section("AC4: Subshell commands");
 
-assertDeepEqual(
-  extract("(cd dir && make)"),
-  ["cd dir", "make"],
-  "subshell with chain",
-);
-assertDeepEqual(
-  extract("(cd dir)"),
-  ["cd dir"],
-  "simple subshell",
-);
+assertDeepEqual(extract("(cd dir && make)"), ["cd dir", "make"], "subshell with chain");
+assertDeepEqual(extract("(cd dir)"), ["cd dir"], "simple subshell");
 assertDeepEqual(
   extract("(cd a || cd b) && echo done"),
   ["cd a", "cd b", "echo done"],
@@ -154,21 +126,9 @@ assertDeepEqual(
 // --- AC6: Redirected statements ---
 section("AC6: Redirected statements");
 
-assertDeepEqual(
-  extract("echo hello > file"),
-  ["echo hello > file"],
-  "> redirect",
-);
-assertDeepEqual(
-  extract("cat < input.txt"),
-  ["cat < input.txt"],
-  "< redirect",
-);
-assertDeepEqual(
-  extract("> /dev/null git status"),
-  ["> /dev/null git status"],
-  "leading redirect",
-);
+assertDeepEqual(extract("echo hello > file"), ["echo hello > file"], "> redirect");
+assertDeepEqual(extract("cat < input.txt"), ["cat < input.txt"], "< redirect");
+assertDeepEqual(extract("> /dev/null git status"), ["> /dev/null git status"], "leading redirect");
 assertDeepEqual(
   extract("echo hello >> file 2>&1"),
   ["echo hello >> file 2>&1"],
@@ -183,35 +143,35 @@ assertDeepEqual(
 // --- AC7: Parse/extraction failure returns fail-closed ---
 section("AC7: Parse/extraction failure → fail-closed");
 
-(function () {
+(() => {
   // Truly malformed syntax should always produce an error
   const result = extractCommands("&&");
   assert(result.error !== null, "standalone && returns error");
   assertDeepEqual(result.commands, [], "standalone && returns no commands");
 })();
 
-(function () {
+(() => {
   // Incomplete command substitution should produce an error
   const result = extractCommands('echo "$(pwd');
   assert(result.error !== null, "unclosed substitution returns error");
   assertDeepEqual(result.commands, [], "unclosed substitution returns no commands");
 })();
 
-(function () {
+(() => {
   // Incomplete function definition should produce an error
   const result = extractCommands("function foo() {");
   assert(result.error !== null, "incomplete function body returns error");
   assertDeepEqual(result.commands, [], "incomplete function body returns no commands");
 })();
 
-(function () {
+(() => {
   // Empty input should produce no commands (not an error — just no commands)
   const result = extractCommands("");
   assert(result.error === null, "empty input has no error");
   assertDeepEqual(result.commands, [], "empty input produces no commands");
 })();
 
-(function () {
+(() => {
   // Whitespace-only input should produce no commands
   const result = extractCommands("   ");
   assert(result.error === null, "whitespace input has no error");
@@ -226,11 +186,7 @@ assertDeepEqual(
   ["FOO=bar make"],
   "environment variable prefix on command",
 );
-assertDeepEqual(
-  extract("export FOO=bar"),
-  ["export FOO=bar"],
-  "declaration command (export)",
-);
+assertDeepEqual(extract("export FOO=bar"), ["export FOO=bar"], "declaration command (export)");
 assertDeepEqual(
   extract("echo a | echo b | echo c"),
   ["echo a", "echo b", "echo c"],

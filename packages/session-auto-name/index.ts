@@ -37,7 +37,9 @@ type MessageEntry = {
 };
 
 function isMessageEntry(entry: unknown): entry is MessageEntry {
-  return typeof entry === "object" && entry !== null && (entry as { type?: unknown }).type === "message";
+  return (
+    typeof entry === "object" && entry !== null && (entry as { type?: unknown }).type === "message"
+  );
 }
 
 function textFromContent(content: MessageEntry["message"]["content"]): string {
@@ -45,7 +47,9 @@ function textFromContent(content: MessageEntry["message"]["content"]): string {
   if (!Array.isArray(content)) return "";
 
   return content
-    .filter((block): block is TextContent => block.type === "text" && typeof block.text === "string")
+    .filter(
+      (block): block is TextContent => block.type === "text" && typeof block.text === "string",
+    )
     .map((block) => block.text.trim())
     .filter(Boolean)
     .join("\n")
@@ -76,7 +80,9 @@ function getNamingContext(entries: unknown[]): { userText: string; assistantText
   // The trigger is the first completed agent response. An assistant message can
   // be text-free when it only calls tools; in that case the secondary context is
   // intentionally blank.
-  const hasAssistantMessage = entries.some((entry) => isMessageEntry(entry) && entry.message.role === "assistant");
+  const hasAssistantMessage = entries.some(
+    (entry) => isMessageEntry(entry) && entry.message.role === "assistant",
+  );
   if (!hasAssistantMessage) return null;
 
   return { userText, assistantText };
@@ -127,7 +133,10 @@ export default function (pi: ExtensionAPI) {
     try {
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       if (!auth.ok) {
-        notifyFailureOnce(`session-auto-name: auth failed for ${MODEL.provider}/${MODEL.id}: ${auth.error}`, ctx);
+        notifyFailureOnce(
+          `session-auto-name: auth failed for ${MODEL.provider}/${MODEL.id}: ${auth.error}`,
+          ctx,
+        );
         return;
       }
       if (!auth.apiKey) {
@@ -170,7 +179,10 @@ ${namingContext.assistantText}`,
 
       const title = sanitizeTitle(
         response.content
-          .filter((block): block is TextContent => block.type === "text" && typeof block.text === "string")
+          .filter(
+            (block): block is TextContent =>
+              block.type === "text" && typeof block.text === "string",
+          )
           .map((block) => block.text)
           .join("\n"),
       );
