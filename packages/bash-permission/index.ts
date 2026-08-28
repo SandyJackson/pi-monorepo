@@ -19,26 +19,26 @@
  * - Audit entries recorded for denied/rejected/approved commands.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   type BashToolCallEvent,
   type ExtensionAPI,
   type ExtensionContext,
   isToolCallEventType,
 } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { HERDR_BLOCKED_EVENT } from "@pi-workspace/herdr-contract";
+import { extractCommands } from "./lib/bash-extract.js";
 import {
-  parseConfig,
-  resolveAgentIdentity,
-  evaluate,
   type BashConfig,
   type BashRule,
-  type PermissionAction,
   type EvaluationResult,
+  evaluate,
+  type PermissionAction,
+  parseConfig,
+  resolveAgentIdentity,
 } from "./lib/bash-policy.js";
-import { extractCommands } from "./lib/bash-extract.js";
-import { HERDR_BLOCKED_EVENT } from "@pi-workspace/herdr-contract";
 
 // ---------------------------------------------------------------------------
 // Cached state
@@ -103,9 +103,7 @@ function formatDecision(
     for (let i = 0; i < commands.length; i++) {
       const cmdEval = evaluations[i];
       const match = cmdEval.matchedRule;
-      const ruleInfo = match
-        ? `"${match.pattern}" → ${match.action}`
-        : "no rule matched → ask";
+      const ruleInfo = match ? `"${match.pattern}" → ${match.action}` : "no rule matched → ask";
       lines.push(`    ${i + 1}. "${commands[i]}" → ${cmdEval.action}  (${ruleInfo})`);
     }
   }
@@ -122,13 +120,10 @@ function formatAskPrompt(
   identity: string | null,
   evaluations: CommandDetail[],
 ): string {
-  return formatDecision(
-    "⚠️  Bash command needs approval",
-    rawCommand,
-    commands,
-    identity,
-    evaluations,
-  ) + "\n\nAllow this command?";
+  return (
+    formatDecision("⚠️  Bash command needs approval", rawCommand, commands, identity, evaluations) +
+    "\n\nAllow this command?"
+  );
 }
 
 /**
@@ -229,7 +224,8 @@ async function evaluateBashPermission(
   if (!config) {
     return {
       block: true,
-      reason: "🛑 Bash command denied: permission config is missing or invalid.\nCheck bash-permission.json and reload.",
+      reason:
+        "🛑 Bash command denied: permission config is missing or invalid.\nCheck bash-permission.json and reload.",
     };
   }
 
@@ -251,7 +247,8 @@ async function evaluateBashPermission(
     if (trimmed.length > 0) {
       return {
         block: true,
-        reason: "🛑 Bash command denied: no extractable command units found.\nIf this is valid syntax, check the command and try again.",
+        reason:
+          "🛑 Bash command denied: no extractable command units found.\nIf this is valid syntax, check the command and try again.",
       };
     }
     // Truly empty or whitespace-only — let through

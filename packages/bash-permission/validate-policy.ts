@@ -17,15 +17,15 @@
  */
 
 import {
-  parseConfig,
-  normalizePolicy,
-  mergeRules,
-  matchPattern,
-  evaluateCommand,
-  resolveAgentIdentity,
-  evaluate,
   type BashConfig,
   type BashRule,
+  evaluate,
+  evaluateCommand,
+  matchPattern,
+  mergeRules,
+  normalizePolicy,
+  parseConfig,
+  resolveAgentIdentity,
 } from "./lib/bash-policy.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,7 +54,8 @@ function assert(condition: boolean, msg: string): void {
 function assertDeepEqual<T>(actual: T, expected: T, label: string): void {
   const actualJson = JSON.stringify(actual);
   const expectedJson = JSON.stringify(expected);
-  if (actualJson !== expectedJson) throw new Error(`${label}\n    expected: ${expectedJson}\n    actual:   ${actualJson}`);
+  if (actualJson !== expectedJson)
+    throw new Error(`${label}\n    expected: ${expectedJson}\n    actual:   ${actualJson}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,7 +67,11 @@ test("AC1: blanket 'ask'", () => {
   const cfg = parseConfig(raw);
   assert(cfg !== null, "should parse valid blanket config");
   const rules = normalizePolicy(cfg!.bash);
-  assertDeepEqual(rules, [{ pattern: "*", action: "ask" }], "blanket ask normalises to single * rule");
+  assertDeepEqual(
+    rules,
+    [{ pattern: "*", action: "ask" }],
+    "blanket ask normalises to single * rule",
+  );
 });
 
 test("AC1: blanket 'allow'", () => {
@@ -94,10 +99,14 @@ test("AC2: pattern object", () => {
   const cfg = parseConfig(raw);
   assert(cfg !== null, "should parse pattern config");
   const rules = normalizePolicy(cfg!.bash);
-  assertDeepEqual(rules, [
-    { pattern: "*", action: "ask" },
-    { pattern: "git *", action: "allow" },
-  ], "pattern object preserves order");
+  assertDeepEqual(
+    rules,
+    [
+      { pattern: "*", action: "ask" },
+      { pattern: "git *", action: "allow" },
+    ],
+    "pattern object preserves order",
+  );
 });
 
 test("AC2: empty pattern object", () => {
@@ -165,15 +174,17 @@ test("AC4: global rule overridden by agent rule (last match wins)", () => {
     { pattern: "git *", action: "ask" },
     { pattern: "*", action: "deny" },
   ];
-  const agentRules: BashRule[] = [
-    { pattern: "git diff *", action: "allow" },
-  ];
+  const agentRules: BashRule[] = [{ pattern: "git diff *", action: "allow" }];
   const merged = mergeRules(globalRules, agentRules);
-  assertDeepEqual(merged, [
-    { pattern: "git *", action: "ask" },
-    { pattern: "*", action: "deny" },
-    { pattern: "git diff *", action: "allow" },
-  ], "global rules precede agent rules");
+  assertDeepEqual(
+    merged,
+    [
+      { pattern: "git *", action: "ask" },
+      { pattern: "*", action: "deny" },
+      { pattern: "git diff *", action: "allow" },
+    ],
+    "global rules precede agent rules",
+  );
 
   // git diff should match agent rule (allow), not global git * (ask) or * (deny)
   const result = evaluateCommand("git diff HEAD", merged);
@@ -228,7 +239,10 @@ test("AC5: slash normalisation (backslash → forward slash)", () => {
 
 test("AC5: trailing * also matches no-argument form", () => {
   assert(matchPattern("git status", "git status *"), "git status matches git status * (no-arg)");
-  assert(matchPattern("git status --short", "git status *"), "git status --short matches git status * (with args)");
+  assert(
+    matchPattern("git status --short", "git status *"),
+    "git status --short matches git status * (with args)",
+  );
 });
 
 test("AC5: exact pattern without trailing star does not match with args", () => {
@@ -264,8 +278,14 @@ test("AC6: whitespace-only → main", () => {
 });
 
 test("AC6: no tag in content → main", () => {
-  assert(resolveAgentIdentity("just some text without a tag") === "main", "no tag found resolves to main");
-  assert(resolveAgentIdentity("<not_an_active_agent name=\"foo\"/>") === "main", "wrong tag name resolves to main");
+  assert(
+    resolveAgentIdentity("just some text without a tag") === "main",
+    "no tag found resolves to main",
+  );
+  assert(
+    resolveAgentIdentity('<not_an_active_agent name="foo"/>') === "main",
+    "wrong tag name resolves to main",
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -273,9 +293,15 @@ test("AC6: no tag in content → main", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 test("AC7: single valid tag", () => {
-  assert(resolveAgentIdentity('<active_agent name="code-reviewer"/>') === "code-reviewer", "extracts code-reviewer");
+  assert(
+    resolveAgentIdentity('<active_agent name="code-reviewer"/>') === "code-reviewer",
+    "extracts code-reviewer",
+  );
   assert(resolveAgentIdentity('<active_agent name="main"/>') === "main", "extracts main");
-  assert(resolveAgentIdentity('<active_agent name="my-custom-agent"/>') === "my-custom-agent", "extracts hyphens");
+  assert(
+    resolveAgentIdentity('<active_agent name="my-custom-agent"/>') === "my-custom-agent",
+    "extracts hyphens",
+  );
 });
 
 test("AC7: tag with optional slash", () => {
@@ -311,23 +337,32 @@ test("AC8: empty name → null", () => {
 });
 
 test("AC8: whitespace-only name → null", () => {
-  assert(resolveAgentIdentity('<active_agent name="   "/>') === null, "whitespace name returns null");
+  assert(
+    resolveAgentIdentity('<active_agent name="   "/>') === null,
+    "whitespace name returns null",
+  );
 });
 
 test("AC8: malformed tag — no quotes around name → null", () => {
-  assert(resolveAgentIdentity('<active_agent name=foo/>') === null, "unquoted name returns null");
+  assert(resolveAgentIdentity("<active_agent name=foo/>") === null, "unquoted name returns null");
 });
 
 test("AC8: malformed tag — no name attribute → null", () => {
-  assert(resolveAgentIdentity('<active_agent/>') === null, "missing name attr returns null");
+  assert(resolveAgentIdentity("<active_agent/>") === null, "missing name attr returns null");
 });
 
 test("AC8: malformed tag — mixed content with malformed attempt → null", () => {
-  assert(resolveAgentIdentity('some text <active_agent name=foo/> more text') === null, "malformed tag in context returns null");
+  assert(
+    resolveAgentIdentity("some text <active_agent name=foo/> more text") === null,
+    "malformed tag in context returns null",
+  );
 });
 
 test("AC8: one valid + one malformed tag → null", () => {
-  assert(resolveAgentIdentity('<active_agent name="valid"/> <active_agent name=invalid/>') === null, "valid + malformed returns null");
+  assert(
+    resolveAgentIdentity('<active_agent name="valid"/> <active_agent name=invalid/>') === null,
+    "valid + malformed returns null",
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -407,7 +442,7 @@ test("full pipeline: null identity (fail-closed) → deny", () => {
 test("full pipeline: malformed agent tag in config sets identity to null → deny", () => {
   // This simulates what happens when resolveAgentIdentity returns null
   const config: BashConfig = { version: 1, bash: "allow" };
-  const identity = resolveAgentIdentity('<active_agent name=foo/>');
+  const identity = resolveAgentIdentity("<active_agent name=foo/>");
   assert(identity === null, "malformed tag yields null identity");
   const result = evaluate("git status", config, identity);
   assert(result.action === "deny", "null identity from malformed tag results in deny");
@@ -442,11 +477,17 @@ test("malformed config: bad bash field", () => {
 });
 
 test("malformed config: bad action in pattern", () => {
-  assert(parseConfig({ version: 1, bash: { "*": "maybe" } }) === null, "invalid action in pattern fails");
+  assert(
+    parseConfig({ version: 1, bash: { "*": "maybe" } }) === null,
+    "invalid action in pattern fails",
+  );
 });
 
 test("malformed config: agents not an object", () => {
-  assert(parseConfig({ version: 1, bash: "ask", agents: "not-object" }) === null, "string agents fails");
+  assert(
+    parseConfig({ version: 1, bash: "ask", agents: "not-object" }) === null,
+    "string agents fails",
+  );
 });
 
 test("malformed config: bash is an array", () => {
@@ -458,7 +499,10 @@ test("malformed config: agents is an array", () => {
 });
 
 test("malformed config: agent entry is an array", () => {
-  assert(parseConfig({ version: 1, bash: "ask", agents: { main: [] } }) === null, "array agent entry fails");
+  assert(
+    parseConfig({ version: 1, bash: "ask", agents: { main: [] } }) === null,
+    "array agent entry fails",
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -23,9 +23,7 @@ export interface HerdrBlockedPayload {
  * Type guard for herdr:blocked event payloads.
  * Useful for testing that emitters produce the correct shape.
  */
-export function isHerdrBlockedPayload(
-  payload: unknown,
-): payload is HerdrBlockedPayload {
+export function isHerdrBlockedPayload(payload: unknown): payload is HerdrBlockedPayload {
   return (
     typeof payload === "object" &&
     payload !== null &&

@@ -85,7 +85,12 @@ export function parseConfig(raw: unknown): BashConfig | null {
   }
 
   if (configRecord.agents !== undefined) {
-    if (typeof configRecord.agents !== "object" || configRecord.agents === null || Array.isArray(configRecord.agents)) return null;
+    if (
+      typeof configRecord.agents !== "object" ||
+      configRecord.agents === null ||
+      Array.isArray(configRecord.agents)
+    )
+      return null;
 
     const agents: Record<string, AgentPolicy> = {};
     for (const [name, agentRaw] of Object.entries(configRecord.agents)) {
@@ -149,10 +154,7 @@ export function normalizePolicy(policy: BashPolicyInput): BashRule[] {
  *
  * If no agent rules exist, returns only the global list.
  */
-export function mergeRules(
-  globalRules: BashRule[],
-  agentRules?: BashRule[],
-): BashRule[] {
+export function mergeRules(globalRules: BashRule[], agentRules?: BashRule[]): BashRule[] {
   if (!agentRules || agentRules.length === 0) return globalRules;
   return [...globalRules, ...agentRules];
 }
@@ -211,7 +213,7 @@ function globToRegex(pattern: string): string {
     } else if (ch === "?") {
       result += ".";
     } else if (isRegexSpecial(ch)) {
-      result += "\\" + ch;
+      result += `\\${ch}`;
     } else {
       result += ch;
     }
@@ -220,6 +222,7 @@ function globToRegex(pattern: string): string {
 }
 
 function isRegexSpecial(ch: string): boolean {
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal regex character class, not a template placeholder
   return ".+^${}()|[]\\".indexOf(ch) !== -1;
 }
 
@@ -247,9 +250,7 @@ const ACTIVE_AGENT_RE = /<active_agent\s+name="([^"]*)"\s*\/?\s*>/g;
  *                     or null/undefined when no tag context exists.
  * @returns Resolved agent name, or null to signal fail-closed.
  */
-export function resolveAgentIdentity(
-  tagContent: string | null | undefined,
-): string | null {
+export function resolveAgentIdentity(tagContent: string | null | undefined): string | null {
   if (!tagContent || tagContent.trim() === "") {
     return "main";
   }
@@ -295,10 +296,7 @@ const DEFAULT_ACTION: PermissionAction = "ask";
  * Iterates rules in order; the last matching rule wins. If no rule matches,
  * the default action (`ask`) is returned.
  */
-export function evaluateCommand(
-  command: string,
-  rules: BashRule[],
-): CommandEvaluation {
+export function evaluateCommand(command: string, rules: BashRule[]): CommandEvaluation {
   let matchedRule: BashRule | null = null;
 
   for (const rule of rules) {

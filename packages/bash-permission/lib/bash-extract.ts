@@ -10,8 +10,8 @@
  * `llm-tooling/pi/agent/npm/`.
  */
 
-import Parser from "tree-sitter";
 import type { SyntaxNode } from "tree-sitter";
+import Parser from "tree-sitter";
 import Bash from "tree-sitter-bash";
 
 // Lazily initialised parser (first-call only)
@@ -36,10 +36,7 @@ const SIMPLE_COMMAND_TYPES = new Set(["command", "declaration_command"]);
  * Structural boundaries that cut the command context so their contents
  * are extracted as independent command units.
  */
-const STRUCTURAL_BOUNDARY_TYPES = new Set([
-  "subshell",
-  "command_substitution",
-]);
+const STRUCTURAL_BOUNDARY_TYPES = new Set(["subshell", "command_substitution"]);
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -147,10 +144,7 @@ function walk(node: SyntaxNode, results: string[]): void {
  *   the redirect suffix to the last element.
  * - Otherwise extract the full redirected_statement text as one unit.
  */
-function handleRedirectedStatement(
-  node: SyntaxNode,
-  results: string[],
-): void {
+function handleRedirectedStatement(node: SyntaxNode, results: string[]): void {
   const core = findCoreChild(node);
 
   if (!core) {
@@ -192,11 +186,7 @@ function handleRedirectedStatement(
  * - Structural elements (subshell, etc.): walk to extract inner
  *   commands, then append suffix to the last inner result.
  */
-function addPipelineElement(
-  pipelineElement: SyntaxNode,
-  suffix: string,
-  results: string[],
-): void {
+function addPipelineElement(pipelineElement: SyntaxNode, suffix: string, results: string[]): void {
   if (SIMPLE_COMMAND_TYPES.has(pipelineElement.type)) {
     results.push(pipelineElement.text + suffix);
     walkStructuralBoundaries(pipelineElement, results);
@@ -239,12 +229,7 @@ function findCoreChild(node: SyntaxNode): SyntaxNode | null {
       ) {
         continue; // skip redirect-like nodes
       }
-      if (
-        childType === ";" ||
-        childType === "|" ||
-        childType === "&&" ||
-        childType === "||"
-      ) {
+      if (childType === ";" || childType === "|" || childType === "&&" || childType === "||") {
         continue; // skip bare operators (shouldn't appear here but safe net)
       }
       return child;
@@ -290,5 +275,3 @@ function walkStructuralBoundaries(node: SyntaxNode, results: string[]): void {
   }
   findBoundaries(node);
 }
-
-
