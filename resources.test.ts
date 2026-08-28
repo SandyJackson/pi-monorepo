@@ -15,7 +15,7 @@ const ROOT = import.meta.dirname;
 // Expected resource inventories
 // ---------------------------------------------------------------------------
 
-/** All 23 skills that must exist in the workspace. */
+/** All 26 skills that must exist in the workspace. */
 const EXPECTED_SKILLS = [
   "ask-matt",
   "code-review",

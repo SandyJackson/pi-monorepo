@@ -1,383 +1,96 @@
-Here's a comprehensive explanation of the sub-agents module with UML diagrams:
+# Subagent delegation architecture
 
----
+This document describes the implemented design of `packages/herdr-subagent` — durable module ownership and invariants only. Vocabulary follows `CONTEXT.md`: **subagent delegation**, **delegated task**, **delegated task number**, **delegated task outcome**, **visible subagent session**, and **callable agent catalog**.
 
-# Sub-Agents Module Architecture
+The agent-state projection that backs delegated-turn settlement is Herdr-managed (see [ADR-0004](../adr/0004-keep-herdr-agent-state-managed-by-herdr.md)); this module consumes it as an external boundary and observes it through `agent.get`.
 
-## Overview
-
-The sub-agents module enables Pi to delegate work to visible, interactive child agents that run in separate terminal panes. It follows a clean port-and-adapter architecture: the runner owns orchestration logic, while backends (like Herdr) handle runtime-specific spawning.
-
----
-
-## Package Structure
+## Module ownership
 
 ```
-packages/
-├── herdr-contract/      # Shared event types (blocked state)
-├── herdr-subagent/      # Main sub-agent extension
-│   ├── index.ts         # Extension entrypoint
-│   ├── agents.ts        # Agent discovery & config parsing
-│   ├── subagent-runner.ts  # Backend-neutral orchestration
-│   ├── herdr-backend.ts # Herdr-specific implementation
-│   └── pi-session.ts    # Session file parsing
-└── herdr-bridge/        # Herdr event bridge (separate)
+packages/herdr-subagent/
+├── index.ts            Pi lifecycle adapter: snapshot + tool registration
+├── agents.ts           Agent discovery and merge (catalog source)
+├── subagent-tool.ts    Tool schema, semantic validation, presentation
+├── pi-session.ts       Pi session identity and exact answer references
+└── herdr/
+    ├── delegation.ts   The ordered delegation operation
+    ├── session.ts      Visible subagent session lifecycle
+    └── rpc.ts          Herdr JSON-RPC socket transport
 ```
 
----
+| Module | Owns | Depends on |
+|---|---|---|
+| `index.ts` | Building the session-scoped callable agent catalog from Pi context, registering one `subagent` tool, binding the concrete Herdr delegation function and environment | `agents.ts`, `subagent-tool.ts`, `herdr/delegation.ts` |
+| `agents.ts` | Discovering user and trusted project agents, merging with project-overrides-user precedence, formatting and resolution | Pi's `parseFrontmatter`/`getAgentDir` |
+| `subagent-tool.ts` | Strict request schema, per-task validation against the catalog, one injected delegation call, final content/details rendering | `agents.ts`, `pi-session.ts`, `herdr/*` contracts |
+| `pi-session.ts` | Reading Pi session JSONL: header identity, exact answer references, answer resolution | nothing (fs only) |
+| `herdr/delegation.ts` | Herdr environment validation, workspace tab provisioning, ordered launch/observation, total ordered outcomes | `herdr/session.ts`, `herdr/rpc.ts` |
+| `herdr/session.ts` | Launching one visible subagent session and observing its initial delegated turn (the session itself persists beyond the turn under Herdr's management) | `pi-session.ts`, `herdr/rpc.ts` |
+| `herdr/rpc.ts` | Newline-delimited JSON-RPC over the Herdr Unix socket | nothing (net only) |
 
-## Class & Interface Diagram
+Test seams are intentional and few: `subagent-tool.ts` receives one injected delegation function; `herdr/rpc.ts` exposes the transport as a callable boundary that tests replace with a scripted adapter.
 
-```mermaid
-classDiagram
-    direction TB
+## Callable agent catalog
 
-    class ExtensionAPI {
-        <<Pi SDK>>
-        +on(event, handler)
-        +registerTool(tool)
-    }
+- Snapshotted **once per Pi session** in `index.ts` on `session_start`; refreshed only by Pi's session lifecycle.
+- Combines user agents with project agents when the parent project is trusted; project definitions override user definitions of the same name.
+- Both the tool description and execution-time resolution use the same snapshot, so the model can never resolve a task against agents absent from its description.
 
-    class ExtensionContext {
-        <<Pi SDK>>
-        +cwd: string
-        +isProjectTrusted(): boolean
-    }
+## Pi tool: validation and presentation
 
-    class AgentConfig {
-        +name: string
-        +description: string
-        +tools?: string[]
-        +model?: string
-        +systemPromptBody: string
-        +source: "user" | "project"
-        +sourceDir: string
-        +filePath: string
-    }
+- The TypeBox schema is strict (`additionalProperties: false`, at most 8 tasks); Pi itself rejects malformed or obsolete request shapes — no legacy-key knowledge exists here.
+- Each well-shaped task receives its **delegated task number** (one-based position) exactly once, at parse time; that same task record is carried through validation, execution, details, and presentation. No second identity is generated.
+- Task-level failures (empty agent, empty instruction, unknown agent) become positional `invalid` outcomes; valid siblings still execute. Structurally malformed calls are rejected whole by Pi.
+- A call with no tasks lists the catalog. A delegation whose tasks are all invalid never initializes Herdr.
+- Herdr environment and shared workspace provisioning failures **throw before any launch** and surface through Pi's native tool-error channel; once launch processing begins, per-task failures — including pane-split failures — become positional delegated task outcomes instead.
+- Presentation resolves an answer's exact reference **only at presentation time** — answer text never flows through the delegation operation or persists in `details`. Truncation uses Pi's canonical `truncateHead` (head bytes/lines) with the full answer remaining addressable in the referenced session entry.
+- One task renders its direct answer or a status-specific explanation; multiple tasks render `Delegation: X/N tasks completed` plus request-ordered headings. The delegated task number is canonical; agent names are descriptive only. `details.tasks[]` carries `taskNumber`, `agent`, and the outcome's status-specific metadata — never answer text.
 
-    class SubagentInvocation {
-        +invocationId: string
-        +agentName: string
-        +task: string
-        +cwd: string
-        +config: AgentConfig
-    }
+## Ordered delegation operation
 
-    class SpawnedSubagent {
-        +id: string
-        +displayTarget: string
-        +label: string
-        +cleanup(): void
-        +markPromptConsumed?(): void
-    }
+`herdr/delegation.ts` implements one concrete operation — not a class hierarchy, not a scheduler:
 
-    class SubagentOutcome {
-        <<union>>
-        reason: "completed" | "target_closed" | "aborted" | "timeout"
-        answerText?: string
-        fallbackText?: string
-    }
+1. Validate bounds (≤ 8 valid tasks) and the already-aborted case before contacting Herdr.
+2. Serialize shared provisioning per workspace behind a process-wide lock. The lock covers tab provisioning and sequential launches only; it never waits for turns to settle. Shared Herdr environment or workspace provisioning failures throw before any launch.
+3. Place every delegated task's pane in the workspace's shared `subagents` tab (plain or Herdr-numbered labels): a newly created tab's root pane serves the first launch attempt, and every other placement is a right/down split from the tab's most recent pane. A confirmed launch failure frees its pane for reuse by a same-cwd sibling; a pane is never reused after an indeterminate launch or for a task with a different cwd.
+4. Launch every valid task **sequentially** and start each task's observation immediately at its confirmed launch while later launches continue. There are no wave barriers.
+5. Await all observations concurrently, then merge outcomes back into request order.
 
-    class SubagentBackend {
-        <<interface>>
-        +spawnBatch(invocations, options): SpawnBatchResult
-        +waitForCompletion(spawned, options): SubagentOutcome
-    }
+**Invariant — total ordered contract:** once launch processing begins, every delegated task produces exactly one delegated task outcome, returned in request order carrying the original task record and delegated task number.
 
-    class HerdrBackend {
-        -env: HerdrEnv
-        +fromEnv(): BackendSelection
-        +spawnBatch(invocations, options): SpawnBatchResult
-        +waitForCompletion(spawned, options): SubagentOutcome
-        -rpcCall(method, params, timeout, signal): Promise
-        -findOrCreateSubagentsTab(): Tab
-        -spawnOne(invocation, paneId): SpawnedSubagent
-    }
+## Visible subagent session lifecycle
 
-    class RunnerOptions {
-        +parentCwd: string
-        +includeProjectAgents: boolean
-        +detectAutoBackend(): BackendSelection
-    }
+`herdr/session.ts` launches one visible subagent session and observes its initial delegated turn. The visible subagent session itself persists independently of that turn under Herdr's management; this module never closes it.
 
-    class RunResult {
-        +content: TextContent[]
-        +details: Record
-        +isError?: boolean
-    }
+- **Prompt ownership (private):** the agent's system prompt reaches the visible subagent session through a temporary prompt file owned entirely by this module. Cleanup is best-effort, idempotent, and non-throwing: confirmed launch failures clean up immediately, a prompt the delegated turn demonstrably consumed is cleaned up by the end of its observation, and a prompt whose consumption was never confirmed is cleaned up after a conservative fallback delay. Prompt lifecycle details are never part of a public contract.
+- **Launch:** argv is built (model, tools, prompt, sanitized instruction — control characters stripped), a pane label is allocated with collision retries, transient pane-busy errors are retried, then `agent.start` runs. Explicit server errors are confirmed failures; only transport ambiguity after `agent.start` may have executed — or a successful response without a usable pane id — is `launch_indeterminate`.
+- **Observation:** polls Herdr's `agent.get` projection. Startup idle is ignored; completion requires observed activity plus two consecutive settled polls. The per-task timeout deadline starts at confirmed launch.
+- **Session reference:** the first observed session path yields the Pi session `{id, path, cwd}` from the JSONL header; the reference persists through completion, timeout, abort, or closure.
+- **Answer capture:** stable settlement records the exact `{path, entryId}` reference of the latest terminal assistant entry — never the text itself.
+**Persistent-pane invariant:** timeout, cancellation, and abort stop only parent-side observation. Nothing in this module ever closes a Herdr pane or a visible subagent session; timed-out and aborted visible subagent sessions remain live for manual inspection or a later turn.
 
-    ExtensionAPI --> ExtensionContext : provides
-    ExtensionAPI --> SubagentBackend : registers tool that uses
-    HerdrBackend ..|> SubagentBackend : implements
-    SubagentInvocation --> AgentConfig : contains
-    SpawnedSubagent --> SubagentOutcome : produces
-    RunnerOptions --> SubagentBackend : creates via detectAutoBackend
-```
+## Delegated task outcomes
 
----
+Once launch processing begins, every accepted delegated task settles into exactly one outcome; there is no redundant `success` flag and no scheduler-specific `not_started` state:
 
-## Component Interaction Diagram
+| Status | Meaning |
+|---|---|
+| `completed` | Turn settled; exact answer reference (or `null` if none was persisted) |
+| `timed_out` | Deadline passed while observing; session remains live |
+| `aborted` (before_launch / observing) | Cancellation before a session existed, or while observing a live one |
+| `session_closed` | The visible subagent session's pane closed before the delegated turn settled |
+| `launch_failed` | Confirmed launch failure with the server/tooling error |
+| `launch_indeterminate` | `agent.start` may have executed without a trustworthy response — transport ambiguity after the request, or a response without a usable pane id; the possible pane is reported |
+| `observation_failed` | Observation defect; the visible subagent session may still be live |
 
-```mermaid
-graph TB
-    subgraph "Pi Host Process"
-        User([User/Model])
-        Tool[Subagent Tool]
-        Runner[Subagent Runner]
-        AgentDiscovery[Agent Discovery]
-    end
+## Herdr RPC transport
 
-    subgraph "Backend Layer"
-        Backend[SubagentBackend]
-        HerdrBackend[HerdrBackend]
-    end
+`herdr/rpc.ts` is the only external seam: one newline-delimited JSON-RPC call over one Unix-socket connection, with request/response correlation by protocol request ID. Request IDs correlate **protocol responses only** — they are not delegated task identity. Explicit server errors surface as typed response errors; abort and timeout are enforced per call.
 
-    subgraph "Herdr Runtime"
-        Socket[Unix Socket]
-        Pane[Terminal Pane]
-        ChildPi[Child Pi Process]
-    end
+## Pi session identity and exact answer references
 
-    subgraph "File System"
-        UserAgents[~/.config/pi/agents/*.md]
-        ProjectAgents[.pi/agents/*.md]
-        TempFiles[/tmp/pi-subagent-*/]
-        SessionFile[session.jsonl]
-    end
+`pi-session.ts` gives delegated task outcomes stable, addressable results instead of transported text:
 
-    User -->|"subagent({tasks})"| Tool
-    Tool --> Runner
-    Runner --> AgentDiscovery
-    AgentDiscovery --> UserAgents
-    AgentDiscovery --> ProjectAgents
-    Runner --> Backend
-    Backend --> HerdrBackend
-    HerdrBackend -->|"JSON-RPC"| Socket
-    Socket --> Pane
-    Pane --> ChildPi
-    HerdrBackend -.->|"writes"| TempFiles
-    HerdrBackend -.->|"reads"| SessionFile
-
-    style Tool fill:#4a9eff,color:#fff
-    style Runner fill:#7c4aff,color:#fff
-    style HerdrBackend fill:#ff6b6b,color:#fff
-```
-
----
-
-## Agent Discovery Flow
-
-```mermaid
-flowchart TD
-    Start([Discover Agents]) --> Scope{Scope?}
-    
-    Scope -->|user| UserDir[~/.config/pi/agents/]
-    Scope -->|project| WalkDir[Walk up from cwd]
-    Scope -->|both| Both[Search both]
-    
-    WalkDir --> FindDir{Found .pi/agents/?}
-    FindDir -->|Yes| ProjectDir[Load from .pi/agents/]
-    FindDir -->|No, root reached| Empty[Return empty]
-    
-    UserDir --> LoadMD[Load .md files]
-    ProjectDir --> LoadMD
-    
-    LoadMD --> ParseFrontmatter[YAML Frontmatter]
-    ParseFrontmatter --> Extract[Extract Config]
-    
-    Extract --> Name[name]
-    Extract --> Desc[description]
-    Extract --> Tools[tools allowlist]
-    Extract --> Model[model override]
-    Extract --> Body[system prompt body]
-    
-    Both --> Merge[Merge Lists]
-    Merge --> Override[Project overrides User]
-    Override --> Sort[Sort by name]
-    
-    style Start fill:#4a9eff,color:#fff
-    style Sort fill:#22c55e,color:#fff
-```
-
----
-
-## Tool Execution Flow (Single Task)
-
-```mermaid
-sequenceDiagram
-    participant M as Model
-    participant T as Tool Handler
-    participant R as Runner
-    participant B as HerdrBackend
-    participant H as Herdr Server
-    participant P as Pane
-    participant C as Child Pi
-
-    M->>T: subagent({tasks: [{agent, task}]})
-    T->>R: runSubagents(params)
-    
-    R->>R: Validate params
-    R->>R: Resolve agent config
-    
-    R->>B: spawnBatch([invocation])
-    B->>B: findOrCreateSubagentsTab()
-    B->>H: tab.list / tab.create
-    H-->>B: tab info
-    
-    B->>B: spawnOne(invocation, paneId)
-    B->>B: Build argv (sanitize task)
-    B->>H: agent.start({name, args})
-    H->>P: Launch pi process
-    P->>C: Start
-    H-->>B: {pane_id}
-    B-->>R: SpawnedSubagent
-    
-    R->>B: waitForCompletion(spawned)
-    
-    loop Polling
-        B->>H: agent.get({target})
-        H-->>B: {status, sessionPath}
-        
-        alt status == "working"
-            B->>M: onUpdate("watching:working...")
-        else status == "idle" || "done"
-            B->>B: readSessionAnswer()
-            B->>M: onUpdate("final answer captured")
-        end
-    end
-    
-    B-->>R: {reason: "completed", answerText}
-    R-->>T: RunResult
-    T-->>M: {content: [answer]}
-```
-
----
-
-## Parallel Execution Flow
-
-```mermaid
-flowchart LR
-    subgraph "Batch 1 (max 4 concurrent)"
-        T1[Task 1] --> Spawn1[Spawn]
-        T2[Task 2] --> Spawn2[Spawn]
-        T3[Task 3] --> Spawn3[Spawn]
-    end
-    
-    subgraph "Wait"
-        Spawn1 & Spawn2 & Spawn3 --> Wait[Promise.all]
-    end
-    
-    subgraph "Batch 2"
-        Wait --> T4[Task 4]
-        T4 --> Spawn4[Spawn]
-    end
-    
-    style Spawn1 fill:#4a9eff,color:#fff
-    style Spawn2 fill:#4a9eff,color:#fff
-    style Spawn3 fill:#4a9eff,color:#fff
-    style Wait fill:#ff6b6b,color:#fff
-```
-
-**Key constraints:**
-- `MAX_PARALLEL_TASKS = 8` (total tasks)
-- `MAX_CONCURRENCY = 4` (concurrent waits)
-
----
-
-## Backend Port (Adapter Pattern)
-
-```mermaid
-classDiagram
-    class SubagentBackend {
-        <<Port>>
-        +spawnBatch(): SpawnBatchResult
-        +waitForCompletion(): SubagentOutcome
-    }
-    
-    class HerdrBackend {
-        <<Adapter>>
-        -env: HerdrEnv
-        -rpcCall()
-        -spawnOne()
-    }
-    
-    class FutureBackend {
-        <<Future>>
-        +spawnBatch()
-        +waitForCompletion()
-    }
-    
-    class SpawnBatchResult {
-        attempts: SpawnAttempt[]
-    }
-    
-    class SpawnAttempt {
-        <<union>>
-        status: spawned | failed | not_started | indeterminate
-    }
-    
-    SubagentBackend <|.. HerdrBackend
-    SubagentBackend <|.. FutureBackend
-    SpawnBatchResult --> SpawnAttempt
-```
-
----
-
-## Type Hierarchy
-
-```mermaid
-graph TD
-    subgraph "Backend Types"
-        SubagentBackend
-        SpawnBatchResult
-        SpawnAttempt
-        SpawnBatchOptions
-    end
-    
-    subgraph "Invocation Types"
-        SubagentInvocation
-        SpawnedSubagent
-        WaitForCompletionOptions
-    end
-    
-    subgraph "Outcome Types"
-        SubagentOutcome
-        RunResult
-        BackendSelection
-    end
-    
-    subgraph "Config Types"
-        AgentConfig
-        RunnerOptions
-        AgentScope
-    end
-    
-    SubagentBackend --> SpawnBatchResult
-    SubagentBackend --> SubagentOutcome
-    SpawnBatchResult --> SpawnAttempt
-    SubagentInvocation --> AgentConfig
-    SpawnedSubagent --> SubagentOutcome
-    RunnerOptions --> SubagentBackend
-    RunnerOptions --> AgentConfig
-    
-    style SubagentBackend fill:#4a9eff,color:#fff
-    style SubagentOutcome fill:#22c55e,color:#fff
-    style AgentConfig fill:#ff6b6b,color:#fff
-```
-
----
-
-## Key Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| **Port/Adapter pattern** | Allows swapping Herdr for tmux or other backends |
-| **Session-scoped tool registration** | Description reflects current project trust & agents |
-| **Task sanitization** | Herdr rejects control characters in arguments |
-| **Batch spawning with concurrency cap** | Prevents overwhelming the system |
-| **Stable settled polls** | Avoids premature completion on transient idle states |
-| **Prompt file lifecycle** | Temp files cleaned after child confirms session |
-
----
-
-Would you like me to dive deeper into any specific aspect, such as the error handling paths, the session polling mechanism, or how agent frontmatter is parsed?
+- **Identity:** the first non-blank JSONL line must be a `session` header with `id` and `cwd` (Pi's 1 MiB header bound is honored).
+- **Answer reference:** the terminal assistant entry (`stop`/`end_turn`) to address for the answer — the latest one with substantive text, or the first whitespace-only terminal entry when none is substantive — identified by its persisted entry ID. Entry IDs are stable, so later appends or branches cannot make a later turn look like this task's answer.
+- **Resolution:** `readAnswer` streams the file once and exits on the entry-ID match, used only during final presentation.
