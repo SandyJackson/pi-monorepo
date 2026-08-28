@@ -153,7 +153,7 @@ describe("callable agent catalog lifecycle", () => {
 			"later — added after snapshot",
 		);
 		const unknownAgentText = (
-			await executeTool(firstTool, { tasks: [{ agent: "later", task: "Review" }] })
+			await executeTool(firstTool, { tasks: [{ agent: "later", instruction: "Review" }] })
 		).content[0].text;
 		expect(unknownAgentText).toContain('Unknown agent "later"');
 		expect(unknownAgentText).toContain("stable — initial definition");
@@ -163,11 +163,9 @@ describe("callable agent catalog lifecycle", () => {
 		const herdrEnv = process.env.HERDR_ENV;
 		delete process.env.HERDR_ENV;
 		try {
-			const snapshottedAgentText = (
-				await executeTool(firstTool, { tasks: [{ agent: "stable", task: "Review" }] })
-			).content[0].text;
-			expect(snapshottedAgentText).toContain("requires this pi to run inside Herdr");
-			expect(snapshottedAgentText).not.toContain('Unknown agent "stable"');
+			await expect(executeTool(firstTool, {
+				tasks: [{ agent: "stable", instruction: "Review" }],
+			})).rejects.toThrow("requires this pi to run inside Herdr");
 		} finally {
 			if (herdrEnv === undefined) delete process.env.HERDR_ENV;
 			else process.env.HERDR_ENV = herdrEnv;
@@ -179,7 +177,7 @@ describe("callable agent catalog lifecycle", () => {
 		writeAgent(taskCwdAgentsDir, "cwd-only.md", "cwd-only", "task cwd definition");
 		expect((
 			await executeTool(firstTool, {
-				tasks: [{ agent: "cwd-only", task: "Review", cwd: taskCwd }],
+				tasks: [{ agent: "cwd-only", instruction: "Review", cwd: taskCwd }],
 			})
 		).content[0].text).toContain('Unknown agent "cwd-only"');
 
