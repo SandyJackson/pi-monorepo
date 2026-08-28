@@ -1,8 +1,5 @@
-import { expect, vi } from "vitest";
-import { discoverUserAgents } from "./agents.js";
+import { expect } from "vitest";
 import { type HerdrRpcCall, HerdrRpcResponseError } from "./herdr/rpc.js";
-import { HerdrBackend } from "./herdr-backend.js";
-import type { RunnerOptions } from "./subagent-runner.js";
 
 export interface RpcRequest {
   method: string;
@@ -14,11 +11,6 @@ export type RpcResponse =
   | { error: { code?: string | number; message: string } }
   | { closeWithoutResponse: true }
   | { leavePending: true };
-
-export interface ScriptedHerdrRpc {
-  calledMethods: string[];
-  rpcCall: HerdrRpcCall;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -76,32 +68,14 @@ function createScriptedRpc(
   };
 }
 
-export function createScriptedHerdr(
-  respondToRequest: (request: RpcRequest) => RpcResponse,
-): ScriptedHerdrRpc {
+export function createScriptedHerdr(respondToRequest: (request: RpcRequest) => RpcResponse): {
+  calledMethods: string[];
+  rpcCall: HerdrRpcCall;
+} {
   const calledMethods: string[] = [];
   return {
     calledMethods,
     rpcCall: createScriptedRpc(respondToRequest, calledMethods),
-  };
-}
-
-export function runnerOptionsFor(herdr: ScriptedHerdrRpc): RunnerOptions {
-  const selection = HerdrBackend.fromEnv(
-    {
-      HERDR_ENV: "1",
-      HERDR_SOCKET_PATH: "/tmp/scripted-herdr.sock",
-      HERDR_PANE_ID: "parent-pane",
-      HERDR_WORKSPACE_ID: "workspace-1",
-    },
-    herdr.rpcCall,
-  );
-  if (!selection.ok) throw new Error(selection.message);
-  return {
-    agents: discoverUserAgents(),
-    parentCwd: process.cwd(),
-    includeProjectAgents: false,
-    detectAutoBackend: () => selection,
   };
 }
 
@@ -120,17 +94,12 @@ export function standardLaunchResponse(request: RpcRequest): RpcResponse | undef
   }
 }
 
-export async function waitForRpcCount(herdr: ScriptedHerdrRpc, count: number): Promise<void> {
+export async function waitForRpcCount(
+  herdr: { calledMethods: string[] },
+  count: number,
+): Promise<void> {
   for (let attempt = 0; attempt < 20 && herdr.calledMethods.length < count; attempt++) {
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   expect(herdr.calledMethods.length).toBeGreaterThanOrEqual(count);
-}
-
-export async function advanceObservationPoll(
-  herdr: ScriptedHerdrRpc,
-  expectedRpcCount: number,
-): Promise<void> {
-  await vi.advanceTimersByTimeAsync(800);
-  await waitForRpcCount(herdr, expectedRpcCount);
 }

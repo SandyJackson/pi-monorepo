@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 
 /** Pi session identity parsed from the JSONL header. */
-export interface PiSessionInfo {
+interface PiSessionInfo {
   id: string;
   path: string;
   cwd: string;
@@ -15,14 +15,9 @@ export interface SessionAnswerRef {
 }
 
 /** Snapshot returned by inspection of a Pi session file. */
-export interface PiSessionSnapshot {
+interface PiSessionSnapshot {
   pi: PiSessionInfo | null;
   answer: SessionAnswerRef | null;
-}
-
-/** Legacy extracted answer shape. */
-export interface SessionAnswer {
-  text: string;
 }
 
 /** Minimal shape of a session header entry. */
@@ -239,46 +234,4 @@ export function readAnswer(ref: SessionAnswerRef): string | null {
   });
 
   return resolvedText ?? null;
-}
-
-/**
- * Legacy helper: read a Pi session file and extract the last substantive
- * assistant message text. Preserved for compatibility with the current
- * Herdr backend characterization tests; new code should use
- * `inspectSession` + `readAnswer` which requires a nonempty persisted
- * entry id and an exact `{path, entryId}` reference.
- *
- * Behavior preserves the substantive/whitespace selection from the original
- * implementation and intentionally does not require a persisted `id` so
- * existing scripted Herdr tests without ids continue to pass until the
- * Herdr backend migrates to the durable reference flow.
- */
-export function readSessionAnswer(sessionPath: string): SessionAnswer | null {
-  let finalAnswer: string | null = null;
-
-  forEachNonBlankLineSync(sessionPath, (line) => {
-    const record = tryParseRecord(line);
-    if (!record) return;
-    const entry = record as PersistedMessageEntry;
-
-    if (entry.type !== "message") return;
-
-    const candidateMessage = entry.message;
-    if (!isRecord(candidateMessage)) return;
-    if (candidateMessage.role !== "assistant") return;
-
-    const stopReason: string =
-      typeof candidateMessage.stopReason === "string" ? candidateMessage.stopReason : "";
-    if (stopReason !== "stop" && stopReason !== "end_turn") return;
-
-    const messageText = extractMessageText(candidateMessage as { content?: unknown });
-    if (messageText.trim()) {
-      finalAnswer = messageText;
-    } else if (finalAnswer === null && messageText.length > 0) {
-      finalAnswer = messageText;
-    }
-  });
-
-  if (finalAnswer === null) return null;
-  return { text: finalAnswer };
 }

@@ -30,7 +30,7 @@ const TaskItem = Type.Object(
   { additionalProperties: false },
 );
 
-export const SubagentParams = Type.Object(
+const SubagentParams = Type.Object(
   {
     tasks: Type.Optional(
       Type.Array(TaskItem, {
@@ -61,12 +61,12 @@ type InvalidTaskOutcome = {
   error: string;
 };
 
-export type NormalizedTaskDetail = {
+type NormalizedTaskDetail = {
   taskNumber: number;
   agent: string;
 } & (InvalidTaskOutcome | DelegatedTaskOutcome);
 
-export interface SubagentToolDetails {
+interface SubagentToolDetails {
   tasks: NormalizedTaskDetail[];
 }
 
@@ -103,7 +103,7 @@ export type ExecuteDelegation = (
   },
 ) => Promise<DelegatedTaskExecution[]>;
 
-export interface CreateSubagentToolOptions {
+interface CreateSubagentToolOptions {
   agents: readonly AgentConfig[];
   parentCwd: string;
   includeProjectAgents: boolean;
