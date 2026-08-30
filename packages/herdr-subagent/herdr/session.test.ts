@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createScriptedHerdr, standardLaunchResponse } from "../herdr-test-support.ts";
+import { PiSessionInspector, readAnswer } from "../pi-session.ts";
 import {
   type DelegatedTaskOutcome,
   type LaunchDelegatedTaskOptions,
@@ -11,6 +12,10 @@ import {
 } from "./session.ts";
 
 const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-session-tests-"));
+
+afterAll(() => {
+  fs.rmSync(sessionDir, { recursive: true, force: true });
+});
 
 /** Prompt directories discovered by this test, removed at teardown. */
 const trackedPromptDirs: string[] = [];
@@ -518,6 +523,62 @@ describe("herdr/session — observation", () => {
       expect(result.answer).toEqual({ path: sessionPath, entryId: "m1" });
       expect(result.session.pi).toEqual({ id: "sess-1", path: sessionPath, cwd: "/tmp" });
     }
+    vi.useRealTimers();
+  });
+
+  it("defers answer scans to settled polls and captures the final answer", async () => {
+    const sessionPath = makeSession("first answer");
+    let polls = 0;
+    const herdr = createScriptedHerdr((req) => {
+      const std = standardLaunchResponse(req);
+      if (std) return std;
+      if (req.method === "agent.start") return { result: { pane_id: "p-scan" } };
+      polls += 1;
+      if (polls === 3) {
+        // A later terminal answer is appended while the agent still reports working.
+        fs.appendFileSync(
+          sessionPath,
+          jsonl({
+            type: "message",
+            id: "m2",
+            parentId: "m1",
+            timestamp: "x",
+            message: {
+              role: "assistant",
+              stopReason: "stop",
+              content: [{ type: "text", text: "final answer" }],
+            },
+          }),
+        );
+      }
+      const status = polls <= 3 ? "working" : "done";
+      return { result: { agent: { agent_status: status, agent_session: { path: sessionPath } } } };
+    });
+    const answerScanSpy = vi.spyOn(PiSessionInspector.prototype, "inspectAnswer");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const run = launchAndObserve(
+      {
+        rpc: herdr.rpcCall,
+        targetPaneId: "target-pane",
+        task: {
+          agent: "alpha",
+          instruction: "t",
+          cwd: "/tmp",
+          config: { name: "alpha", systemPromptBody: "" },
+        },
+      },
+      { timeoutMs: 10_000 },
+    );
+    // 5 polls: t=0 working, 800 working, 1600 working, 2400 done, 3200 done -> settled
+    for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(800);
+    const result = await run;
+    expect(result.status).toBe("completed");
+    if (result.status === "completed") {
+      expect(result.answer).toEqual({ path: sessionPath, entryId: "m2" });
+      expect(readAnswer(result.answer)).toBe("final answer");
+    }
+    // Full answer scans happened only on the two settled polls, not while working.
+    expect(answerScanSpy).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
 

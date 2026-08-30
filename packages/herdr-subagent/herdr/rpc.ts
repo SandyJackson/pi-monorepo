@@ -90,8 +90,11 @@ export function createHerdrRpc(socketPath: string): HerdrRpcCall {
         socket.write(`${JSON.stringify({ id, method, params })}\n`);
       });
 
-      socket.on("data", (data: Buffer) => {
-        buffer += data.toString();
+      // Stream-decode UTF-8 so a multibyte character split across socket
+      // chunks is reassembled correctly instead of corrupting per chunk.
+      socket.setEncoding("utf8");
+      socket.on("data", (data: string) => {
+        buffer += data;
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
         for (const line of lines) onLine(line);

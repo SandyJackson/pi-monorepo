@@ -6,7 +6,7 @@ The agent-state projection that backs delegated-turn settlement is Herdr-managed
 
 ## Module ownership
 
-```
+```text
 packages/herdr-subagent/
 ├── index.ts            Pi lifecycle adapter: snapshot + tool registration
 ├── agents.ts           Agent discovery and merge (catalog source)
