@@ -6,9 +6,37 @@ import type {
   ExtensionContext,
   SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverProjectAgents, discoverUserAgents, mergeAgentLists } from "./agents.js";
 import extension from "./index.js";
+
+/**
+ * When set, `fs.readFileSync` throws an EACCES-like error for exactly this
+ * path and delegates every other path to the real implementation.
+ */
+const unreadableFixture = vi.hoisted(() => ({ path: null as string | null }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  const realReadFileSync = actual.readFileSync;
+  const nodePath = await import("node:path");
+  const readFileSync = ((file: string | Buffer, ...rest: unknown[]) => {
+    if (
+      unreadableFixture.path !== null &&
+      typeof file === "string" &&
+      nodePath.resolve(file) === unreadableFixture.path
+    ) {
+      const error: NodeJS.ErrnoException = new Error(`EACCES: permission denied, open '${file}'`);
+      error.code = "EACCES";
+      throw error;
+    }
+    return (realReadFileSync as (file: string | Buffer, ...rest: unknown[]) => string | Buffer)(
+      file,
+      ...rest,
+    );
+  }) as typeof fs.readFileSync;
+  return { ...actual, default: { ...actual, readFileSync }, readFileSync };
+});
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 let rootDir: string;
@@ -29,6 +57,7 @@ beforeEach(() => {
 afterEach(() => {
   if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+  unreadableFixture.path = null;
   fs.rmSync(rootDir, { recursive: true, force: true });
 });
 
@@ -92,7 +121,6 @@ describe("agent discovery", () => {
     fs.writeFileSync(path.join(userAgentsDir, "malformed.md"), "---\nname: malformed\n");
     const unreadablePath = path.join(userAgentsDir, "unreadable.md");
     writeAgent(userAgentsDir, "unreadable.md", "unreadable", "unreadable definition");
-    fs.chmodSync(unreadablePath, 0);
     fs.writeFileSync(
       path.join(userAgentsDir, "configured.md"),
       "---\nname: configured\ndescription: configured agent\ntools: read, bash\nmodel: provider/model\n---\nKeep this prompt.\n",
@@ -107,7 +135,11 @@ describe("agent discovery", () => {
       "---\nname: ignored\n---\n",
     );
 
+    // Deterministic unreadable-file fixture: only unreadable.md rejects reads
+    // with an EACCES-like error; every other path goes to the real fs.
+    unreadableFixture.path = path.resolve(unreadablePath);
     const merged = mergeAgentLists(discoverUserAgents(), discoverProjectAgents(nestedDir));
+    unreadableFixture.path = null;
 
     expect(merged.map(({ name }) => name).sort()).toEqual(
       ["configured", "shared", "Shared", "user"].sort(),

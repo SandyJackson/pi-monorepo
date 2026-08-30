@@ -122,6 +122,24 @@ describe("Herdr RPC transport", () => {
     expect(server.connections).toBe(2);
   });
 
+  it("preserves a multibyte character split across socket writes", async () => {
+    const text = "日本語の応答テキスト";
+    const server = await startSocketServer((request, socket) => {
+      const payload = Buffer.from(
+        `${JSON.stringify({ id: request.id, result: { text } })}\n`,
+        "utf8",
+      );
+      // Split inside the first multibyte character's byte sequence.
+      const firstCharBytes = Buffer.from(text[0]!, "utf8");
+      const charOffset = payload.indexOf(firstCharBytes);
+      const splitAt = charOffset + 1;
+      socket.write(payload.subarray(0, splitAt));
+      setTimeout(() => socket.write(payload.subarray(splitAt)), 10);
+    });
+
+    await expect(callAgentGet(server.socketPath)).resolves.toEqual({ text });
+  });
+
   it("preserves the code and message from a matching server error", async () => {
     const server = await startSocketServer((request, socket) => {
       socket.write(

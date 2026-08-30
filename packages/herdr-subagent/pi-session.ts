@@ -196,6 +196,34 @@ function findAnswer(sessionPath: string): SessionAnswerRef | null {
 }
 
 /**
+ * Incremental inspector for one observed Pi session file.
+ *
+ * Header metadata is cached once discovered (the header is written once,
+ * before any answer entries) and retried on every call while still
+ * incomplete. Answer discovery performs a full file scan, so it belongs on
+ * settled polls — when the session is no longer appending entries — not on
+ * every working poll.
+ */
+export class PiSessionInspector {
+  private cachedPi: PiSessionInfo | null = null;
+  private headerResolved = false;
+
+  /** Header metadata, cached after the first successful discovery. */
+  inspectHeader(sessionPath: string): PiSessionInfo | null {
+    if (!this.headerResolved) {
+      this.cachedPi = readHeader(sessionPath);
+      this.headerResolved = this.cachedPi !== null;
+    }
+    return this.cachedPi;
+  }
+
+  /** Latest terminal assistant answer via a full scan of the file. */
+  inspectAnswer(sessionPath: string): SessionAnswerRef | null {
+    return findAnswer(sessionPath);
+  }
+}
+
+/**
  * Inspect a Pi session JSONL file for durable identity and exact terminal
  * assistant entry reference.
  *

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { inspectSession, type SessionAnswerRef } from "../pi-session.ts";
+import { PiSessionInspector, type SessionAnswerRef } from "../pi-session.ts";
 import { type HerdrRpcCall, HerdrRpcResponseError } from "./rpc.ts";
 
 // ---------------------------------------------------------------------------
@@ -383,6 +383,8 @@ async function observeTurnUntilSettled(
   let consecutiveSettledPolls = 0;
   let observedSession = session;
   let answer: SessionAnswerRef | null = null;
+  // Header discovery is cached; full answer scans run only on settled polls.
+  const inspector = new PiSessionInspector();
 
   try {
     for (;;) {
@@ -426,32 +428,36 @@ async function observeTurnUntilSettled(
         }
       }
 
+      const settledPoll =
+        hasObservedActivity && status !== null && (status === "idle" || status === "done");
+
       if (sessionPath) {
         promptLease.confirmConsumed();
         try {
-          const sessionSnapshot = inspectSession(sessionPath);
-          if (sessionSnapshot.pi)
+          // Cheap while working: header lookup only, cached once found.
+          const pi = inspector.inspectHeader(sessionPath);
+          if (pi)
             observedSession = {
               paneId,
               label: session.label,
               pi: {
-                id: sessionSnapshot.pi.id,
-                path: sessionSnapshot.pi.path,
-                cwd: sessionSnapshot.pi.cwd,
+                id: pi.id,
+                path: pi.path,
+                cwd: pi.cwd,
               },
             };
-          if (sessionSnapshot.answer) answer = sessionSnapshot.answer;
+          // Expensive: full-file answer scan, only once the turn has settled.
+          if (settledPoll) {
+            const latest = inspector.inspectAnswer(sessionPath);
+            if (latest) answer = latest;
+          }
         } catch {}
       }
 
       if (status === "working" || status === "blocked") {
         hasObservedActivity = true;
         consecutiveSettledPolls = 0;
-      } else if (
-        hasObservedActivity &&
-        status !== null &&
-        (status === "idle" || status === "done")
-      ) {
+      } else if (settledPoll) {
         consecutiveSettledPolls += 1;
       } else {
         consecutiveSettledPolls = 0;
