@@ -4,10 +4,13 @@ import * as path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  InputEvent,
+  InputEventResult,
   SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverProjectAgents, discoverUserAgents, mergeAgentLists } from "./agents.js";
+import { DELEGATED_TASK_FILE_FLAG, DELEGATED_TASK_PLACEHOLDER } from "./herdr/session.js";
 import extension from "./index.js";
 
 /**
@@ -68,15 +71,34 @@ function writeAgent(directory: string, fileName: string, name: string, descripti
   );
 }
 
-function createExtensionHarness(trusted: boolean): {
+function createExtensionHarness(
+  trusted: boolean,
+  flagValues: Record<string, boolean | string | undefined> = {},
+): {
   startSession(): void;
+  transformInput(text: string): Promise<InputEventResult | undefined>;
   tools: Array<Record<string, unknown>>;
 } {
   let sessionStart: ((event: SessionStartEvent, ctx: ExtensionContext) => void) | undefined;
+  let inputHandler:
+    | ((
+        event: InputEvent,
+        ctx: ExtensionContext,
+      ) => InputEventResult | undefined | Promise<InputEventResult | undefined>)
+    | undefined;
   const tools: Array<Record<string, unknown>> = [];
+  const appliedFlagValues: Record<string, boolean | string | undefined> = {};
   const pi = {
-    on(event: string, handler: (event: SessionStartEvent, ctx: ExtensionContext) => void) {
-      if (event === "session_start") sessionStart = handler;
+    on(event: string, handler: unknown) {
+      if (event === "session_start") {
+        sessionStart = handler as (event: SessionStartEvent, ctx: ExtensionContext) => void;
+      } else if (event === "input") {
+        inputHandler = handler as typeof inputHandler;
+      }
+    },
+    registerFlag() {},
+    getFlag(name: string) {
+      return appliedFlagValues[name];
     },
     registerTool(tool: Record<string, unknown>) {
       tools.push(tool);
@@ -86,6 +108,8 @@ function createExtensionHarness(trusted: boolean): {
 
   return {
     startSession() {
+      // Pi applies CLI flag values after loading extension factories.
+      Object.assign(appliedFlagValues, flagValues);
       if (!sessionStart) throw new Error("session_start handler was not registered");
       sessionStart(
         { reason: "startup" } as SessionStartEvent,
@@ -93,6 +117,13 @@ function createExtensionHarness(trusted: boolean): {
           cwd: projectDir,
           isProjectTrusted: () => trusted,
         } as ExtensionContext,
+      );
+    },
+    async transformInput(text: string) {
+      if (!inputHandler) return { action: "continue" };
+      return inputHandler(
+        { type: "input", text, source: "interactive" } as InputEvent,
+        {} as ExtensionContext,
       );
     },
     tools,
@@ -151,6 +182,41 @@ describe("agent discovery", () => {
       model: "provider/model",
       systemPromptBody: "Keep this prompt.",
     });
+  });
+});
+
+describe("delegated task input", () => {
+  it("replaces the startup placeholder once when Pi applies task flags after extension loading", async () => {
+    const taskFile = path.join(rootDir, "task.md");
+    const task = "--review '世界' with sanitized spacing";
+    fs.writeFileSync(taskFile, task, "utf8");
+    const harness = createExtensionHarness(true, {
+      [DELEGATED_TASK_FILE_FLAG]: taskFile,
+    });
+    harness.startSession();
+
+    await expect(harness.transformInput(DELEGATED_TASK_PLACEHOLDER)).resolves.toEqual({
+      action: "transform",
+      text: task,
+    });
+    fs.rmSync(taskFile);
+    await expect(harness.transformInput(DELEGATED_TASK_PLACEHOLDER)).resolves.toEqual({
+      action: "continue",
+    });
+  });
+
+  it("ignores private task input without a delegated-task lease", async () => {
+    const taskFile = path.join(rootDir, "ordinary-session.md");
+    fs.writeFileSync(taskFile, "must not be loaded", "utf8");
+    const harness = createExtensionHarness(true);
+    harness.startSession();
+
+    await expect(harness.transformInput(DELEGATED_TASK_PLACEHOLDER)).resolves.toEqual({
+      action: "continue",
+    });
+    await expect(
+      harness.transformInput(`${DELEGATED_TASK_PLACEHOLDER}:${taskFile}`),
+    ).resolves.toEqual({ action: "continue" });
   });
 });
 
