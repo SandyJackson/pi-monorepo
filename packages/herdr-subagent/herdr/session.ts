@@ -83,7 +83,8 @@ const PANE_READINESS_RETRY_DELAY_MS = 250;
 const PROMPT_CLEANUP_FALLBACK_MS = 60_000;
 export const DEFAULT_RPC_TIMEOUT = 5000;
 const START_RPC_TIMEOUT = 15_000;
-export const DELEGATED_TASK_INPUT_PREFIX = "__herdr_subagent_task__:";
+export const DELEGATED_TASK_FILE_FLAG = "herdr-subagent-task-file";
+export const DELEGATED_TASK_PLACEHOLDER = "__herdr_subagent_task__";
 
 /** Default per-task timeout, measured from confirmed launch. */
 export const DEFAULT_TURN_TIMEOUT_MS = 20 * 60 * 1000;
@@ -186,7 +187,7 @@ function createPromptLease(body: string, instruction: string): PromptLease {
     }
     const taskFile = path.join(dir, "task.md");
     fs.writeFileSync(taskFile, sanitizeDelegatedTaskInstruction(instruction), "utf-8");
-    args.push(`${DELEGATED_TASK_INPUT_PREFIX}${taskFile}`);
+    args.push(`--${DELEGATED_TASK_FILE_FLAG}`, taskFile, DELEGATED_TASK_PLACEHOLDER);
   } catch (err) {
     doCleanup();
     throw err;

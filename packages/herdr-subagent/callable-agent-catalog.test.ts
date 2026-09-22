@@ -10,7 +10,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverProjectAgents, discoverUserAgents, mergeAgentLists } from "./agents.js";
-import { DELEGATED_TASK_INPUT_PREFIX } from "./herdr/session.js";
+import { DELEGATED_TASK_FILE_FLAG, DELEGATED_TASK_PLACEHOLDER } from "./herdr/session.js";
 import extension from "./index.js";
 
 /**
@@ -71,7 +71,10 @@ function writeAgent(directory: string, fileName: string, name: string, descripti
   );
 }
 
-function createExtensionHarness(trusted: boolean): {
+function createExtensionHarness(
+  trusted: boolean,
+  flagValues: Record<string, boolean | string | undefined> = {},
+): {
   startSession(): void;
   transformInput(text: string): Promise<InputEventResult | undefined>;
   tools: Array<Record<string, unknown>>;
@@ -92,6 +95,10 @@ function createExtensionHarness(trusted: boolean): {
         inputHandler = handler as typeof inputHandler;
       }
     },
+    registerFlag() {},
+    getFlag(name: string) {
+      return flagValues[name];
+    },
     registerTool(tool: Record<string, unknown>) {
       tools.push(tool);
     },
@@ -110,7 +117,7 @@ function createExtensionHarness(trusted: boolean): {
       );
     },
     async transformInput(text: string) {
-      if (!inputHandler) throw new Error("input handler was not registered");
+      if (!inputHandler) return { action: "continue" };
       return inputHandler(
         { type: "input", text, source: "interactive" } as InputEvent,
         {} as ExtensionContext,
@@ -176,15 +183,31 @@ describe("agent discovery", () => {
 });
 
 describe("delegated task input", () => {
-  it("replaces the private startup token with the task file", async () => {
+  it("replaces the private startup placeholder for a delegated-task lease once", async () => {
     const taskFile = path.join(rootDir, "task.md");
     const task = "--review '世界' with sanitized spacing";
     fs.writeFileSync(taskFile, task, "utf8");
+    const harness = createExtensionHarness(true, {
+      [DELEGATED_TASK_FILE_FLAG]: taskFile,
+    });
+
+    await expect(harness.transformInput(DELEGATED_TASK_PLACEHOLDER)).resolves.toEqual({
+      action: "transform",
+      text: task,
+    });
+    await expect(harness.transformInput(DELEGATED_TASK_PLACEHOLDER)).resolves.toEqual({
+      action: "continue",
+    });
+  });
+
+  it("ignores private task input without a delegated-task lease", async () => {
+    const taskFile = path.join(rootDir, "ordinary-session.md");
+    fs.writeFileSync(taskFile, "must not be loaded", "utf8");
     const harness = createExtensionHarness(true);
 
     await expect(
-      harness.transformInput(`${DELEGATED_TASK_INPUT_PREFIX}${taskFile}`),
-    ).resolves.toEqual({ action: "transform", text: task });
+      harness.transformInput(`${DELEGATED_TASK_PLACEHOLDER}:${taskFile}`),
+    ).resolves.toEqual({ action: "continue" });
   });
 });
 

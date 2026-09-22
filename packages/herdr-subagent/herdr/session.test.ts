@@ -5,7 +5,8 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createScriptedHerdr, standardLaunchResponse } from "../herdr-test-support.ts";
 import { PiSessionInspector, readAnswer } from "../pi-session.ts";
 import {
-  DELEGATED_TASK_INPUT_PREFIX,
+  DELEGATED_TASK_FILE_FLAG,
+  DELEGATED_TASK_PLACEHOLDER,
   type DelegatedTaskOutcome,
   type LaunchDelegatedTaskOptions,
   launchDelegatedTask,
@@ -48,9 +49,10 @@ function jsonl(...objs: unknown[]): string {
 }
 
 function taskFileFromArgs(args: string[]): string {
-  const taskInput = args.find((arg) => arg.startsWith(DELEGATED_TASK_INPUT_PREFIX));
-  if (!taskInput) throw new Error("agent.start did not receive a task file");
-  return taskInput.slice(DELEGATED_TASK_INPUT_PREFIX.length);
+  const taskFlagIdx = args.indexOf(`--${DELEGATED_TASK_FILE_FLAG}`);
+  const taskFile = args[taskFlagIdx + 1];
+  if (taskFlagIdx < 0 || !taskFile) throw new Error("agent.start did not receive a task file");
+  return taskFile;
 }
 
 /** Launch a task and, when confirmed, observe its initial turn to settlement. */
@@ -108,19 +110,20 @@ describe("herdr/session — launch invariants", () => {
       args: expect.arrayContaining(["--model", "openai/gpt-5", "--tools", "read,write"]),
     });
     const args = (capturedArgs as { args: string[] }).args;
-    // Order: --name label, --model ..., --tools ..., system prompt, task input
+    // Order: --name label, --model ..., --tools ..., system prompt, task file, placeholder
     const nameIdx = args.indexOf("--name");
     const modelIdx = args.indexOf("--model");
     const toolsIdx = args.indexOf("--tools");
     const promptIdx = args.indexOf("--append-system-prompt");
-    const taskInputIdx = args.findIndex((arg) => arg.startsWith(DELEGATED_TASK_INPUT_PREFIX));
+    const taskFlagIdx = args.indexOf(`--${DELEGATED_TASK_FILE_FLAG}`);
     expect(nameIdx).toBeLessThan(modelIdx);
     expect(modelIdx).toBeLessThan(toolsIdx);
     expect(toolsIdx).toBeLessThan(promptIdx);
-    expect(promptIdx).toBeLessThan(taskInputIdx);
+    expect(promptIdx).toBeLessThan(taskFlagIdx);
     const taskFile = taskFileFromArgs(args);
     expect(fs.readFileSync(taskFile, "utf8")).toBe(sanitizedTask);
     expect(path.dirname(taskFile)).toBe(path.dirname(args[promptIdx + 1]));
+    expect(args[taskFlagIdx + 2]).toBe(DELEGATED_TASK_PLACEHOLDER);
     expect(Buffer.byteLength(args.join(" "))).toBeLessThan(800);
     expect(args[promptIdx + 1]).toMatch(/pi-subagent-/);
 

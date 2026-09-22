@@ -6,16 +6,30 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { discoverProjectAgents, discoverUserAgents, mergeAgentLists } from "./agents.ts";
 import { executeHerdrDelegation, herdrDelegationEnvironment } from "./herdr/delegation.ts";
-import { DELEGATED_TASK_INPUT_PREFIX } from "./herdr/session.ts";
+import { DELEGATED_TASK_FILE_FLAG, DELEGATED_TASK_PLACEHOLDER } from "./herdr/session.ts";
 import { createSubagentTool } from "./subagent-tool.ts";
 
 function registerDelegatedTaskInput(pi: ExtensionAPI): void {
+  pi.registerFlag(DELEGATED_TASK_FILE_FLAG, {
+    description: "Internal path to a delegated-task prompt",
+    type: "string",
+  });
+
+  const taskFile = pi.getFlag(DELEGATED_TASK_FILE_FLAG);
+  if (typeof taskFile !== "string") return;
+  const task = fs.readFileSync(taskFile, "utf8");
+  let taskPending = true;
+
   pi.on("input", (event) => {
-    if (event.source !== "interactive" || !event.text.startsWith(DELEGATED_TASK_INPUT_PREFIX)) {
+    if (
+      !taskPending ||
+      event.source !== "interactive" ||
+      event.text !== DELEGATED_TASK_PLACEHOLDER
+    ) {
       return { action: "continue" };
     }
-    const taskFile = event.text.slice(DELEGATED_TASK_INPUT_PREFIX.length);
-    return { action: "transform", text: fs.readFileSync(taskFile, "utf8") };
+    taskPending = false;
+    return { action: "transform", text: task };
   });
 }
 
