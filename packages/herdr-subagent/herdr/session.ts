@@ -83,6 +83,7 @@ const PANE_READINESS_RETRY_DELAY_MS = 250;
 const PROMPT_CLEANUP_FALLBACK_MS = 60_000;
 export const DEFAULT_RPC_TIMEOUT = 5000;
 const START_RPC_TIMEOUT = 15_000;
+export const DELEGATED_TASK_INPUT_PREFIX = "__herdr_subagent_task__:";
 
 /** Default per-task timeout, measured from confirmed launch. */
 export const DEFAULT_TURN_TIMEOUT_MS = 20 * 60 * 1000;
@@ -91,7 +92,7 @@ export const DEFAULT_TURN_TIMEOUT_MS = 20 * 60 * 1000;
 // Small helpers
 // ---------------------------------------------------------------------------
 
-function sanitizeArgForHerdr(value: string): string {
+function sanitizeDelegatedTaskInstruction(value: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally strips control characters
   return value.replace(/[\x00-\x1f\x7f]/g, " ");
 }
@@ -160,17 +161,9 @@ interface PromptLease {
   releaseWhenConsumedOrExpired(): void;
 }
 
-function createPromptLease(body: string): PromptLease {
-  if (!body) {
-    return {
-      args: [] as string[],
-      confirmConsumed: () => {},
-      releaseNow: () => {},
-      releaseWhenConsumedOrExpired: () => {},
-    };
-  }
+function createPromptLease(body: string, instruction: string): PromptLease {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
-  const file = path.join(dir, "system-prompt.md");
+  const args: string[] = [];
   let cleaned = false;
   let consumed = false;
   let requested = false;
@@ -186,14 +179,21 @@ function createPromptLease(body: string): PromptLease {
   };
 
   try {
-    fs.writeFileSync(file, body, "utf-8");
+    if (body) {
+      const file = path.join(dir, "system-prompt.md");
+      fs.writeFileSync(file, body, "utf-8");
+      args.push("--append-system-prompt", file);
+    }
+    const taskFile = path.join(dir, "task.md");
+    fs.writeFileSync(taskFile, sanitizeDelegatedTaskInstruction(instruction), "utf-8");
+    args.push(`${DELEGATED_TASK_INPUT_PREFIX}${taskFile}`);
   } catch (err) {
     doCleanup();
     throw err;
   }
 
   return {
-    args: ["--append-system-prompt", file] as string[],
+    args,
     confirmConsumed: () => {
       consumed = true;
       if (requested) doCleanup();
@@ -221,7 +221,6 @@ function buildAgentArguments(task: DelegatedTask, promptArgs: string[]): string[
     argv.push("--tools", task.config.tools.join(","));
   }
   argv.push(...promptArgs);
-  argv.push(sanitizeArgForHerdr(task.instruction));
   return argv;
 }
 
@@ -501,7 +500,7 @@ export async function launchDelegatedTask(
 
   let promptLease: ReturnType<typeof createPromptLease>;
   try {
-    promptLease = createPromptLease(task.config.systemPromptBody);
+    promptLease = createPromptLease(task.config.systemPromptBody, task.instruction);
   } catch (err) {
     return { status: "launch_failed", error: err instanceof Error ? err.message : String(err) };
   }

@@ -5,6 +5,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createScriptedHerdr, standardLaunchResponse } from "../herdr-test-support.ts";
 import { PiSessionInspector, readAnswer } from "../pi-session.ts";
 import {
+  DELEGATED_TASK_INPUT_PREFIX,
   type DelegatedTaskOutcome,
   type LaunchDelegatedTaskOptions,
   launchDelegatedTask,
@@ -46,6 +47,12 @@ function jsonl(...objs: unknown[]): string {
   return `${objs.map((o) => JSON.stringify(o)).join("\n")}\n`;
 }
 
+function taskFileFromArgs(args: string[]): string {
+  const taskInput = args.find((arg) => arg.startsWith(DELEGATED_TASK_INPUT_PREFIX));
+  if (!taskInput) throw new Error("agent.start did not receive a task file");
+  return taskInput.slice(DELEGATED_TASK_INPUT_PREFIX.length);
+}
+
 /** Launch a task and, when confirmed, observe its initial turn to settlement. */
 async function launchAndObserve(
   options: LaunchDelegatedTaskOptions,
@@ -57,7 +64,7 @@ async function launchAndObserve(
 }
 
 describe("herdr/session — launch invariants", () => {
-  it("preserves argv order name/model/tools/prompt/task and sanitizes control chars", async () => {
+  it("preserves argv order and passes a long sanitized task through private startup input", async () => {
     let capturedArgs: unknown = null;
     const herdr = createScriptedHerdr((req) => {
       const std = standardLaunchResponse(req);
@@ -72,7 +79,9 @@ describe("herdr/session — launch invariants", () => {
 
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const controller = new AbortController();
-    const taskWithControls = "hello\x00world\x1f\x7f!";
+    const taskWithControls = "--hello '世界'\n\t\x00world\x1f\x7f!".repeat(1000);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: mirrors launch sanitization
+    const sanitizedTask = taskWithControls.replace(/[\x00-\x1f\x7f]/g, " ");
     const session = launchAndObserve(
       {
         rpc: herdr.rpcCall,
@@ -99,17 +108,20 @@ describe("herdr/session — launch invariants", () => {
       args: expect.arrayContaining(["--model", "openai/gpt-5", "--tools", "read,write"]),
     });
     const args = (capturedArgs as { args: string[] }).args;
-    // Order: --name label, --model ..., --tools ..., --append-system-prompt path, sanitized task
+    // Order: --name label, --model ..., --tools ..., system prompt, task input
     const nameIdx = args.indexOf("--name");
     const modelIdx = args.indexOf("--model");
     const toolsIdx = args.indexOf("--tools");
     const promptIdx = args.indexOf("--append-system-prompt");
+    const taskInputIdx = args.findIndex((arg) => arg.startsWith(DELEGATED_TASK_INPUT_PREFIX));
     expect(nameIdx).toBeLessThan(modelIdx);
     expect(modelIdx).toBeLessThan(toolsIdx);
     expect(toolsIdx).toBeLessThan(promptIdx);
-    // Sanitized task is last
-    expect(args[args.length - 1]).toBe("hello world  !");
-    // Should contain prompt file arg
+    expect(promptIdx).toBeLessThan(taskInputIdx);
+    const taskFile = taskFileFromArgs(args);
+    expect(fs.readFileSync(taskFile, "utf8")).toBe(sanitizedTask);
+    expect(path.dirname(taskFile)).toBe(path.dirname(args[promptIdx + 1]));
+    expect(Buffer.byteLength(args.join(" "))).toBeLessThan(800);
     expect(args[promptIdx + 1]).toMatch(/pi-subagent-/);
 
     controller.abort();
@@ -293,20 +305,17 @@ describe("herdr/session — launch invariants", () => {
 });
 
 describe("herdr/session — prompt lease", () => {
-  function promptDirs(): Set<string> {
-    return new Set(
-      fs
-        .readdirSync(os.tmpdir())
-        .filter((e) => e.startsWith("pi-subagent-"))
-        .map((e) => path.join(os.tmpdir(), e)),
-    );
-  }
-
-  it("empty body creates no file", async () => {
-    const before = promptDirs();
-    const herdr = createScriptedHerdr(
-      (req) => standardLaunchResponse(req) ?? { error: { code: "launch_rejected", message: "x" } },
-    );
+  it("writes the task without a system prompt and cleans up a rejected launch", async () => {
+    let taskFile: string | undefined;
+    const herdr = createScriptedHerdr((req) => {
+      const standard = standardLaunchResponse(req);
+      if (standard) return standard;
+      const args = (req.params as { args: string[] }).args;
+      expect(args).not.toContain("--append-system-prompt");
+      taskFile = taskFileFromArgs(args);
+      expect(fs.readFileSync(taskFile, "utf8")).toBe("t");
+      return { error: { code: "launch_rejected", message: "x" } };
+    });
     await launchAndObserve({
       rpc: herdr.rpcCall,
       targetPaneId: "target-pane",
@@ -317,17 +326,21 @@ describe("herdr/session — prompt lease", () => {
         config: { name: "alpha", systemPromptBody: "" },
       },
     });
-    expect(promptDirs()).toEqual(before);
+    if (!taskFile) throw new Error("agent.start did not receive a task file");
+    expect(fs.existsSync(path.dirname(taskFile))).toBe(false);
   });
 
   it("keeps the prompt until observation ends, then expires it via the fallback", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    const before = promptDirs();
+    let dir: string | undefined;
     // The child never publishes a session path and keeps working.
     const herdr = createScriptedHerdr((req) => {
       const std = standardLaunchResponse(req);
       if (std) return std;
-      if (req.method === "agent.start") return { result: { pane_id: "p-slow" } };
+      if (req.method === "agent.start") {
+        dir = path.dirname(taskFileFromArgs((req.params as { args: string[] }).args));
+        return { result: { pane_id: "p-slow" } };
+      }
       return { result: { agent: { agent_status: "working" } } };
     });
     const controller = new AbortController();
@@ -342,50 +355,36 @@ describe("herdr/session — prompt lease", () => {
       },
       signal: controller.signal,
     });
-    const dir = [...promptDirs()].find((e) => !before.has(e));
-    expect(dir).toBeDefined();
-    trackPromptDir(dir!);
+    await vi.advanceTimersByTimeAsync(0);
+    if (!dir) throw new Error("agent.start was not called");
+    trackPromptDir(dir);
 
     // Well past 60 seconds of active observation, the prompt must remain:
     // the fallback only applies after observation ends.
     await vi.advanceTimersByTimeAsync(61_000);
-    expect(fs.existsSync(dir!)).toBe(true);
+    expect(fs.existsSync(dir)).toBe(true);
 
     // Ending the observation requests cleanup; the fallback timer starts now.
     controller.abort();
     const result = await session;
     expect(result.status).toBe("aborted");
-    expect(fs.existsSync(dir!)).toBe(true);
+    expect(fs.existsSync(dir)).toBe(true);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(fs.existsSync(dir!)).toBe(false);
+    expect(fs.existsSync(dir)).toBe(false);
     vi.useRealTimers();
-  });
-
-  it("confirmed failure removes prompt immediately", async () => {
-    const before = promptDirs();
-    const herdr = createScriptedHerdr(
-      (req) =>
-        standardLaunchResponse(req) ?? { error: { code: "launch_rejected", message: "denied" } },
-    );
-    await launchAndObserve({
-      rpc: herdr.rpcCall,
-      targetPaneId: "target-pane",
-      task: {
-        agent: "alpha",
-        instruction: "t",
-        cwd: "/tmp",
-        config: { name: "alpha", systemPromptBody: "body" },
-      },
-    });
-    expect(promptDirs()).toEqual(before);
   });
 
   it("indeterminate retains 60s and confirmed retains until session path", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    const before = promptDirs();
 
     // Indeterminate
-    const ind = createScriptedHerdr((req) => standardLaunchResponse(req) ?? { result: {} });
+    let dir: string | undefined;
+    const ind = createScriptedHerdr((req) => {
+      const standard = standardLaunchResponse(req);
+      if (standard) return standard;
+      dir = path.dirname(taskFileFromArgs((req.params as { args: string[] }).args));
+      return { result: {} };
+    });
     const p1 = launchAndObserve({
       rpc: ind.rpcCall,
       targetPaneId: "target-pane",
@@ -397,12 +396,11 @@ describe("herdr/session — prompt lease", () => {
       },
     });
     await p1;
-    const dir = [...promptDirs()].find((e) => !before.has(e));
-    expect(dir).toBeDefined();
-    trackPromptDir(dir!);
-    expect(fs.existsSync(dir!)).toBe(true);
+    if (!dir) throw new Error("agent.start was not called");
+    trackPromptDir(dir);
+    expect(fs.existsSync(dir)).toBe(true);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(fs.existsSync(dir!)).toBe(false);
+    expect(fs.existsSync(dir)).toBe(false);
 
     // Confirmed with session path → prompt removed on observation (session path confirms consumption)
     const sessionPath = writeSessionFile(
@@ -423,10 +421,14 @@ describe("herdr/session — prompt lease", () => {
       ),
     );
     let getCount = 0;
+    let dirConf: string | undefined;
     const confirmed = createScriptedHerdr((req) => {
       const std = standardLaunchResponse(req);
       if (std) return std;
-      if (req.method === "agent.start") return { result: { pane_id: "p-conf" } };
+      if (req.method === "agent.start") {
+        dirConf = path.dirname(taskFileFromArgs((req.params as { args: string[] }).args));
+        return { result: { pane_id: "p-conf" } };
+      }
       getCount += 1;
       if (getCount === 1)
         return {
@@ -434,7 +436,6 @@ describe("herdr/session — prompt lease", () => {
         };
       return { result: { agent: { agent_status: "idle", agent_session: { path: sessionPath } } } };
     });
-    const before2 = promptDirs();
     const session = launchAndObserve(
       {
         rpc: confirmed.rpcCall,
@@ -448,14 +449,13 @@ describe("herdr/session — prompt lease", () => {
       },
       { timeoutMs: 5000 },
     );
-    const dirConf = [...promptDirs()].find((e) => !before2.has(e));
-    expect(dirConf).toBeDefined();
-    trackPromptDir(dirConf!);
     await vi.advanceTimersByTimeAsync(0);
+    if (!dirConf) throw new Error("agent.start was not called");
+    trackPromptDir(dirConf);
     await vi.advanceTimersByTimeAsync(800);
     await vi.advanceTimersByTimeAsync(800);
     await session;
-    expect(fs.existsSync(dirConf!)).toBe(false);
+    expect(fs.existsSync(dirConf)).toBe(false);
     vi.useRealTimers();
   });
 });

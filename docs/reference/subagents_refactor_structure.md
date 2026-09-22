@@ -10,7 +10,7 @@ The design uses fewer, deeper modules:
 
 - the tool module owns Pi-facing policy and presentation;
 - one concrete Herdr delegation module owns execution;
-- one Herdr session module owns a visible child session's lifecycle;
+- one Herdr session module owns a visible child session's lifecycle and private launch-input protocol;
 - the only runtime port is the real JSON-RPC process seam.
 
 ## Domain model
@@ -40,13 +40,13 @@ flowchart LR
 
 ```text
 packages/herdr-subagent/
-├── index.ts                 # Pi lifecycle adapter and composition root
+├── index.ts                 # Pi lifecycle and child task-input adapter
 ├── subagent-tool.ts         # Request policy, task resolution, presentation
 ├── agents.ts                # Session-scoped callable agent catalog
 ├── pi-session.ts            # Session metadata and exact answer-entry access
 └── herdr/
     ├── delegation.ts        # Workspace placement and ordered execution
-    ├── session.ts           # Child launch, observation, prompt ownership
+    ├── session.ts           # Child launch, observation, launch-input ownership
     └── rpc.ts               # Unix-socket NDJSON transport
 ```
 
@@ -70,6 +70,7 @@ flowchart TB
     Pi --> Index
     Index --> Agents
     Index --> Tool
+    Index --> Session
     Tool --> Delegation
     Tool --> PiSession
     Delegation --> Session
@@ -88,7 +89,7 @@ flowchart TB
 
 ### Dependency rule
 
-`subagent-tool.ts` imports only the deep `executeHerdrDelegation` operation from the Herdr implementation. It does not know about panes, RPC methods, launch retries, prompt files, polling, or workspace locking.
+`subagent-tool.ts` imports only the deep `executeHerdrDelegation` operation from the Herdr implementation. It does not know about panes, RPC methods, launch retries, launch-input files, polling, or workspace locking.
 
 No `SubagentBackend`, `BackendSelection`, `SpawnBatchResult`, or backend auto-detection interface remains.
 
@@ -96,12 +97,12 @@ No `SubagentBackend`, `BackendSelection`, `SpawnBatchResult`, or backend auto-de
 
 | Module | Owns | Does not own |
 |---|---|---|
-| `index.ts` | Pi lifecycle, project trust, session catalog snapshot, tool registration, dependency composition | Validation, execution, Herdr protocol |
-| `subagent-tool.ts` | Strict tool schema, semantic task validation, agent resolution, task numbering, mixed valid/invalid merging, progress semantics, final content/details | Herdr RPC, pane placement, prompt files, polling |
+| `index.ts` | Pi lifecycle, project trust, session catalog snapshot, tool registration, dependency composition, child startup task-file substitution | Validation, execution, Herdr protocol |
+| `subagent-tool.ts` | Strict tool schema, semantic task validation, agent resolution, task numbering, mixed valid/invalid merging, progress semantics, final content/details | Herdr RPC, pane placement, launch-input files, polling |
 | `agents.ts` | Agent file discovery, frontmatter parsing, nearest project catalog, precedence, sorted immutable catalog | Per-task rediscovery, Herdr execution |
 | `pi-session.ts` | Pi header parsing, exact terminal assistant entry selection, answer-entry resolution | Polling Herdr, rendering tool output |
 | `herdr/delegation.ts` | Herdr environment validation, workspace tab lock/provisioning, pane placement, sequential launch, ordered outcome accounting | Model-facing formatting, agent discovery |
-| `herdr/session.ts` | One child launch, argv, labels, retries, launch certainty, prompt lease, Pi-hook-backed turn observation, session metadata capture | Multi-task ordering, tool presentation |
+| `herdr/session.ts` | One child launch, argv, labels, retries, launch certainty, launch-input lease and private task-file protocol, Pi-hook-backed turn observation, session metadata capture | Multi-task ordering, tool presentation |
 | `herdr/rpc.ts` | Request IDs, NDJSON framing, socket lifecycle, timeout, abort, JSON-RPC response errors | Domain classification, retries, pane policy |
 
 ## Main interfaces
@@ -428,31 +429,9 @@ sequenceDiagram
 
 The answer is extracted only while building final model-facing content. Structured details retain the reference, not a duplicate answer.
 
-## Prompt-file lease lifecycle
+## Launch-input lease lifecycle
 
-A child agent's system prompt is written to a temporary file and passed through `--append-system-prompt`. The file is local launch infrastructure, not part of the delegated task outcome.
-
-```mermaid
-stateDiagram-v2
-    [*] --> NoLease: empty system prompt
-    [*] --> Created: prompt file written
-
-    Created --> Released: confirmed launch failure
-    Created --> DeferredRelease: launch indeterminate
-    Created --> Launched: launch confirmed
-
-    Launched --> Consumed: first Pi session path observed
-    Launched --> CleanupRequested: observation ends before path observed
-    Consumed --> Released: cleanup requested
-    CleanupRequested --> Released: session path later observed
-    CleanupRequested --> DeferredRelease: fallback timer
-    DeferredRelease --> Released: fallback expires
-
-    NoLease --> [*]
-    Released --> [*]
-```
-
-Release is idempotent, non-throwing, and best-effort. It deletes only the temporary prompt directory; it never closes the pane or child Pi session.
+See [Subagent delegation architecture](./subagents_structure.md#visible-subagent-session-lifecycle) for the implemented lifecycle.
 
 ## Outcome model
 
@@ -542,7 +521,7 @@ flowchart TD
     Stage -->|Confirmed session observing| Observing[aborted / observing]
 
     Before --> Stop[Do not launch later tasks]
-    Ambiguous --> Protect[Do not reuse pane; defer prompt cleanup]
+    Ambiguous --> Protect[Do not reuse pane; defer launch-input cleanup]
     Observing --> Keep[Stop observing; leave session live]
 ```
 
@@ -624,7 +603,7 @@ Completed answers use Pi's canonical 50 KiB/2,000-line head truncation. The full
 10. A delegated turn ending never implies that its visible subagent session ended.
 11. Timeout and cancellation never close a confirmed child session.
 12. Indeterminate launches never reuse the possibly occupied pane.
-13. Prompt resources remain until consumption is known or the conservative fallback expires.
+13. Launch-input files remain until consumption is known or the conservative fallback expires.
 14. Final answer extraction uses the exact persisted message entry observed at settlement.
 15. Agent discovery and the tool description use the same session-scoped catalog snapshot.
 
@@ -640,7 +619,7 @@ flowchart LR
 ```
 
 - Tool tests verify strict request policy, mixed valid/invalid tasks, numbering, merging, normalized details, presentation, and truncation.
-- Delegation/session tests verify placement, sequential launch, immediate observation, launch certainty, cancellation, timeout, prompt leases, and ordered outcomes.
+- Delegation/session tests verify placement, sequential launch, immediate observation, launch certainty, cancellation, timeout, launch-input leases, startup task substitution, and ordered outcomes.
 - RPC tests verify NDJSON framing, response matching, timeout, abort, and response errors.
 - Pi session tests verify header capture, exact terminal entry references, later-turn exclusion, malformed lines, and missing answers.
 - Catalog tests verify trust, nearest project discovery, precedence, and session snapshot consistency.

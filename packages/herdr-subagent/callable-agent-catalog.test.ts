@@ -4,10 +4,13 @@ import * as path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  InputEvent,
+  InputEventResult,
   SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverProjectAgents, discoverUserAgents, mergeAgentLists } from "./agents.js";
+import { DELEGATED_TASK_INPUT_PREFIX } from "./herdr/session.js";
 import extension from "./index.js";
 
 /**
@@ -70,13 +73,24 @@ function writeAgent(directory: string, fileName: string, name: string, descripti
 
 function createExtensionHarness(trusted: boolean): {
   startSession(): void;
+  transformInput(text: string): Promise<InputEventResult | undefined>;
   tools: Array<Record<string, unknown>>;
 } {
   let sessionStart: ((event: SessionStartEvent, ctx: ExtensionContext) => void) | undefined;
+  let inputHandler:
+    | ((
+        event: InputEvent,
+        ctx: ExtensionContext,
+      ) => InputEventResult | undefined | Promise<InputEventResult | undefined>)
+    | undefined;
   const tools: Array<Record<string, unknown>> = [];
   const pi = {
-    on(event: string, handler: (event: SessionStartEvent, ctx: ExtensionContext) => void) {
-      if (event === "session_start") sessionStart = handler;
+    on(event: string, handler: unknown) {
+      if (event === "session_start") {
+        sessionStart = handler as (event: SessionStartEvent, ctx: ExtensionContext) => void;
+      } else if (event === "input") {
+        inputHandler = handler as typeof inputHandler;
+      }
     },
     registerTool(tool: Record<string, unknown>) {
       tools.push(tool);
@@ -93,6 +107,13 @@ function createExtensionHarness(trusted: boolean): {
           cwd: projectDir,
           isProjectTrusted: () => trusted,
         } as ExtensionContext,
+      );
+    },
+    async transformInput(text: string) {
+      if (!inputHandler) throw new Error("input handler was not registered");
+      return inputHandler(
+        { type: "input", text, source: "interactive" } as InputEvent,
+        {} as ExtensionContext,
       );
     },
     tools,
@@ -151,6 +172,19 @@ describe("agent discovery", () => {
       model: "provider/model",
       systemPromptBody: "Keep this prompt.",
     });
+  });
+});
+
+describe("delegated task input", () => {
+  it("replaces the private startup token with the task file", async () => {
+    const taskFile = path.join(rootDir, "task.md");
+    const task = "--review '世界' with sanitized spacing";
+    fs.writeFileSync(taskFile, task, "utf8");
+    const harness = createExtensionHarness(true);
+
+    await expect(
+      harness.transformInput(`${DELEGATED_TASK_INPUT_PREFIX}${taskFile}`),
+    ).resolves.toEqual({ action: "transform", text: task });
   });
 });
 
