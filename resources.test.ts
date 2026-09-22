@@ -45,12 +45,13 @@ const EXPECTED_SKILLS = [
   "wayfinder",
 ];
 
-/** All 5 agents that must exist in the workspace. */
+/** All 6 agents that must exist in the workspace. */
 const EXPECTED_AGENTS = [
   "code-reviewer",
   "codebase-analyser",
   "docs-researcher",
   "explain",
+  "implement",
   "refactor",
 ];
 

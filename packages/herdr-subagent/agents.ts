@@ -28,8 +28,12 @@ export interface AgentConfig {
    * Tool allowlist from the frontmatter `tools` field.
    * `undefined` or empty array means "use Pi's default toolset" (no restriction
    * passed via `--tools`, so the child gets Pi's standard built-in tools).
-   * To disable all built-in tools while keeping extension tools, declare
-   * `tools: ext:some-tool` (only extension tools).
+   * Values are matched against Pi's tool registry by exact registered name —
+   * plain built-in names (`read`, `bash`, ...) and plain extension tool names
+   * (`web_search`, ...). There is no `ext:<package>/<tool>` syntax; unknown
+   * names are silently ignored. To disable all built-in tools while keeping
+   * extension tools, list the extension tool names explicitly, e.g.
+   * `tools: web_search` (only that extension tool).
    */
   tools?: string[];
   /**

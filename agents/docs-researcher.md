@@ -1,7 +1,7 @@
 ---
 description: Researches current documentation. Use when an answer depends on library/API docs, version-specific behavior, official guidance, or external sources.
 display_name: Docs Researcher
-tools: read, grep, find, ls, bash, ext:pi-web-access/web_search, ext:pi-web-access/fetch_content, ext:pi-web-access/get_search_content
+tools: read, grep, find, ls, bash, web_search, fetch_content, get_search_content
 extensions: [pi-web-access, bash-permission]
 model: opencode-go/glm-5.3-flash
 ---

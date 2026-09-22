@@ -1,7 +1,7 @@
 ---
 description: Implements a piece of code. Use this to implement chunks of a larger project. Give it enough context that it doesn't need to explore too much.
 display_name: Implement
-tools: read, grep, find, ls, bash, ext:pi-web-access/web_search, ext:pi-web-access/fetch_content, ext:pi-web-access/get_search_content
+tools: read, grep, find, ls, bash, web_search, fetch_content, get_search_content
 extensions: [pi-web-access, bash-permission]
 model: opencode-go/glm-5.3-flash
 ---
