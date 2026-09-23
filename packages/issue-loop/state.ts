@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { LoopSettings } from "./settings.ts";
 
-export const RUN_STATE_VERSION = 2;
+export const RUN_STATE_VERSION = 3;
 export const MAX_REPAIRS = 2;
 
 export interface Issue {
@@ -42,6 +43,8 @@ export interface RunState {
   check: string;
   setup?: string;
   timeoutMs: number;
+  /** Resolved `--settings` snapshot. `resume` reuses it even if the source files change. */
+  settings: LoopSettings;
   parent: Issue;
   tickets: Ticket[];
   sessions: Session[];
@@ -88,6 +91,11 @@ export function save(state: RunState): void {
       `Branch: ${state.branch}`,
       `Worktree: ${state.worktree}`,
       `Checks: ${state.check}`,
+      `Implement: ${state.settings.implement.model ?? "configured model"} [${state.settings.implement.tools.join(",")}]${state.settings.implement.agentName ? ` (${state.settings.implement.agentName})` : ""}`,
+      `Review: ${state.settings.review.model ?? "configured model"} [${state.settings.review.tools.join(",")}]${state.settings.review.agentName ? ` (${state.settings.review.agentName})` : ""}`,
+      state.settings.appendSystemPrompt
+        ? `Shared worker prompt: ${state.settings.appendSystemPrompt}`
+        : "",
       state.pr ? `Pull request: ${state.pr}` : "",
       "",
       "## Tickets",
@@ -127,8 +135,28 @@ export function load(runDir: string): RunState {
   }
   const validBudget = (value: number) =>
     Number.isInteger(value) && value >= 0 && value <= MAX_REPAIRS;
+  const validRole = (role: unknown): boolean =>
+    !!role &&
+    typeof role === "object" &&
+    ((role as { model?: unknown }).model === undefined ||
+      typeof (role as { model?: unknown }).model === "string") &&
+    Array.isArray((role as { tools?: unknown }).tools) &&
+    (role as { tools: unknown[] }).tools.every((tool) => typeof tool === "string") &&
+    ((role as { promptBody?: unknown }).promptBody === undefined ||
+      typeof (role as { promptBody?: unknown }).promptBody === "string") &&
+    ((role as { agentName?: unknown }).agentName === undefined ||
+      typeof (role as { agentName?: unknown }).agentName === "string");
+  const settings = (state as { settings?: unknown }).settings;
+  const validSettings =
+    !!settings &&
+    typeof settings === "object" &&
+    validRole((settings as { implement?: unknown }).implement) &&
+    validRole((settings as { review?: unknown }).review) &&
+    ((settings as { appendSystemPrompt?: unknown }).appendSystemPrompt === undefined ||
+      typeof (settings as { appendSystemPrompt?: unknown }).appendSystemPrompt === "string");
   if (
     state.runDir !== resolve(runDir) ||
+    !validSettings ||
     typeof state.origin !== "string" ||
     !Array.isArray(state.tickets) ||
     !Array.isArray(state.sessions) ||

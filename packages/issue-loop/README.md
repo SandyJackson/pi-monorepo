@@ -1,17 +1,17 @@
 # GitHub issue loop
 
-A small local controller for one parent GitHub issue. It implements direct child tickets sequentially on one feature branch, runs your checks and independent Pi reviews, and opens one final PR. No workflow engine or Pi extension is required.
+A small local controller for one parent GitHub issue. It implements direct child tickets one by one on a single feature branch, runs your checks and independent Pi reviews, and opens one final PR. No workflow engine or Pi extension is required.
 
 ## Requirements
 
 - macOS or Linux; Node 22.18+ or Node 24+.
-- `git`, authenticated `gh`, and authenticated `pi` on PATH. Pi must support `-p`, `--name`, `--session`, `--approve`, and tool allowlists. Developed against installed Pi 0.86.1.
-- A GitHub.com repository with `origin` pointing at the repository containing the parent issue. Fetch and push URLs must be the same. The runner resolves GitHub identity explicitly from `origin`, not from `GH_REPO`.
-- Open, implementation-ready direct child issues linked through GitHub's native sub-issue feature. Native blocked-by dependencies are respected. Task-list links in an issue body are not parsed.
-- Authoritative requirements in the parent and ticket bodies. Issue comments are not fetched or forwarded to workers. Copy any approved decisions from comments into the relevant issue body before starting.
+- `git`, authenticated `gh`, and authenticated `pi` on PATH. Pi must support `-p`, `--name`, `--session`, `--approve`, and tool allowlists. Developed against Pi 0.86.1.
+- A GitHub.com repository with `origin` pointing at the repo holding the parent issue. Fetch and push URLs must match. GitHub identity comes from `origin`, not `GH_REPO`.
+- Open, implementation-ready child issues linked through GitHub's native sub-issue feature. Native blocked-by dependencies are respected. Task-list links are ignored.
+- Requirements live in the parent and ticket bodies. Comments are never fetched or forwarded, so copy approved decisions into the relevant body before starting.
 - A check command that terminates and exits nonzero on failure. No watch mode.
 
-Both roles use your configured Pi model. Pi resources are loaded for the new worktree using `--approve`. This trusts project-local resources; it does not bypass your command permission extension. Configure Pi authentication before starting so workers do not need an interactive login.
+Both roles use your configured Pi model unless `--settings` overrides it. The new worktree loads Pi resources with `--approve`, which trusts project-local resources without bypassing your command permission extension. Authenticate Pi first so workers never face an interactive login.
 
 ## Start
 
@@ -25,7 +25,7 @@ pnpm issue-loop start \
   --check 'pnpm typecheck && pnpm exec vitest run'
 ```
 
-Or call the runner by absolute path from any directory:
+Or by absolute path from anywhere:
 
 ```sh
 node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
@@ -34,11 +34,29 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
   --check 'make test'
 ```
 
-`--setup` is optional. A new Git worktree does not inherit untracked dependencies such as `node_modules`; provide setup when needed. It runs before the first ticket and runs again if a failed setup is explicitly resumed, so use a repeatable command.
+`--setup` is optional. A fresh worktree has no untracked dependencies such as `node_modules`, so provide setup when you need it. It runs before the first ticket and again on resume after a failed setup, so keep it repeatable.
 
-`--timeout SECONDS` limits each worker, setup, and check invocation. It defaults to 1800 and accepts 1–7200. Git/GitHub operations have a 60-second limit. Ctrl-C stops the active process group, preserves work, and records a blocked run. A repeated interrupt escalates to SIGKILL.
+`--timeout SECONDS` caps each worker, setup, and check invocation. Default 1800, accepts 1-7200. Git/GitHub operations get 60 seconds. Ctrl-C stops the active process group, preserves work, and records a blocked run. A second interrupt escalates to SIGKILL.
 
-The runner prints its run directory before starting work. It lives beside the source repository:
+## Customizing workers
+
+`--settings ./loop-settings.json` overrides worker models, tool allowlists, role guidance, and a shared system-prompt addition. Every field is optional.
+
+```json
+{
+  "implementAgent": "./agents/loop-implement.md",
+  "reviewAgent": "./agents/loop-review.md",
+  "appendSystemPrompt": "Prefer small, focused changes."
+}
+```
+
+Agent files use the agent markdown format: frontmatter with `model` and `tools`, plus a prompt body that replaces the default role guidance only. Paths resolve relative to the settings file. The runner still supplies issue context, constraints, patch/check context, and the reviewer's required JSON verdict format. `appendSystemPromptFile` is the file-based alternative to the inline string: plain markdown, used verbatim, never frontmatter-parsed. Setting both is an error.
+
+An absent `tools` field keeps the built-ins (implement: `read,grep,find,ls,bash,edit,write`; review: `read,grep,find,ls`). An explicit list replaces them. A reviewer asking for `bash`, `edit`, or `write` fails at startup. `extensions:` and `skills:` keys are parsed but ignored for now.
+
+Resolved models, tools, prompts, and shared text land in `state.json` at start. `resume` reuses that snapshot even if the source files change or disappear. No discovery, inheritance, or template language.
+
+The runner prints its run directory before starting work. It sits beside the source repository:
 
 ```text
 ../.pi-issue-loops/project-123-<timestamp>-<id>/
@@ -51,49 +69,41 @@ The runner prints its run directory before starting work. It lives beside the so
   pr.md
 ```
 
-The original checkout is not switched, cleaned, or copied. Uncommitted work there is not included. The new feature branch starts from the remote default branch fetched at launch. The branch/worktree and run files are retained after success or failure.
+The original checkout is untouched and its uncommitted work excluded. The feature branch starts from the remote default branch fetched at launch. Branch, worktree, and run files survive success or failure.
 
 ## What runs
 
-1. Snapshot the parent and open direct child issue bodies, plus native dependencies. Preserve the parent's sub-issue order across API pages; dependencies take precedence when selecting the next eligible ticket. Closed children are outside this run's queue.
-2. Start a fresh implementation session for one eligible ticket.
-3. Run the configured checks outside the agent.
-4. Stage the patch, including new files, and start a fresh read-only reviewer with the requirements, patch, and check log. A strict JSON verdict is required. Invalid output cannot pass.
-5. Commit accepted work and record its SHA. If checks or review request changes, allow at most two implementation repairs for that ticket.
-6. Once tickets are accepted, run checks and review the cumulative change against the parent specification. This phase also has at most two repairs.
-7. Push only the feature branch and open one PR. A publication retry checks for an existing PR instead of creating a duplicate.
+1. Snapshot the parent and open direct child bodies, plus native dependencies. Sub-issue order survives API pagination; dependencies pick the next eligible ticket. Closed children stay out.
+2. Implement one eligible ticket in a fresh session, then run the configured checks outside the agent.
+3. Stage the patch, new files included, and start a fresh read-only reviewer with requirements, patch, and check log. The verdict must be strict JSON. Anything else cannot pass.
+4. Commit accepted work and record its SHA. At most two implementation repairs per ticket, and two more for the final parent review. A ticket whose requirements already hold passes without a new commit; its checkpoint records the existing HEAD.
+5. Push only the feature branch and open one PR. A publication retry looks for the existing PR before creating one.
 
-The controller never merges. Issues remain open until a human merges the final PR into the default branch; its body includes closing references for the parent and accepted children.
-
-Internal dependencies are satisfied by ticket acceptance on this run's branch, not GitHub closure. External blockers must be closed. Make sure their implementation is present in the pinned base before starting; the runner does not automatically update or rebase its worktree when another issue is resolved. If there are unfinished tickets but none can run, it stops instead of claiming completion.
-
-A ticket may be accepted without a new commit if its requirements are already satisfied and checks/review pass. Its checkpoint then records the existing HEAD.
+The controller never merges. Issues stay open until a human merges the final PR, whose body references the parent and accepted children for closing. Internal dependencies resolve through acceptance on the run's branch, not GitHub closure. External blockers must be closed with their implementation already in the pinned base. The runner never rebases. If tickets remain but none can run, it stops instead of declaring victory.
 
 ## Resume after a failure or manual fix
 
-Read `summary.md`. It lists ticket statuses, accepted commits, repair counts, the current failure/findings, worktree path, sessions, and an exact resume command.
+Read `summary.md` for statuses, commits, repair counts, the failure and findings, paths, sessions, and the exact resume command.
 
-Make any manual fix **in the run's worktree**, not in the original checkout. Then:
+Fix manually **in the run's worktree**, never in the original checkout. Then:
 
 ```sh
 pnpm issue-loop resume /absolute/path/to/.pi-issue-loops/project-123-<timestamp>-<id>
 ```
 
-Resume checks and reviews the current ticket's files before launching another implementation worker. It does not throw away your edits, reset the branch, rerun accepted tickets, or assume your fix is correct. Manual commits are allowed during an interrupted ticket or final review as long as they descend from accepted history; they are reviewed too. Do not rewrite accepted commits or change the branch.
+Resume checks and reviews the current ticket's files before launching another implementer. It keeps your edits, stays on the branch, skips accepted tickets, and never assumes your fix is right. Manual commits are fine mid-ticket or mid-review if they descend from accepted history. They get reviewed too. Never rewrite accepted commits or switch branches.
 
-Repair budgets are persisted. Resuming an exhausted ticket permits checking and reviewing a manual fix, but does not buy two more automatic repairs. Fix any remaining findings manually and resume again. Timeouts, provider failures, blocked reviews, and invalid verdicts stop immediately rather than consuming repeated attempts automatically.
+Budgets persist, so resuming an exhausted ticket buys no fresh repairs. Fix the rest by hand and resume again. Timeouts, provider failures, blocked reviews, and invalid verdicts stop at once. If publication failed and you then edit the worktree, resume rechecks before publishing. If the PR already exists from before a connection failure, resume reuses it. Resuming a completed run just reports the PR.
 
-If publication failed and you subsequently edit the worktree, resume repeats the final checks/review before publishing those edits. If the PR was already created before a connection failure, resume reuses it. Resuming a completed run just reports the existing PR.
+`state.json` rules. `summary.md` is generated from it, not a plan you can edit. Never hand-edit statuses, reset counters, or move the run directory. GitHub edits do not flow into an existing snapshot.
 
-`state.json` is authoritative. `summary.md` is generated from it, not a second editable plan. Do not hand-edit statuses, reset repair counters, or move the run directory. Issue/spec changes on GitHub are not automatically imported into an existing snapshot.
+Version 3 adds the worker settings snapshot. Version 2 predates `--settings`. Version 1 mixed comments into requirements without provenance. None of the old versions resume. Preserve any work, reread the issue bodies, and start fresh. Never bump the version field by hand.
 
-State version 2 excludes issue comments. Version 1 snapshots cannot be resumed because comments were previously mixed into the saved requirements without provenance. Preserve any work from an old run, review the requirements in the issue bodies, and start a new run. Do not bypass this check by changing the version field.
-
-An abrupt kill or machine crash can leave `run.lock`. The runner deliberately does not guess whether an orphan worker is still writing files. Check the recorded controller PID and any Pi/check processes, stop them, inspect the worktree, then remove that run's lock file and resume. Normal failure/interrupt removes the lock automatically.
+A kill or crash can leave `run.lock` behind. The runner will not guess whether an orphan worker is still writing. Check the recorded controller PID and any Pi/check processes, stop them, inspect the worktree, delete that run's lock, and resume. Normal failures clear the lock themselves.
 
 ## Find or reopen worker sessions
 
-Every session has a stable run prefix, ticket or parent, role, and monotonically increasing attempt number:
+Sessions carry a stable run prefix, ticket or parent, role, and attempt number:
 
 ```text
 loop/owner/project/123-<timestamp>-<id> · #124 implement · attempt 1
@@ -101,9 +111,7 @@ loop/owner/project/123-<timestamp>-<id> · #124 review · attempt 1
 loop/owner/project/123-<timestamp>-<id> · parent review · attempt 1
 ```
 
-Explicit `--name` values prevent this workspace's `session-auto-name` extension from naming them. No extension changes are needed. The runner records each name and session path before launching Pi, including failed attempts.
-
-The summary contains exact commands. You can also use:
+Explicit `--name` values stop this workspace's `session-auto-name` extension from renaming them. Names and session paths are recorded before Pi launches, failed attempts included. The summary has the exact commands. You can also use:
 
 ```sh
 cd /path/to/run/worktree
@@ -112,15 +120,15 @@ pi --session-dir /path/to/run/sessions --resume
 pi --session /path/to/run/sessions/1-124-implement.jsonl
 ```
 
-A session file may not exist if Pi failed before persisting its first assistant response; the log and planned session name still identify the attempt. Only inspect or manually continue sessions while the controller is stopped. Automatic continuation always uses a fresh worker session with the saved requirements and latest findings.
+A session file may be missing if Pi died before its first persisted response. The log and planned name still identify the attempt. Touch sessions only while the controller is stopped. Automatic continuation always starts fresh with the saved requirements and latest findings.
 
 ## Trust and deliberate limits
 
-Invoking this command authorizes controller-owned commits, feature-branch pushes, and final PR creation. These happen outside Pi's bash permission extension. Worker extensions remain enabled; workers are instructed not to commit or mutate GitHub. A read-only reviewer has no bash/edit/write tools.
+This command authorizes controller-owned commits, branch pushes, and PR creation outside Pi's bash permission extension. Worker extensions stay enabled, but workers are told not to commit or touch GitHub, and the reviewer gets no bash, edit, or write tools. The implementer can run bash and edit files.
 
-The implementation worker can execute bash and edit files. Omitting issue comments reduces unsolicited input, but does not make arbitrary issue bodies safe. Prompts and a worktree are not a security sandbox. Only run against trusted repositories, dependencies, issue bodies, and project extensions. The setup/check commands execute with your privileges. Git hooks remain enabled; changes made by a commit hook cause acceptance to stop for rechecking.
+Skipping comments shrinks unsolicited input, but issue bodies remain untrusted. Prompts plus a worktree are not a sandbox. Run only against repos, dependencies, bodies, and extensions you trust. Setup and check commands run with your privileges. Git hooks stay enabled, and anything a hook changes stops acceptance for rechecking.
 
-There is no parallel ticket execution, recursive planning, per-ticket PR, live worker pane management, daemon, remote recovery service, or automatic merge. Use Herdr to host the controller terminal if desired. Output shows the current worker and check command; full output is in the run's logs.
+No parallel tickets, recursive planning, per-ticket PRs, live pane management, daemons, remote recovery, or automatic merge. Host the controller in Herdr if you like. Output names the current worker and check command. Full output lives in the run's logs.
 
 ## Verification
 
@@ -129,4 +137,4 @@ pnpm exec vitest run packages/issue-loop/cli.test.ts
 pnpm typecheck
 ```
 
-Tests invoke the public start/resume commands with real temporary Git worktrees and fake Pi/GitHub executables. They do not call models or mutate GitHub. Actual model quality and a first live run still need human supervision.
+Tests drive the public start/resume commands against temporary Git worktrees and fake Pi/GitHub executables. No models, no GitHub mutations. Model quality and a first live run still want human supervision.

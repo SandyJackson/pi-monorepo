@@ -192,6 +192,121 @@ it("preserves a first-ticket failure, then reviews manual fixes on resume withou
   expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("pi --session");
 }, 30_000);
 
+function writeLoopSettings(root: string): string {
+  const dir = join(root, "loop-settings");
+  mkdirSync(join(dir, "agents"), { recursive: true });
+  writeFileSync(
+    join(dir, "agents", "implement.md"),
+    `---\ndescription: Test implementer\nmodel: test-provider/implement-model\ntools: read, bash\n---\n\nCUSTOM IMPLEMENT GUIDANCE.`,
+    "utf8",
+  );
+  writeFileSync(
+    join(dir, "agents", "review.md"),
+    `---\ndescription: Test reviewer\nmodel: test-provider/review-model\ntools: read, grep\n---\n\nCUSTOM REVIEW GUIDANCE.`,
+    "utf8",
+  );
+  const settingsPath = join(dir, "loop-settings.json");
+  writeFileSync(
+    settingsPath,
+    JSON.stringify({
+      implementAgent: "./agents/implement.md",
+      reviewAgent: "./agents/review.md",
+      appendSystemPrompt: "SHARED STYLE NOTE.",
+    }),
+    "utf8",
+  );
+  return settingsPath;
+}
+
+function readWorkers(root: string): { name: string; args: string[]; prompt: string }[] {
+  return readFileSync(join(root, "workers.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+}
+
+it("applies settings roles to workers and snapshots them with the run", () => {
+  const f = fixture();
+  const settingsPath = writeLoopSettings(f.root);
+  const result = f.run(
+    "start",
+    "--repo",
+    f.repo,
+    "--issue",
+    "10",
+    "--check",
+    `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('feature.txt')"`,
+    "--settings",
+    settingsPath,
+  );
+  expect(result.status, result.stderr).toBe(0);
+  const runDir = result.stdout.match(/Run directory: (.+)/)?.[1];
+  const state = JSON.parse(readFileSync(join(runDir!, "state.json"), "utf8"));
+  expect(state.settings).toEqual({
+    implement: {
+      agentName: "implement",
+      model: "test-provider/implement-model",
+      tools: ["read", "bash"],
+      promptBody: "CUSTOM IMPLEMENT GUIDANCE.",
+    },
+    review: {
+      agentName: "review",
+      model: "test-provider/review-model",
+      tools: ["read", "grep"],
+      promptBody: "CUSTOM REVIEW GUIDANCE.",
+    },
+    appendSystemPrompt: "SHARED STYLE NOTE.",
+  });
+  const workers = readWorkers(f.root);
+  const implement = workers.find((worker) => worker.name.includes("implement"));
+  expect(implement!.args).toContain("--model");
+  expect(implement!.args).toContain("test-provider/implement-model");
+  expect(implement!.args).toContain("--tools");
+  expect(implement!.args).toContain("read,bash");
+  expect(implement!.args).toContain("--append-system-prompt");
+  expect(implement!.prompt).toContain("CUSTOM IMPLEMENT GUIDANCE.");
+  expect(implement!.prompt).not.toContain("You are the implementation worker");
+  const review = workers.find((worker) => worker.name.includes("review"));
+  expect(review!.args).toContain("test-provider/review-model");
+  expect(review!.args).toContain("read,grep");
+  expect(review!.prompt).toContain("CUSTOM REVIEW GUIDANCE.");
+  expect(review!.prompt).toContain('"verdict"');
+  expect(readFileSync(join(runDir!, "append-system-prompt.md"), "utf8")).toBe(
+    "SHARED STYLE NOTE.\n",
+  );
+  expect(readFileSync(join(runDir!, "summary.md"), "utf8")).toContain(
+    "test-provider/implement-model",
+  );
+}, 30_000);
+
+it("resumes from the settings snapshot after the original files are gone", () => {
+  const f = fixture("fail");
+  const settingsPath = writeLoopSettings(f.root);
+  const first = f.run(
+    "start",
+    "--repo",
+    f.repo,
+    "--issue",
+    "10",
+    "--check",
+    `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('feature.txt')"`,
+    "--settings",
+    settingsPath,
+  );
+  expect(first.status).toBe(1);
+  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+  const snapshot = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")).settings;
+  rmSync(join(f.root, "loop-settings"), { recursive: true, force: true });
+  f.env.FIXTURE_MODE = "pass";
+  const resumed = f.run("resume", runDir);
+  expect(resumed.status, resumed.stderr).toBe(0);
+  const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(finished.status).toBe("done");
+  expect(finished.settings).toEqual(snapshot);
+  const workers = readWorkers(f.root);
+  expect(workers.some((worker) => worker.args.includes("test-provider/review-model"))).toBe(true);
+}, 60_000);
+
 it("stops on malformed review output rather than accepting a stray PASS string", () => {
   const f = fixture("malformed");
   const result = f.start();

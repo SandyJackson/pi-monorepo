@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./index.ts"
+    ".": "./index.ts",
+    "./agents": "./agents.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

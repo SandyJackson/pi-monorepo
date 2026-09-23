@@ -6,16 +6,19 @@ import { parseArgs } from "node:util";
 import { gh, snapshot } from "./github.ts";
 import { git, originUrl } from "./process.ts";
 import { execute } from "./runner.ts";
+import { defaultLoopSettings, loadLoopSettings } from "./settings.ts";
 import { load, RUN_STATE_VERSION, type RunState, save } from "./state.ts";
 
 const usage = `Usage:
-  node packages/issue-loop/run.mjs start --repo PATH --issue NUMBER --check COMMAND [--setup COMMAND] [--timeout SECONDS]
+  node packages/issue-loop/run.mjs start --repo PATH --issue NUMBER --check COMMAND [--setup COMMAND] [--timeout SECONDS] [--settings PATH]
   node packages/issue-loop/run.mjs resume RUN_DIRECTORY
 
 Requires Node 22.18+ or 24+, Git, authenticated gh and Pi. macOS/Linux only.
 Starts from origin's default branch. Uses direct open GitHub child issues and native dependencies.
 --setup runs once in the new worktree; --check runs after every change and before final publication.
 --timeout limits each worker/setup/check invocation (default 1800 seconds).
+--settings points at an optional JSON file customizing worker models, tool allowlists,
+role guidance and a shared system-prompt addition (see Customizing workers below).
 
 This command trusts the project's Pi resources and runs setup/check commands with your privileges.
 It commits accepted work, pushes only its feature branch and opens one PR. It never merges.
@@ -48,6 +51,7 @@ async function main(): Promise<void> {
       check: { type: "string" },
       setup: { type: "string" },
       timeout: { type: "string", default: "1800" },
+      settings: { type: "string" },
     },
   });
   if (!values.repo || !values.issue || !/^[1-9]\d*$/.test(values.issue) || !values.check?.trim())
@@ -55,6 +59,10 @@ async function main(): Promise<void> {
   const timeout = Number(values.timeout);
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > 7200)
     throw new Error("--timeout must be 1 to 7200 seconds");
+  // Fail fast on bad settings before creating the run; resume reuses the snapshot.
+  const settings = values.settings
+    ? loadLoopSettings(resolve(values.settings))
+    : defaultLoopSettings();
   const repo = await git(resolve(values.repo), "rev-parse", "--show-toplevel");
   const origin = await originUrl(repo);
   const repositoryUrl = origin
@@ -88,6 +96,7 @@ async function main(): Promise<void> {
     check: values.check,
     setup: values.setup,
     timeoutMs: timeout * 1000,
+    settings,
     parent,
     tickets,
     sessions: [],
