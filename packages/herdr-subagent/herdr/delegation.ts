@@ -33,7 +33,7 @@ interface HerdrDelegationContext {
 interface HerdrDelegationOptions extends HerdrDelegationContext {
   /** Per-task timeout, starting at each task's confirmed launch. */
   timeoutMs?: number;
-  /** Purpose label for this delegation's tab; falls back to agent names. */
+  /** Purpose label for this delegation's tab; falls back to "sub-agents". */
   label?: string;
   signal?: AbortSignal;
   onProgress?: (update: { taskNumber: number; line: string }) => void;
