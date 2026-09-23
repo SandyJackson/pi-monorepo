@@ -9,7 +9,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { buildPiAgentArgs } from "@pi-workspace/herdr-subagent/agents";
 import { getIssue, gh, githubHostFromOrigin } from "./github.ts";
 import { command, git, originUrl } from "./process.ts";
 import { MAX_REPAIRS, type RunState, save, type Ticket } from "./state.ts";
@@ -65,15 +64,9 @@ async function worker(
   // Model/tools come from the run's settings snapshot (loop defaults when no
   // --settings was given); resume never re-reads the source files.
   const roleSettings = role === "review" ? state.settings.review : state.settings.implement;
-  const args = [
-    "-p",
-    "--approve",
-    "--name",
-    session.name,
-    "--session",
-    session.path,
-    ...buildPiAgentArgs(roleSettings),
-  ];
+  const args = ["-p", "--approve", "--name", session.name, "--session", session.path];
+  if (roleSettings.model) args.push("--model", roleSettings.model);
+  if (roleSettings.tools.length > 0) args.push("--tools", roleSettings.tools.join(","));
   if (state.settings.appendSystemPrompt) {
     const appendFile = join(state.runDir, "append-system-prompt.md");
     writeFileSync(appendFile, `${state.settings.appendSystemPrompt}\n`, { mode: 0o600 });
@@ -344,8 +337,6 @@ export async function execute(state: RunState): Promise<void> {
     );
   }
   writeFileSync(fd, `${process.pid}\n`);
-  // Identity of our lock; the finally block only removes the path when it
-  // still refers to this file, so a replaced lock is left for its owner.
   ({ dev: lockDev, ino: lockIno } = fstatSync(fd));
   try {
     if (state.status === "done") {
@@ -445,8 +436,8 @@ export async function execute(state: RunState): Promise<void> {
   } finally {
     try {
       closeSync(fd);
-    } catch (error) {
-      console.error(`Warning: could not close run lock: ${String(error)}`);
+    } catch {
+      /* Lock fd already closed; cleanup below still runs. */
     }
     try {
       const current = lstatSync(lock);

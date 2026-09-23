@@ -50,9 +50,9 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
 }
 ```
 
-Agent files use the agent markdown format: frontmatter with `model` and `tools`, plus a prompt body that replaces the default role guidance only. Paths resolve relative to the settings file. The runner still supplies issue context, constraints, patch/check context, and the reviewer's required JSON verdict format. `appendSystemPromptFile` is the file-based alternative to the inline string: plain markdown, used verbatim, never frontmatter-parsed. Setting both is an error.
+Agent files use the agent markdown format: frontmatter with `model` and `tools`, plus a prompt body that replaces the default role guidance only. Paths resolve relative to the settings file. The runner still supplies issue context, constraints, patch/check context, and the reviewer's required JSON verdict format.
 
-An absent `tools` field keeps the built-ins (implement: `read,grep,find,ls,bash,edit,write`; review: `read,grep,find,ls`). An explicit list replaces them. A reviewer asking for `bash`, `edit`, or `write` fails at startup. `extensions:` and `skills:` keys are parsed but ignored for now.
+An absent `tools` field keeps the built-ins (implement: `read,grep,find,ls,bash,edit,write`; review: `read,grep,find,ls`). An explicit list replaces them. A reviewer asking for `bash`, `edit`, or `write` fails at startup.
 
 Resolved models, tools, prompts, and shared text land in `state.json` at start. `resume` reuses that snapshot even if the source files change or disappear. No discovery, inheritance, or template language.
 

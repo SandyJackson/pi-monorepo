@@ -281,9 +281,7 @@ it("applies settings roles to workers and snapshots them with the run", () => {
   expect(readFileSync(join(runDir!, "append-system-prompt.md"), "utf8")).toBe(
     "SHARED STYLE NOTE.\n",
   );
-  expect(readFileSync(join(runDir!, "summary.md"), "utf8")).toContain(
-    "test-provider/implement-model",
-  );
+  expect(readFileSync(join(runDir!, "summary.md"), "utf8")).toContain("| #11");
 }, 30_000);
 
 it("resumes from the settings snapshot after the original files are gone", () => {

@@ -6,7 +6,6 @@ export interface CommandOptions {
   timeoutMs?: number;
   log?: string;
   input?: string;
-  /** Environment overrides merged over process.env; `undefined` removes the variable. */
   env?: Record<string, string | undefined>;
 }
 
@@ -28,7 +27,6 @@ export function command(program: string, args: string[], options: CommandOptions
     });
     let stdout = "";
     let stderr = "";
-    let outputBytes = 0;
     let failure: string | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const kill = (signal: NodeJS.Signals) => {
@@ -66,8 +64,6 @@ export function command(program: string, args: string[], options: CommandOptions
       if (!failure) {
         if (stream === "stdout") stdout += data;
         else stderr += data;
-        outputBytes += Buffer.byteLength(data, "utf8");
-        if (outputBytes > 16 * 1024 * 1024) stop("Command output exceeded 16 MiB");
       }
     };
     child.stdout.setEncoding("utf8");

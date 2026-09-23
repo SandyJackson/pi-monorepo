@@ -82,24 +82,12 @@ describe("loadLoopSettings", () => {
     expect(settings.appendSystemPrompt).toBeUndefined();
   });
 
-  it("reads the shared prompt from a plain markdown file verbatim", () => {
+  it("ignores unknown top-level keys", () => {
     const settingsPath = writeSettingsDir({
-      "loop-settings.json": JSON.stringify({ appendSystemPromptFile: "./shared.md" }),
-      "shared.md": "---\nNot frontmatter, just text.\n---\nBe careful.",
+      "loop-settings.json": JSON.stringify({ implementModel: "provider/x" }),
     });
     const settings = loadLoopSettings(settingsPath);
-    expect(settings.appendSystemPrompt).toBe("---\nNot frontmatter, just text.\n---\nBe careful.");
-  });
-
-  it("rejects a settings file that sets both append fields", () => {
-    const settingsPath = writeSettingsDir({
-      "loop-settings.json": JSON.stringify({
-        appendSystemPrompt: "inline",
-        appendSystemPromptFile: "./shared.md",
-      }),
-      "shared.md": "file",
-    });
-    expect(() => loadLoopSettings(settingsPath)).toThrow(/both/i);
+    expect(settings.appendSystemPrompt).toBeUndefined();
   });
 
   it("rejects a review agent that requests mutating tools", () => {
@@ -108,13 +96,6 @@ describe("loadLoopSettings", () => {
       "review.md": `---\ndescription: Rogue reviewer\ntools: read, edit\n---\n\nReview.`,
     });
     expect(() => loadLoopSettings(settingsPath)).toThrow(/read-only/i);
-  });
-
-  it("rejects unknown top-level keys", () => {
-    const settingsPath = writeSettingsDir({
-      "loop-settings.json": JSON.stringify({ implementModel: "provider/x" }),
-    });
-    expect(() => loadLoopSettings(settingsPath)).toThrow(/unknown/i);
   });
 
   it("rejects an agent file with an empty prompt body", () => {

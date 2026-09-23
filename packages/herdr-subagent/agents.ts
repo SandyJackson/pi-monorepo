@@ -16,12 +16,8 @@ import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/
 // ---------------------------------------------------------------------------
 
 /**
- * NOTE (cross-package contract): `packages/issue-loop` consumes `ParsedAgentFile`,
- * `loadAgentFile` and `buildPiAgentArgs` for its `--settings` role configuration.
- * Changes to the frontmatter field names, the tools/model normalization below, or
- * the Pi CLI flag spellings in `buildPiAgentArgs` must consider the issue loop:
- * update its `settings.ts` divergences (no required description, loop tool
- * defaults) and its `cli.test.ts` coverage in the same change.
+ * NOTE: `packages/issue-loop` reuses `ParsedAgentFile` and
+ * `parseAgentFileContent` for its `--settings` role files.
  */
 
 /** Which agent directories to search. */
@@ -82,27 +78,6 @@ export function parseAgentFileContent(content: string, fallbackName: string): Pa
       ? modelRaw.trim()
       : undefined;
   return { name, description, tools, model, systemPromptBody: body.trim() };
-}
-
-/** Read and parse one agent markdown file. Throws on missing files or malformed frontmatter. */
-export function loadAgentFile(filePath: string): ParsedAgentFile {
-  const content = fs.readFileSync(filePath, "utf-8");
-  return parseAgentFileContent(content, path.basename(filePath, ".md"));
-}
-
-/**
- * Build Pi CLI argument fragments for an agent's model/tool configuration.
- * Shared with `issue-loop` so both launch paths spell these flags identically.
- * Returns `[]` when neither is set. Transports (Herdr pane vs subprocess)
- * stay caller-owned; this covers only the pure flag mapping.
- */
-export function buildPiAgentArgs(config: { model?: string; tools?: string[] }): string[] {
-  const argv: string[] = [];
-  if (config.model) argv.push("--model", config.model);
-  if (config.tools !== undefined && config.tools.length > 0) {
-    argv.push("--tools", config.tools.join(","));
-  }
-  return argv;
 }
 
 /** A resolved agent definition from a markdown file. */

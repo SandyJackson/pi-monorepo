@@ -1,22 +1,5 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { buildPiAgentArgs, loadAgentFile, parseAgentFileContent } from "./agents.js";
-
-const roots: string[] = [];
-
-afterEach(() => {
-  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
-});
-
-function writeTempFile(fileName: string, content: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-test-"));
-  roots.push(dir);
-  const filePath = path.join(dir, fileName);
-  fs.writeFileSync(filePath, content, "utf8");
-  return filePath;
-}
+import { describe, expect, it } from "vitest";
+import { parseAgentFileContent } from "./agents.js";
 
 describe("parseAgentFileContent", () => {
   it("extracts model, tools and body with the filename as fallback name", () => {
@@ -65,47 +48,5 @@ Body.`,
       "agent",
     );
     expect(parsed.model).toBeUndefined();
-  });
-});
-
-describe("loadAgentFile", () => {
-  it("reads and parses an agent file from disk", () => {
-    const filePath = writeTempFile(
-      "implement.md",
-      `---
-description: Loop implementer
-model: provider/model-id
-tools: read, edit
----
-
-Implement it.`,
-    );
-    expect(loadAgentFile(filePath)).toEqual({
-      name: "implement",
-      description: "Loop implementer",
-      tools: ["read", "edit"],
-      model: "provider/model-id",
-      systemPromptBody: "Implement it.",
-    });
-  });
-
-  it("throws for a missing file", () => {
-    expect(() => loadAgentFile(path.join(os.tmpdir(), "no-such-agent.md"))).toThrow();
-  });
-});
-
-describe("buildPiAgentArgs", () => {
-  it("emits model and tools flags when both are set", () => {
-    expect(buildPiAgentArgs({ model: "provider/model-id", tools: ["read", "bash"] })).toEqual([
-      "--model",
-      "provider/model-id",
-      "--tools",
-      "read,bash",
-    ]);
-  });
-
-  it("emits nothing when neither is set", () => {
-    expect(buildPiAgentArgs({})).toEqual([]);
-    expect(buildPiAgentArgs({ tools: [] })).toEqual([]);
   });
 });
