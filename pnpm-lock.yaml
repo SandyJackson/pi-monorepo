@@ -104,6 +104,12 @@ importers:
         specifier: '*'
         version: 1.3.10
 
+  packages/issue-loop:
+    dependencies:
+      '@pi-workspace/herdr-subagent':
+        specifier: workspace:*
+        version: link:../herdr-subagent
+
   packages/session-auto-name:
     devDependencies:
       '@earendil-works/pi-ai':

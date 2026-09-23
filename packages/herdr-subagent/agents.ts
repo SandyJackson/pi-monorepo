@@ -15,8 +15,70 @@ import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/
 // Exported types
 // ---------------------------------------------------------------------------
 
+/**
+ * NOTE: `packages/issue-loop` reuses `ParsedAgentFile` and
+ * `parseAgentFileContent` for its `--settings` role files.
+ */
+
 /** Which agent directories to search. */
 export type AgentScope = "user" | "project" | "both";
+
+/**
+ * An agent definition parsed from a single markdown file, without any
+ * directory-scoping metadata. This is the unit shared with `issue-loop`:
+ * unlike `AgentConfig`, it carries no `source`/`sourceDir`/`filePath` and
+ * imposes no required `description`.
+ */
+export interface ParsedAgentFile {
+  /** Agent name (frontmatter `name` or filename without `.md`). */
+  name: string;
+  /** Description from frontmatter (may be empty; only discovery requires it). */
+  description: string;
+  /**
+   * Tool allowlist from the frontmatter `tools` field.
+   * `undefined` means the field was absent. An explicitly empty list means
+   * "no restriction requested". Callers decide what absence implies:
+   * subagent discovery falls back to Pi's default toolset, while the issue
+   * loop falls back to its per-role restrictions.
+   */
+  tools?: string[];
+  /** Model override from frontmatter `model`; `undefined` means Pi's default. */
+  model?: string;
+  /** Body text after frontmatter (role guidance for the system prompt). */
+  systemPromptBody: string;
+}
+
+/** Normalize one agent file's frontmatter and body into a `ParsedAgentFile`. */
+export function parseAgentFileContent(content: string, fallbackName: string): ParsedAgentFile {
+  const parsed = parseFrontmatter<Record<string, unknown>>(content);
+  const frontmatter = parsed.frontmatter;
+  const body = parsed.body;
+  const name =
+    typeof frontmatter.name === "string" && frontmatter.name.trim().length > 0
+      ? frontmatter.name.trim()
+      : fallbackName;
+  const description =
+    typeof frontmatter.description === "string" ? frontmatter.description.trim() : "";
+  const toolsRaw = frontmatter.tools;
+  let tools: string[] | undefined;
+  if (typeof toolsRaw === "string") {
+    const items = toolsRaw
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    tools = items.length > 0 ? items : [];
+  } else if (Array.isArray(toolsRaw)) {
+    tools = toolsRaw
+      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      .map((item) => item.trim());
+  }
+  const modelRaw = frontmatter.model;
+  const model =
+    typeof modelRaw === "string" && modelRaw.trim().toLowerCase() !== "none"
+      ? modelRaw.trim()
+      : undefined;
+  return { name, description, tools, model, systemPromptBody: body.trim() };
+}
 
 /** A resolved agent definition from a markdown file. */
 export interface AgentConfig {
@@ -87,57 +149,23 @@ function loadFromDir(dirPath: string, source: "user" | "project"): AgentConfig[]
       continue;
     }
 
-    let frontmatter: Record<string, unknown>;
-    let body: string;
+    let parsed: ParsedAgentFile;
     try {
-      const parsed = parseFrontmatter<Record<string, unknown>>(content);
-      frontmatter = parsed.frontmatter;
-      body = parsed.body;
+      parsed = parseAgentFileContent(content, path.basename(filePath, ".md"));
     } catch {
       // Malformed frontmatter — skip this file
       continue;
     }
 
-    // Derive name: frontmatter takes precedence, fall back to filename
-    const name =
-      typeof frontmatter.name === "string" && frontmatter.name.trim().length > 0
-        ? frontmatter.name.trim()
-        : path.basename(filePath, ".md");
-
-    const description =
-      typeof frontmatter.description === "string" ? frontmatter.description.trim() : "";
-
     // Skip files that don't declare a description
-    if (!description) continue;
-
-    const toolsRaw = frontmatter.tools;
-    let tools: string[] | undefined;
-
-    if (typeof toolsRaw === "string") {
-      const parsed = toolsRaw
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean);
-      tools = parsed.length > 0 ? parsed : [];
-    } else if (Array.isArray(toolsRaw)) {
-      const parsed = toolsRaw
-        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-        .map((item) => item.trim());
-      tools = parsed.length > 0 ? parsed : [];
-    }
-
-    const modelRaw = frontmatter.model;
-    const model =
-      typeof modelRaw === "string" && modelRaw.trim().toLowerCase() !== "none"
-        ? modelRaw.trim()
-        : undefined;
+    if (!parsed.description) continue;
 
     agents.push({
-      name,
-      description,
-      tools,
-      model,
-      systemPromptBody: body.trim(),
+      name: parsed.name,
+      description: parsed.description,
+      tools: parsed.tools,
+      model: parsed.model,
+      systemPromptBody: parsed.systemPromptBody,
       source,
       sourceDir: dirPath,
       filePath,
