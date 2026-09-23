@@ -15,6 +15,7 @@ import {
 } from "./agents.ts";
 import type { DelegatedTaskExecution, DelegatedTaskRecord } from "./herdr/delegation.ts";
 import type { DelegatedTaskOutcome } from "./herdr/session.ts";
+import { DEFAULT_TURN_TIMEOUT_MINUTES } from "./herdr/session.ts";
 import { readAnswer } from "./pi-session.ts";
 
 const TaskItem = Type.Object(
@@ -53,7 +54,9 @@ const SubagentParams = Type.Object(
       Type.Integer({
         minimum: 1,
         description:
-          "Per-task delegation timeout in minutes (default: 20). " +
+          "Per-task delegation timeout in minutes (default: " +
+          DEFAULT_TURN_TIMEOUT_MINUTES +
+          "). " +
           "On expiry the child pane is left running for manual inspection.",
       }),
     ),
@@ -214,7 +217,7 @@ export function createSubagentTool(
 
       if (validTasks.length > 0) {
         const executions = await options.executeDelegation(validTasks, {
-          timeoutMs: (params.timeout ?? 20) * 60 * 1000,
+          timeoutMs: (params.timeout ?? DEFAULT_TURN_TIMEOUT_MINUTES) * 60 * 1000,
           label: tabLabel,
           signal: _signal,
           onProgress: (update) => {
@@ -235,7 +238,7 @@ export function createSubagentTool(
         return result;
       });
       const completedCount = results.filter(({ outcome }) => outcome.status === "completed").length;
-      const timeoutMinutes = params.timeout ?? 20;
+      const timeoutMinutes = params.timeout ?? DEFAULT_TURN_TIMEOUT_MINUTES;
       // biome-ignore lint/suspicious/useIterableCallbackReturn: switch is exhaustive over the status union; the ": string" annotation makes a missed case a compile error
       const resultTexts = results.map(({ outcome }): string => {
         switch (outcome.status) {

@@ -86,8 +86,11 @@ const START_RPC_TIMEOUT = 15_000;
 export const DELEGATED_TASK_FILE_FLAG = "herdr-subagent-task-file";
 export const DELEGATED_TASK_PLACEHOLDER = "__herdr_subagent_task__";
 
-/** Default per-task timeout, measured from confirmed launch. */
-export const DEFAULT_TURN_TIMEOUT_MS = 20 * 60 * 1000;
+/** Default per-task timeout in minutes, measured from confirmed launch. */
+export const DEFAULT_TURN_TIMEOUT_MINUTES = 60;
+
+/** Default per-task timeout in milliseconds, measured from confirmed launch. */
+export const DEFAULT_TURN_TIMEOUT_MS = DEFAULT_TURN_TIMEOUT_MINUTES * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Small helpers
