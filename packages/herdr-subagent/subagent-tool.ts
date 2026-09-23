@@ -46,7 +46,7 @@ const SubagentParams = Type.Object(
         description:
           "Purpose label naming this delegation's tab, e.g. review-issue-13. " +
           "It names the whole delegation's tab, not an individual agent or pane. " +
-          "Defaults to the delegated agents' names.",
+          "Defaults to sub-agents.",
       }),
     ),
     timeout: Type.Optional(
@@ -106,7 +106,7 @@ export type ExecuteDelegation = (
   tasks: readonly DelegatedTaskRecord[],
   options: {
     timeoutMs: number;
-    /** Purpose label for the delegation's tab; the delegation falls back to agent names. */
+    /** Purpose label for the delegation's tab; the delegation falls back to sub-agents. */
     label?: string;
     signal?: AbortSignal;
     onProgress?: (update: { taskNumber: number; line: string }) => void;
@@ -138,7 +138,7 @@ export function createSubagentTool(
       "  {}                                                -> list agents",
       '  {tasks: [{agent:"foo", instruction:"..."}]}        -> single visible sub-agent',
       '  {tasks: [{agent:"foo", instruction:"..."}, ...]}   -> parallel visible sub-agents',
-      "  label: optional tab label for this delegation (default: agent names)",
+      "  label: optional tab label for this delegation (default: sub-agents)",
       "  timeout: per-task timeout in minutes",
     ].join("\n") + agentsSuffix;
 

@@ -241,8 +241,18 @@ describe("herdr/delegation — per-delegation tab placement", () => {
     for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(800);
     expect((await second).map((result) => result.outcome.status)).toEqual(["completed"]);
     expect(creates.records).toEqual([
-      { workspaceId: "delegation-workspace", cwd: "/tmp/project", label: "alpha", focus: false },
-      { workspaceId: "delegation-workspace", cwd: "/tmp/project", label: "beta", focus: false },
+      {
+        workspaceId: "delegation-workspace",
+        cwd: "/tmp/project",
+        label: "sub-agents",
+        focus: false,
+      },
+      {
+        workspaceId: "delegation-workspace",
+        cwd: "/tmp/project",
+        label: "sub-agents",
+        focus: false,
+      },
     ]);
     expect(herdr.calledMethods).not.toContain("tab.list");
     expect(herdr.calledMethods).not.toContain("pane.list");
@@ -266,7 +276,7 @@ describe("herdr/delegation — per-delegation tab placement", () => {
     expect(creates.records).toEqual(["review-issue-13"]);
   });
 
-  it("falls back to distinct agent names in task order for an omitted or blank label", async () => {
+  it("falls back to sub-agents for an omitted or blank label", async () => {
     const statuses = new Map<string, HerdrAgentStatus[]>([
       // Both delegations place their three children in the same pane ids.
       ["root-pane", ["working", "idle", "idle", "working", "idle", "idle"]],
@@ -293,9 +303,9 @@ describe("herdr/delegation — per-delegation tab placement", () => {
     for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(800);
     await blankLabel;
 
-    // Repeated agent names collapse; the fallback never invents a lookup or
-    // a uniqueness suffix.
-    expect(creates.records).toEqual(["alpha, beta", "alpha, beta"]);
+    // The fallback ignores agent names entirely; it never invents a lookup
+    // or a uniqueness suffix.
+    expect(creates.records).toEqual(["sub-agents", "sub-agents"]);
   });
 
   it("accepts duplicate tab labels across delegations", async () => {

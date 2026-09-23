@@ -100,15 +100,13 @@ interface HerdrPaneInfo {
 
 /**
  * Resolve the delegation's tab label: the caller's trimmed purpose label, or
- * the distinct agent names in task order joined with ", ". Duplicate labels
- * are allowed, so no uniqueness lookup or suffix allocation happens.
+ * the shared "sub-agents" fallback. Duplicate labels are allowed, so no
+ * uniqueness lookup or suffix allocation happens.
  */
-function resolveTabLabel(label: string | undefined, tasks: readonly DelegatedTaskRecord[]): string {
+export function resolveTabLabel(label: string | undefined): string {
   const trimmed = label?.trim();
   if (trimmed) return trimmed;
-  const agents = new Set<string>();
-  for (const task of tasks) agents.add(task.agent);
-  return [...agents].join(", ");
+  return "sub-agents";
 }
 
 /**
@@ -221,7 +219,7 @@ export async function executeHerdrDelegation(
 
   const { rpc, workspaceId, signal, onProgress } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
-  const tabLabel = resolveTabLabel(options.label, tasks);
+  const tabLabel = resolveTabLabel(options.label);
 
   if (signal?.aborted) return abortedBeforeLaunch(tasks);
 
