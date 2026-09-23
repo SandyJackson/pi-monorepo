@@ -37,39 +37,24 @@ async function pages(cwd: string, endpoint: string): Promise<unknown[]> {
   return result.flat();
 }
 
-async function withComments(cwd: string, repo: string, value: Issue): Promise<Issue> {
-  const comments = await pages(cwd, `repos/${repo}/issues/${value.number}/comments`);
-  const bodies = comments.map((comment) => {
-    const body = (comment as { body?: unknown }).body;
-    if (typeof body !== "string") throw new Error("Invalid GitHub comment");
-    return body;
-  });
-  return {
-    ...value,
-    body: `${value.body}${bodies.length ? `\n\n## Issue comments\n\n${bodies.join("\n\n---\n\n")}` : ""}`,
-  };
-}
-
 export async function snapshot(
   cwd: string,
   repo: string,
   number: number,
 ): Promise<{ parent: Issue; tickets: Ticket[] }> {
-  const parent = await withComments(cwd, repo, await getIssue(cwd, repo, number));
+  const parent = await getIssue(cwd, repo, number);
   if (parent.state !== "open") throw new Error("The parent issue must be open");
   const children = (await pages(cwd, `repos/${repo}/issues/${number}/sub_issues`)).map(issue);
   const tickets: Ticket[] = [];
-  // Stable numeric order is the tie-break; dependencies always take precedence.
-  for (const child of children
-    .filter((child) => child.state === "open")
-    .sort((a, b) => a.number - b.number)) {
+  // Preserve the parent's order across pages; dependencies still take precedence.
+  for (const child of children.filter((child) => child.state === "open")) {
     if (child.html_url !== `https://github.com/${repo}/issues/${child.number}`)
       throw new Error("Cross-repository child issues are not supported in this MVP");
     const blockers = (
       await pages(cwd, `repos/${repo}/issues/${child.number}/dependencies/blocked_by`)
     ).map(issue);
     tickets.push({
-      ...(await withComments(cwd, repo, child)),
+      ...child,
       blockers,
       repairs: 0,
       status: "pending",

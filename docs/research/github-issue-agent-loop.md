@@ -2,7 +2,7 @@
 
 Research date: 2026-09-23. This note records the research before implementation.
 
-Following the design discussion, the MVP was implemented in [`packages/issue-loop`](../../packages/issue-loop/README.md). It uses a dependency-free Node controller, durable ticket state and repair counts, a generated handoff summary, explicit resume, and named Pi sessions. See that README for the implemented behaviour and limitations.
+Following the design discussion, the MVP was implemented in [`packages/issue-loop`](../../packages/issue-loop/README.md). It uses a dependency-free Node controller, durable ticket state and repair counts, a generated handoff summary, explicit resume, and named Pi sessions. Following PR review, issue comments are omitted from worker inputs and parent sub-issue order is preserved. See that README for the implemented behaviour and limitations.
 
 ## Decision to make
 

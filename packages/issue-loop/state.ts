@@ -1,6 +1,9 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+export const RUN_STATE_VERSION = 2;
+export const MAX_REPAIRS = 2;
+
 export interface Issue {
   number: number;
   title: string;
@@ -25,7 +28,7 @@ export interface Session {
 }
 
 export interface RunState {
-  version: 1;
+  version: typeof RUN_STATE_VERSION;
   name: string;
   repo: string;
   githubRepo: string;
@@ -65,7 +68,7 @@ export function save(state: RunState): void {
   atomicWrite(join(state.runDir, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
   const rows = state.tickets.map(
     (ticket) =>
-      `| #${ticket.number} ${ticket.title.replaceAll("|", "\\|").replaceAll("\n", " ")} | ${ticket.status} | ${ticket.repairs}/2 | ${ticket.commit ?? ""} |`,
+      `| #${ticket.number} ${ticket.title.replaceAll("|", "\\|").replaceAll("\n", " ")} | ${ticket.status} | ${ticket.repairs}/${MAX_REPAIRS} | ${ticket.commit ?? ""} |`,
   );
   const active = state.tickets.find((ticket) => ticket.number === state.currentTicket);
   const cli = resolve(import.meta.dirname, "run.mjs");
@@ -117,9 +120,14 @@ export function save(state: RunState): void {
 
 export function load(runDir: string): RunState {
   const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")) as RunState;
-  const validBudget = (value: number) => Number.isInteger(value) && value >= 0 && value <= 2;
+  if (state.version !== RUN_STATE_VERSION) {
+    throw new Error(
+      "Unsupported run state version; older snapshots may include issue comments. Preserve any work and start a new run from reviewed issue bodies. Do not change the version by hand.",
+    );
+  }
+  const validBudget = (value: number) =>
+    Number.isInteger(value) && value >= 0 && value <= MAX_REPAIRS;
   if (
-    state.version !== 1 ||
     state.runDir !== resolve(runDir) ||
     typeof state.origin !== "string" ||
     !Array.isArray(state.tickets) ||

@@ -2,7 +2,7 @@ import { closeSync, existsSync, mkdirSync, openSync, unlinkSync, writeFileSync }
 import { join } from "node:path";
 import { getIssue, gh } from "./github.ts";
 import { command, git, originUrl } from "./process.ts";
-import { type RunState, save, type Ticket } from "./state.ts";
+import { MAX_REPAIRS, type RunState, save, type Ticket } from "./state.ts";
 
 function requirements(state: RunState, ticket?: Ticket): string {
   return [
@@ -196,7 +196,7 @@ async function resolveTicket(state: RunState, ticket: Ticket): Promise<void> {
       await accept(state, ticket);
       return;
     }
-    if (ticket.repairs >= 2)
+    if (ticket.repairs >= MAX_REPAIRS)
       throw new Error(`Ticket #${ticket.number} exhausted its repair budget. ${ticket.feedback}`);
     ticket.repairs++;
     save(state);
@@ -386,7 +386,7 @@ export async function execute(state: RunState): Promise<void> {
         state.feedback = await verify(state, state.baseSha);
         save(state);
         if (!state.feedback) break;
-        if (state.finalRepairs >= 2)
+        if (state.finalRepairs >= MAX_REPAIRS)
           throw new Error(`Parent review exhausted its repair budget. ${state.feedback}`);
         state.finalRepairs++;
         save(state);
@@ -408,7 +408,17 @@ export async function execute(state: RunState): Promise<void> {
     save(state);
     throw error;
   } finally {
-    closeSync(fd);
-    unlinkSync(lock);
+    try {
+      closeSync(fd);
+    } catch (error) {
+      console.error(`Warning: could not close run lock: ${String(error)}`);
+    }
+    try {
+      unlinkSync(lock);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`Warning: could not remove run lock: ${String(error)}`);
+      }
+    }
   }
 }

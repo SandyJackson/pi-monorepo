@@ -20,6 +20,7 @@ export function command(program: string, args: string[], options: CommandOptions
     });
     let stdout = "";
     let stderr = "";
+    let outputBytes = 0;
     let failure: string | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const kill = (signal: NodeJS.Signals) => {
@@ -52,15 +53,17 @@ export function command(program: string, args: string[], options: CommandOptions
       process.removeListener("SIGINT", interrupt);
       process.removeListener("SIGTERM", interrupt);
     };
-    const collect = (data: Buffer, stream: "stdout" | "stderr") => {
+    const collect = (data: string, stream: "stdout" | "stderr") => {
       if (options.log) appendFileSync(options.log, data);
       if (!failure) {
-        if (stream === "stdout") stdout += data.toString();
-        else stderr += data.toString();
-        if (stdout.length + stderr.length > 16 * 1024 * 1024)
-          stop("Command output exceeded 16 MiB");
+        if (stream === "stdout") stdout += data;
+        else stderr += data;
+        outputBytes += Buffer.byteLength(data, "utf8");
+        if (outputBytes > 16 * 1024 * 1024) stop("Command output exceeded 16 MiB");
       }
     };
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (data) => collect(data, "stdout"));
     child.stderr.on("data", (data) => collect(data, "stderr"));
     child.stdin.on("error", () => {
@@ -70,13 +73,16 @@ export function command(program: string, args: string[], options: CommandOptions
       cleanup();
       reject(error);
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       cleanup();
-      if (failure || code !== 0) {
+      if (failure || code !== 0 || signal) {
+        const exitReason = signal
+          ? `${program} terminated by ${signal}`
+          : `${program} exited ${code}`;
         const error = new Error(
-          `${failure ?? `${program} exited ${code}`}\n${stderr.slice(-4000)}${options.log ? `\nLog: ${options.log}` : ""}`,
+          `${failure ?? exitReason}\n${stderr.slice(-4000)}${options.log ? `\nLog: ${options.log}` : ""}`,
         );
-        if (failure) error.name = "CommandStoppedError";
+        if (failure || signal) error.name = "CommandStoppedError";
         reject(error);
       } else resolve(stdout.trim());
     });

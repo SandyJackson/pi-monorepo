@@ -8,6 +8,7 @@ A small local controller for one parent GitHub issue. It implements direct child
 - `git`, authenticated `gh`, and authenticated `pi` on PATH. Pi must support `-p`, `--name`, `--session`, `--approve`, and tool allowlists. Developed against installed Pi 0.86.1.
 - A GitHub.com repository with `origin` pointing at the repository containing the parent issue. Fetch and push URLs must be the same. The runner resolves GitHub identity explicitly from `origin`, not from `GH_REPO`.
 - Open, implementation-ready direct child issues linked through GitHub's native sub-issue feature. Native blocked-by dependencies are respected. Task-list links in an issue body are not parsed.
+- Authoritative requirements in the parent and ticket bodies. Issue comments are not fetched or forwarded to workers. Copy any approved decisions from comments into the relevant issue body before starting.
 - A check command that terminates and exits nonzero on failure. No watch mode.
 
 Both roles use your configured Pi model. Pi resources are loaded for the new worktree using `--approve`. This trusts project-local resources; it does not bypass your command permission extension. Configure Pi authentication before starting so workers do not need an interactive login.
@@ -54,7 +55,7 @@ The original checkout is not switched, cleaned, or copied. Uncommitted work ther
 
 ## What runs
 
-1. Snapshot the parent, open direct child issues, their comments, and native dependencies. Numeric issue order breaks ties between eligible tickets. Closed children are outside this run's queue.
+1. Snapshot the parent and open direct child issue bodies, plus native dependencies. Preserve the parent's sub-issue order across API pages; dependencies take precedence when selecting the next eligible ticket. Closed children are outside this run's queue.
 2. Start a fresh implementation session for one eligible ticket.
 3. Run the configured checks outside the agent.
 4. Stage the patch, including new files, and start a fresh read-only reviewer with the requirements, patch, and check log. A strict JSON verdict is required. Invalid output cannot pass.
@@ -86,6 +87,8 @@ If publication failed and you subsequently edit the worktree, resume repeats the
 
 `state.json` is authoritative. `summary.md` is generated from it, not a second editable plan. Do not hand-edit statuses, reset repair counters, or move the run directory. Issue/spec changes on GitHub are not automatically imported into an existing snapshot.
 
+State version 2 excludes issue comments. Version 1 snapshots cannot be resumed because comments were previously mixed into the saved requirements without provenance. Preserve any work from an old run, review the requirements in the issue bodies, and start a new run. Do not bypass this check by changing the version field.
+
 An abrupt kill or machine crash can leave `run.lock`. The runner deliberately does not guess whether an orphan worker is still writing files. Check the recorded controller PID and any Pi/check processes, stop them, inspect the worktree, then remove that run's lock file and resume. Normal failure/interrupt removes the lock automatically.
 
 ## Find or reopen worker sessions
@@ -115,7 +118,7 @@ A session file may not exist if Pi failed before persisting its first assistant 
 
 Invoking this command authorizes controller-owned commits, feature-branch pushes, and final PR creation. These happen outside Pi's bash permission extension. Worker extensions remain enabled; workers are instructed not to commit or mutate GitHub. A read-only reviewer has no bash/edit/write tools.
 
-The implementation worker can execute bash and edit files. Prompts and a worktree are not a security sandbox. Only run against trusted repositories, dependencies, issues, and project extensions. The setup/check commands execute with your privileges. Git hooks remain enabled; changes made by a commit hook cause acceptance to stop for rechecking.
+The implementation worker can execute bash and edit files. Omitting issue comments reduces unsolicited input, but does not make arbitrary issue bodies safe. Prompts and a worktree are not a security sandbox. Only run against trusted repositories, dependencies, issue bodies, and project extensions. The setup/check commands execute with your privileges. Git hooks remain enabled; changes made by a commit hook cause acceptance to stop for rechecking.
 
 There is no parallel ticket execution, recursive planning, per-ticket PR, live worker pane management, daemon, remote recovery service, or automatic merge. Use Herdr to host the controller terminal if desired. Output shows the current worker and check command; full output is in the run's logs.
 

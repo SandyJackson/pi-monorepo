@@ -51,14 +51,14 @@ const path = require('node:path');
 const args = process.argv.slice(2);
 const root = process.env.FIXTURE_ROOT;
 const mode = process.env.FIXTURE_MODE;
-const issue = n => ({number:n, title:n === 10 ? 'Parent feature' : 'Ticket '+n, body:'Implement the requested feature.', state:'open', html_url:'https://github.com/test/project/issues/'+n});
+const issue = n => ({number:n, title:n === 10 ? 'Parent feature' : 'Ticket '+n, body:mode === 'unicode' ? 'Price €5.' : 'Implement the requested feature.', state:'open', html_url:'https://github.com/test/project/issues/'+n});
 let result;
 if (args[0] === 'repo' && args[1] === 'view') result = {nameWithOwner:process.env.GH_REPO && args[2] === '--json' ? process.env.GH_REPO : 'test/project', defaultBranchRef:{name:'main'}};
 else if (args[0] === 'api') {
  const endpoint = args.find(a => a.startsWith('repos/'));
- if (endpoint.endsWith('/sub_issues')) result = mode === 'empty' ? [[]] : [[issue(11)], [issue(12)]];
- else if (endpoint.endsWith('/dependencies/blocked_by')) result = [endpoint.includes('/12/') ? [issue(11)] : mode === 'cycle' ? [issue(12)] : []];
- else if (endpoint.endsWith('/comments')) result = [[]];
+ if (endpoint.endsWith('/sub_issues')) result = mode === 'empty' ? [[]] : mode.startsWith('parent-order') ? [[issue(12)], [issue(11)]] : [[issue(11)], [issue(12)]];
+ else if (endpoint.endsWith('/dependencies/blocked_by')) result = [mode === 'parent-order' ? [] : endpoint.includes('/12/') ? [issue(11)] : mode === 'cycle' ? [issue(12)] : []];
+ else if (endpoint.endsWith('/comments')) result = mode === 'comments' ? [[{body:'UNTRUSTED_COMMENT_INSTRUCTION'}]] : [[]];
  else result = issue(Number(endpoint.split('/').pop()));
 } else if (args[0] === 'pr' && args[1] === 'list') result = fs.existsSync(path.join(root, 'pr.json')) ? [{url:'https://github.com/test/project/pull/99', state:'OPEN'}] : [];
 else if (args[0] === 'pr' && args[1] === 'create') {
@@ -67,7 +67,12 @@ else if (args[0] === 'pr' && args[1] === 'create') {
  if (mode === 'publish-fail') { console.error('Connection lost after creating PR'); process.exit(1); }
  console.log('https://github.com/test/project/pull/99'); process.exit(0);
 } else {console.error('Unexpected gh args', args); process.exit(2);}
-console.log(JSON.stringify(result));
+const output = Buffer.from(JSON.stringify(result));
+const split = mode === 'unicode' ? output.indexOf(Buffer.from('€')) : -1;
+if (split >= 0) {
+ process.stdout.write(output.subarray(0, split + 1));
+ setTimeout(() => process.stdout.end(output.subarray(split + 1)), 50);
+} else console.log(output.toString());
 `,
     { mode: 0o755 },
   );
@@ -80,10 +85,23 @@ const args = process.argv.slice(2);
 const value = flag => args[args.indexOf(flag)+1];
 const name = value('--name');
 const session = value('--session');
+const prompt = fs.readFileSync(0, 'utf8');
 fs.writeFileSync(session, JSON.stringify({type:'session_info', name})+'\\n');
-fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'workers.jsonl'), JSON.stringify({name, session, args, cwd:process.cwd()})+'\\n');
+fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'workers.jsonl'), JSON.stringify({name, session, args, prompt, cwd:process.cwd()})+'\\n');
 if (name.includes('implement')) {
- if (process.env.FIXTURE_MODE === 'stubborn') {
+ if (process.env.FIXTURE_MODE === 'signal-exit') process.kill(process.pid, 'SIGTERM');
+ if (process.env.FIXTURE_MODE === 'missing-lock' || process.env.FIXTURE_MODE === 'directory-lock') {
+   const lock = path.join(path.dirname(path.dirname(session)), 'run.lock');
+   fs.unlinkSync(lock);
+   if (process.env.FIXTURE_MODE === 'directory-lock') fs.mkdirSync(lock);
+   console.error('Provider unavailable'); process.exit(1);
+ }
+ if (process.env.FIXTURE_MODE === 'unicode-error') {
+   const output = Buffer.from('Provider says café');
+   const split = output.indexOf(Buffer.from('é'));
+   process.stderr.write(output.subarray(0, split + 1));
+   setTimeout(() => { process.stderr.write(output.subarray(split + 1)); process.exitCode = 1; }, 50);
+ } else if (process.env.FIXTURE_MODE === 'stubborn') {
    process.on('SIGTERM', () => {});
    fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'stubborn.pid'), String(process.pid));
    setInterval(() => {}, 1000);
@@ -196,9 +214,9 @@ it("stops after two repair attempts and keeps the review findings for handoff", 
   ).toHaveLength(3);
   expect(state.tickets[0].status).toBe("blocked");
   expect(state.tickets[1].status).toBe("pending");
-  expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain(
-    "Missing acceptance criterion",
-  );
+  const summary = readFileSync(join(runDir, "summary.md"), "utf8");
+  expect(summary).toContain("Missing acceptance criterion");
+  expect(summary).toContain("| blocked | 2/2 |");
 }, 30_000);
 
 it("finds an already-created PR after publication was interrupted", () => {
@@ -400,6 +418,109 @@ it("checks worktree-local remote settings before publication", () => {
   expect(resumed.status).toBe(1);
   expect(resumed.stderr).toContain("origin must have exactly one");
 }, 30_000);
+
+it("omits issue comments from saved requirements and every worker prompt", () => {
+  const f = fixture("comments");
+  const result = f.start();
+  expect(result.status, result.stderr).toBe(0);
+  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(state.parent.body).toBe("Implement the requested feature.");
+  expect(
+    state.tickets.every(
+      (ticket: { body: string }) => ticket.body === "Implement the requested feature.",
+    ),
+  ).toBe(true);
+  const workers = readFileSync(join(f.root, "workers.jsonl"), "utf8");
+  expect(workers).not.toContain("UNTRUSTED_COMMENT_INSTRUCTION");
+  expect(workers).toContain("Implement the requested feature.");
+}, 30_000);
+
+it("refuses old snapshots that may already contain untrusted comments", () => {
+  const f = fixture("fail");
+  const first = f.start();
+  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+  const statePath = join(runDir, "state.json");
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  state.version = 1;
+  state.parent.body += "\n\n## Issue comments\n\nUNTRUSTED_COMMENT_INSTRUCTION";
+  writeFileSync(statePath, JSON.stringify(state));
+  const result = f.run("resume", runDir);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("older snapshots may include issue comments");
+  expect(readFileSync(join(f.root, "workers.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
+}, 30_000);
+
+it.each([
+  ["parent-order", [12, 11]],
+  ["parent-order-dependency", [11, 12]],
+] as const)(
+  "preserves parent order while respecting dependencies (%s)",
+  (mode, expected) => {
+    const f = fixture(mode);
+    const result = f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.tickets.map((ticket: { number: number }) => ticket.number)).toEqual([12, 11]);
+    const workers = readFileSync(join(f.root, "workers.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(
+      workers
+        .filter((worker) => worker.name.includes("implement"))
+        .map((worker) => Number(worker.name.match(/#(\d+) implement/)[1])),
+    ).toEqual(expected);
+  },
+  30_000,
+);
+
+it("preserves UTF-8 issue text split across stdout chunks", () => {
+  const f = fixture("unicode");
+  const result = f.start();
+  expect(result.status, result.stderr).toBe(0);
+  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(state.parent.body).toBe("Price €5.");
+  expect(state.tickets.every((ticket: { body: string }) => ticket.body === "Price €5.")).toBe(true);
+  expect(readFileSync(join(f.root, "workers.jsonl"), "utf8")).not.toContain("�");
+}, 30_000);
+
+it("preserves UTF-8 error text split across stderr chunks", () => {
+  const f = fixture("unicode-error");
+  const result = f.start();
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("Provider says café");
+  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+  expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("Provider says café");
+}, 30_000);
+
+it("reports the signal when a worker is terminated externally", () => {
+  const f = fixture("signal-exit");
+  const result = f.start();
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("pi terminated by SIGTERM");
+  expect(result.stderr).not.toContain("exited null");
+}, 30_000);
+
+it.each(["missing-lock", "directory-lock"])(
+  "preserves the primary error if lock cleanup fails (%s)",
+  (mode) => {
+    const f = fixture(mode);
+    const result = f.start();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Provider unavailable");
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("blocked");
+    expect(state.lastError).toContain("Provider unavailable");
+    if (mode === "directory-lock")
+      expect(result.stderr).toContain("Warning: could not remove run lock");
+    else expect(result.stderr).not.toContain("ENOENT");
+  },
+  30_000,
+);
 
 it("can resume a setup failure in the already-created worktree", () => {
   const f = fixture();

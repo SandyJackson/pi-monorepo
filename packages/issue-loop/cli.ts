@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { gh, snapshot } from "./github.ts";
 import { git, originUrl } from "./process.ts";
 import { execute } from "./runner.ts";
-import { load, type RunState, save } from "./state.ts";
+import { load, RUN_STATE_VERSION, type RunState, save } from "./state.ts";
 
 const usage = `Usage:
   node packages/issue-loop/run.mjs start --repo PATH --issue NUMBER --check COMMAND [--setup COMMAND] [--timeout SECONDS]
@@ -74,7 +74,7 @@ async function main(): Promise<void> {
   const runDir = join(dirname(repo), ".pi-issue-loops", `${basename(repo)}-${id}`);
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
   const state: RunState = {
-    version: 1,
+    version: RUN_STATE_VERSION,
     name: `loop/${metadata.nameWithOwner}/${id}`,
     repo,
     githubRepo: metadata.nameWithOwner,
