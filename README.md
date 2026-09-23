@@ -6,7 +6,7 @@ My Pi setup in one repo. Extensions, skills, and agents I use day to day.
 
 | Package | What it is |
 | --- | --- |
-| [bash-permission](./packages/bash-permission) | Gates bash calls against an allow, ask, deny policy before they run. |
+| [bash-permission](./packages/bash-permission) | Removed for now. It used to gate bash calls against an allow, ask, deny policy. The code is still in the repo; see `docs/bash-policy.md` for how to restore it. |
 | [herdr-bridge](./packages/herdr-bridge) | Emits `herdr:blocked` when a tool waits on user input, so Herdr shows it. |
 | [herdr-contract](./packages/herdr-contract) | Shared event name and payload for `herdr:blocked`. |
 | [herdr-subagent](./packages/herdr-subagent) | Delegates work to subagents in visible Herdr panes. |

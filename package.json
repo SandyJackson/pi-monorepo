@@ -16,7 +16,6 @@
   },
   "pi": {
     "extensions": [
-      "./packages/bash-permission/index.ts",
       "./packages/herdr-subagent/index.ts",
       "./packages/herdr-bridge/index.ts",
       "./packages/session-auto-name/index.ts"
@@ -26,7 +25,6 @@
     ]
   },
   "dependencies": {
-    "@pi-workspace/bash-permission": "workspace:*",
     "@pi-workspace/herdr-bridge": "workspace:*",
     "@pi-workspace/herdr-contract": "workspace:*",
     "@pi-workspace/herdr-subagent": "workspace:*",

@@ -1,5 +1,29 @@
 # Bash Permission Policy
 
+> The `bash-permission` extension is currently removed. Nothing enforces the rules below. The code still lives in `packages/bash-permission/`.
+
+## Restoring it
+
+1. Re-add the load entry in `package.json` under `pi.extensions`:
+
+```json
+"./packages/bash-permission/index.ts"
+```
+
+2. Re-add the dependency in `package.json` and install:
+
+```json
+"@pi-workspace/bash-permission": "workspace:*"
+```
+
+```bash
+pnpm install
+```
+
+3. Re-add `bash-permission` to the `extensions:` frontmatter in `agents/code-reviewer.md`, `agents/codebase-analyser.md`, `agents/implement.md`, and `agents/docs-researcher.md`.
+4. Restore the `@pi-workspace/bash-permission` assertion in `package.test.ts`.
+5. Run `/reload` in Pi.
+
 This file documents the bash permission rules enforced by the `bash-permission` extension.
 
 ## Where the config lives

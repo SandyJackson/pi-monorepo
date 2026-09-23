@@ -33,7 +33,6 @@ describe("Pi workspace package", () => {
 
   it("has workspace dependencies for extension packages", () => {
     expect(packageJson.dependencies?.["@pi-workspace/herdr-contract"]).toBeDefined();
-    expect(packageJson.dependencies?.["@pi-workspace/bash-permission"]).toBeDefined();
     expect(packageJson.dependencies?.["@pi-workspace/herdr-subagent"]).toBeDefined();
     expect(packageJson.dependencies?.["@pi-workspace/herdr-bridge"]).toBeDefined();
     expect(packageJson.dependencies?.["@pi-workspace/session-auto-name"]).toBeDefined();
