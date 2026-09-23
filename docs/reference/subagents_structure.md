@@ -24,7 +24,7 @@ packages/herdr-subagent/
 | `agents.ts` | Discovering user and trusted project agents, merging with project-overrides-user precedence, formatting and resolution | Pi's `parseFrontmatter`/`getAgentDir` |
 | `subagent-tool.ts` | Strict request schema, per-task validation against the catalog, one injected delegation call, final content/details rendering | `agents.ts`, `pi-session.ts`, `herdr/*` contracts |
 | `pi-session.ts` | Reading Pi session JSONL: header identity, exact answer references, answer resolution | nothing (fs only) |
-| `herdr/delegation.ts` | Herdr environment validation, workspace tab provisioning, ordered launch/observation, total ordered outcomes | `herdr/session.ts`, `herdr/rpc.ts` |
+| `herdr/delegation.ts` | Herdr environment validation, delegation tab creation, ordered launch/observation, total ordered outcomes | `herdr/session.ts`, `herdr/rpc.ts` |
 | `herdr/session.ts` | Launching one visible subagent session and observing its initial delegated turn (the session itself persists beyond the turn under Herdr's management) | `pi-session.ts`, `herdr/rpc.ts` |
 | `herdr/rpc.ts` | Newline-delimited JSON-RPC over the Herdr Unix socket | nothing (net only) |
 
@@ -42,7 +42,7 @@ Test seams are intentional and few: `subagent-tool.ts` receives one injected del
 - Each well-shaped task receives its **delegated task number** (one-based position) exactly once, at parse time; that same task record is carried through validation, execution, details, and presentation. No second identity is generated.
 - Task-level failures (empty agent, empty instruction, unknown agent) become positional `invalid` outcomes; valid siblings still execute. Structurally malformed calls are rejected whole by Pi.
 - A call with no tasks lists the catalog. A delegation whose tasks are all invalid never initializes Herdr.
-- Herdr environment and shared workspace provisioning failures **throw before any launch** and surface through Pi's native tool-error channel; once launch processing begins, per-task failures — including pane-split failures — become positional delegated task outcomes instead.
+- Herdr environment and tab-creation failures **throw before any launch** and surface through Pi's native tool-error channel; once launch processing begins, per-task failures — including pane-split failures — become positional delegated task outcomes instead.
 - Presentation resolves an answer's exact reference **only at presentation time** — answer text never flows through the delegation operation or persists in `details`. Truncation uses Pi's canonical `truncateHead` (head bytes/lines) with the full answer remaining addressable in the referenced session entry.
 - One task renders its direct answer or a status-specific explanation; multiple tasks render `Delegation: X/N tasks completed` plus request-ordered headings. The delegated task number is canonical; agent names are descriptive only. `details.tasks[]` carries `taskNumber`, `agent`, and the outcome's status-specific metadata — never answer text.
 
@@ -51,8 +51,8 @@ Test seams are intentional and few: `subagent-tool.ts` receives one injected del
 `herdr/delegation.ts` implements one concrete operation — not a class hierarchy, not a scheduler:
 
 1. Validate bounds (≤ 8 valid tasks) and the already-aborted case before contacting Herdr.
-2. Serialize shared provisioning per workspace behind a process-wide lock. The lock covers tab provisioning and sequential launches only; it never waits for turns to settle. Shared Herdr environment or workspace provisioning failures throw before any launch.
-3. Place every delegated task's pane in the workspace's shared `subagents` tab (plain or Herdr-numbered labels): a newly created tab's root pane serves the first launch attempt, and every other placement is a right/down split from the tab's most recent pane. A confirmed launch failure frees its pane for reuse by a same-cwd sibling; a pane is never reused after an indeterminate launch or for a task with a different cwd.
+2. Serialize tab creation per workspace behind a process-wide lock. The lock covers tab creation and sequential launches only; it never waits for turns to settle. Shared Herdr environment or tab-creation failures throw before any launch.
+3. Give every delegation its own new Herdr tab, created unfocused and labeled by the caller's optional `label` (default: the delegated agents' names); the tab's root pane serves the first launch attempt, and subsequent placements split from the tab's most recent pane. Splits go down after a launched or possibly launched child; if earlier launches were confirmed failures and the next task needs a different cwd, the split goes right. Existing tabs are never discovered or reused. A confirmed launch failure frees its pane for reuse by a same-cwd sibling; a pane is never reused after an indeterminate launch or for a task with a different cwd.
 4. Launch every valid task **sequentially** and start each task's observation immediately at its confirmed launch while later launches continue. There are no wave barriers.
 5. Await all observations concurrently, then merge outcomes back into request order.
 

@@ -41,6 +41,14 @@ const SubagentParams = Type.Object(
           "Omit or pass an empty array to list available agents.",
       }),
     ),
+    label: Type.Optional(
+      Type.String({
+        description:
+          "Purpose label naming this delegation's tab, e.g. review-issue-13. " +
+          "It names the whole delegation's tab, not an individual agent or pane. " +
+          "Defaults to the delegated agents' names.",
+      }),
+    ),
     timeout: Type.Optional(
       Type.Integer({
         minimum: 1,
@@ -98,6 +106,8 @@ export type ExecuteDelegation = (
   tasks: readonly DelegatedTaskRecord[],
   options: {
     timeoutMs: number;
+    /** Purpose label for the delegation's tab; the delegation falls back to agent names. */
+    label?: string;
     signal?: AbortSignal;
     onProgress?: (update: { taskNumber: number; line: string }) => void;
   },
@@ -128,6 +138,7 @@ export function createSubagentTool(
       "  {}                                                -> list agents",
       '  {tasks: [{agent:"foo", instruction:"..."}]}        -> single visible sub-agent',
       '  {tasks: [{agent:"foo", instruction:"..."}, ...]}   -> parallel visible sub-agents',
+      "  label: optional tab label for this delegation (default: agent names)",
       "  timeout: per-task timeout in minutes",
     ].join("\n") + agentsSuffix;
 
@@ -163,6 +174,7 @@ export function createSubagentTool(
         instruction: task.instruction.trim(),
         cwd: task.cwd ?? options.parentCwd,
       }));
+      const tabLabel = params.label?.trim();
       const scope: AgentScope = options.includeProjectAgents ? "both" : "user";
       const resultsByTaskNumber = new Map<number, TaskResult>();
       const validTasks: DelegatedTaskRecord[] = [];
@@ -203,6 +215,7 @@ export function createSubagentTool(
       if (validTasks.length > 0) {
         const executions = await options.executeDelegation(validTasks, {
           timeoutMs: (params.timeout ?? 20) * 60 * 1000,
+          label: tabLabel,
           signal: _signal,
           onProgress: (update) => {
             _onUpdate?.({
