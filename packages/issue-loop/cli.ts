@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { gh, snapshot } from "./github.ts";
+import { gh, githubHostFromOrigin, snapshot } from "./github.ts";
 import { git, originUrl } from "./process.ts";
 import { execute } from "./runner.ts";
 import { defaultLoopSettings, loadLoopSettings } from "./settings.ts";
@@ -65,17 +65,21 @@ async function main(): Promise<void> {
     : defaultLoopSettings();
   const repo = await git(resolve(values.repo), "rev-parse", "--show-toplevel");
   const origin = await originUrl(repo);
-  const repositoryUrl = origin
-    .replace(/^git@github\.com:/, "https://github.com/")
-    .replace(/\.git$/, "");
+  const host = githubHostFromOrigin(origin);
+  const repositoryUrl = origin.replace(/^git@([^:]+):/, "https://$1/").replace(/\.git$/, "");
   const metadata = JSON.parse(
-    await gh(repo, "repo", "view", repositoryUrl, "--json", "nameWithOwner,defaultBranchRef"),
+    await gh(repo, host, "repo", "view", repositoryUrl, "--json", "nameWithOwner,defaultBranchRef"),
   ) as { nameWithOwner: string; defaultBranchRef: { name: string } };
   if (!/^[\w.-]+\/[\w.-]+$/.test(metadata.nameWithOwner) || !metadata.defaultBranchRef?.name)
     throw new Error("Cannot determine the GitHub repository and default branch");
   const baseBranch = metadata.defaultBranchRef.name;
   await git(repo, "check-ref-format", `refs/heads/${baseBranch}`);
-  const { parent, tickets } = await snapshot(repo, metadata.nameWithOwner, Number(values.issue));
+  const { parent, tickets } = await snapshot(
+    repo,
+    host,
+    metadata.nameWithOwner,
+    Number(values.issue),
+  );
   await git(repo, "fetch", "origin", `refs/heads/${baseBranch}`);
   const baseSha = await git(repo, "rev-parse", "FETCH_HEAD");
   const id = `${parent.number}-${new Date().toISOString().replace(/[-:.]/g, "")}-${randomUUID().slice(0, 8)}`;

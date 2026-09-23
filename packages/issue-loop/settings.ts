@@ -9,9 +9,9 @@
  *
  * Divergences from subagent discovery, by design:
  * - Agent files need no `description`; the loop never lists them.
- * - An absent `tools` field keeps the loop's per-role restrictions below
- *   (never Pi's full default toolset), so omitting `tools` from a review
- *   agent cannot silently widen the read-only reviewer.
+ * - An absent or empty `tools` field keeps the loop's per-role restrictions
+ *   below (never Pi's full default toolset), so omitting `tools` from a
+ *   review agent cannot silently widen the read-only reviewer.
  * - `extensions:` and `skills:` frontmatter keys are parsed but ignored by
  *   the loop. Skill/extension support is a documented future iteration.
  */
@@ -70,7 +70,10 @@ function readAgent(role: string, settingsDir: string, ref: unknown): RoleSetting
     throw new Error(
       `Agent file ${filePath} has an empty prompt body; refusing a role with no guidance`,
     );
-  const tools = agent.tools ?? [...defaults];
+  // An explicit empty list must not widen to Pi's full default toolset:
+  // `buildPiAgentArgs` omits `--tools` for empty arrays (see
+  // `herdr-subagent/agents.ts`), so empty falls back to the role default.
+  const tools = agent.tools?.length ? agent.tools : [...defaults];
   if (role === "review") {
     const forbidden = tools.filter((tool) => REVIEW_FORBIDDEN_TOOLS.has(tool));
     if (forbidden.length > 0)

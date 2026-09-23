@@ -1,7 +1,40 @@
 import { command } from "./process.ts";
 import type { Issue, Ticket } from "./state.ts";
 
-export async function gh(cwd: string, ...args: string[]): Promise<string> {
+/**
+ * GitHub hostname derived from a validated origin URL, or `undefined` when
+ * the origin is not a GitHub URL (local paths used in tests). Hosts compare
+ * case-insensitively; the caller decides the default.
+ */
+export function githubHostFromOrigin(origin: string): string | undefined {
+  const scp = origin.match(/^git@([^:]+):/);
+  if (scp) return scp[1].toLowerCase();
+  const url = origin.match(/^https?:\/\/([^/]+)\//);
+  if (url) return url[1].toLowerCase();
+  const ssh = origin.match(/^ssh:\/\/[^@]+@([^/]+)\//);
+  if (ssh) return ssh[1].toLowerCase();
+  return undefined;
+}
+
+/**
+ * Run `gh` bound to the origin host. A mismatched inherited `GH_HOST` is
+ * rejected instead of letting reads or PR creation land on another host;
+ * otherwise the expected host is forced for the child process.
+ */
+export async function gh(
+  cwd: string,
+  host: string | undefined,
+  ...args: string[]
+): Promise<string> {
+  if (host !== undefined) {
+    const inherited = process.env.GH_HOST;
+    if (inherited && inherited.toLowerCase() !== host.toLowerCase()) {
+      throw new Error(
+        `GH_HOST=${inherited} does not match this run's origin host ${host}; refusing to contact a different GitHub host`,
+      );
+    }
+    return command("gh", args, { cwd, env: { GH_HOST: host } });
+  }
   return command("gh", args, { cwd });
 }
 
@@ -26,12 +59,17 @@ function issue(value: unknown): Issue {
   };
 }
 
-export async function getIssue(cwd: string, repo: string, number: number): Promise<Issue> {
-  return issue(JSON.parse(await gh(cwd, "api", `repos/${repo}/issues/${number}`)));
+export async function getIssue(
+  cwd: string,
+  host: string | undefined,
+  repo: string,
+  number: number,
+): Promise<Issue> {
+  return issue(JSON.parse(await gh(cwd, host, "api", `repos/${repo}/issues/${number}`)));
 }
 
-async function pages(cwd: string, endpoint: string): Promise<unknown[]> {
-  const result: unknown = JSON.parse(await gh(cwd, "api", endpoint, "--paginate", "--slurp"));
+async function pages(cwd: string, host: string | undefined, endpoint: string): Promise<unknown[]> {
+  const result: unknown = JSON.parse(await gh(cwd, host, "api", endpoint, "--paginate", "--slurp"));
   if (!Array.isArray(result) || !result.every(Array.isArray))
     throw new Error("Invalid paginated GitHub response");
   return result.flat();
@@ -39,19 +77,21 @@ async function pages(cwd: string, endpoint: string): Promise<unknown[]> {
 
 export async function snapshot(
   cwd: string,
+  host: string | undefined,
   repo: string,
   number: number,
 ): Promise<{ parent: Issue; tickets: Ticket[] }> {
-  const parent = await getIssue(cwd, repo, number);
+  const parent = await getIssue(cwd, host, repo, number);
   if (parent.state !== "open") throw new Error("The parent issue must be open");
-  const children = (await pages(cwd, `repos/${repo}/issues/${number}/sub_issues`)).map(issue);
+  const children = (await pages(cwd, host, `repos/${repo}/issues/${number}/sub_issues`)).map(issue);
   const tickets: Ticket[] = [];
   // Preserve the parent's order across pages; dependencies still take precedence.
+  const base = `https://${host ?? "github.com"}/`;
   for (const child of children.filter((child) => child.state === "open")) {
-    if (child.html_url !== `https://github.com/${repo}/issues/${child.number}`)
+    if (child.html_url !== `${base}${repo}/issues/${child.number}`)
       throw new Error("Cross-repository child issues are not supported in this MVP");
     const blockers = (
-      await pages(cwd, `repos/${repo}/issues/${child.number}/dependencies/blocked_by`)
+      await pages(cwd, host, `repos/${repo}/issues/${child.number}/dependencies/blocked_by`)
     ).map(issue);
     tickets.push({
       ...child,

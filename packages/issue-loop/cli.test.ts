@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, expect, it } from "vitest";
+import { gh, githubHostFromOrigin } from "./github.ts";
+import { loadLoopSettings } from "./settings.ts";
 
 const roots: string[] = [];
 const cli = resolve(import.meta.dirname, "run.mjs");
@@ -90,6 +92,11 @@ fs.writeFileSync(session, JSON.stringify({type:'session_info', name})+'\\n');
 fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'workers.jsonl'), JSON.stringify({name, session, args, prompt, cwd:process.cwd()})+'\\n');
 if (name.includes('implement')) {
  if (process.env.FIXTURE_MODE === 'signal-exit') process.kill(process.pid, 'SIGTERM');
+ if (process.env.FIXTURE_MODE === 'replace-lock') {
+   const lock = path.join(path.dirname(path.dirname(session)), 'run.lock');
+   fs.unlinkSync(lock);
+   fs.writeFileSync(lock, 'new-owner\\n');
+ }
  if (process.env.FIXTURE_MODE === 'missing-lock' || process.env.FIXTURE_MODE === 'directory-lock') {
    const lock = path.join(path.dirname(path.dirname(session)), 'run.lock');
    fs.unlinkSync(lock);
@@ -636,6 +643,91 @@ it.each(["missing-lock", "directory-lock"])(
   },
   30_000,
 );
+
+it("derives the GitHub host from common origin URL forms", () => {
+  expect(githubHostFromOrigin("git@github.com:owner/repo.git")).toBe("github.com");
+  expect(githubHostFromOrigin("git@ghe.example.com:owner/repo.git")).toBe("ghe.example.com");
+  expect(githubHostFromOrigin("https://github.com/owner/repo.git")).toBe("github.com");
+  expect(githubHostFromOrigin("https://ghe.example.com/owner/repo")).toBe("ghe.example.com");
+  expect(githubHostFromOrigin("ssh://git@ghe.example.com/owner/repo.git")).toBe("ghe.example.com");
+  expect(githubHostFromOrigin("/tmp/remote.git")).toBeUndefined();
+});
+
+it("rejects a gh call when the inherited GH_HOST targets another host", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "issue-loop-gh-"));
+  roots.push(dir);
+  const saved = process.env.GH_HOST;
+  process.env.GH_HOST = "other.example.com";
+  try {
+    await expect(gh(dir, "github.com", "api", "x")).rejects.toThrow("GH_HOST");
+  } finally {
+    if (saved === undefined) delete process.env.GH_HOST;
+    else process.env.GH_HOST = saved;
+  }
+});
+
+it("forces the origin host on gh calls instead of inheriting the environment", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "issue-loop-gh-"));
+  roots.push(dir);
+  const out = join(dir, "env.txt");
+  writeFileSync(join(dir, "gh"), `#!/bin/sh\necho "$GH_HOST" > "$STUB_OUT"\nprintf '{}\\n'\n`, {
+    mode: 0o755,
+  });
+  const savedPath = process.env.PATH;
+  const savedGhHost = process.env.GH_HOST;
+  const savedStubOut = process.env.STUB_OUT;
+  process.env.PATH = `${dir}:${savedPath}`;
+  process.env.STUB_OUT = out;
+  try {
+    delete process.env.GH_HOST;
+    expect(await gh(dir, "github.com", "api", "x")).toBe("{}");
+    expect(readFileSync(out, "utf8").trim()).toBe("github.com");
+    process.env.GH_HOST = "github.com";
+    expect(await gh(dir, "github.com", "api", "x")).toBe("{}");
+    process.env.GH_HOST = "ghe.example.com";
+    expect(await gh(dir, undefined, "api", "x")).toBe("{}");
+    expect(readFileSync(out, "utf8").trim()).toBe("ghe.example.com");
+  } finally {
+    process.env.PATH = savedPath!;
+    if (savedGhHost === undefined) delete process.env.GH_HOST;
+    else process.env.GH_HOST = savedGhHost;
+    if (savedStubOut === undefined) delete process.env.STUB_OUT;
+    else process.env.STUB_OUT = savedStubOut;
+  }
+});
+
+it("normalizes an empty agent tools list to the role defaults", () => {
+  const dir = mkdtempSync(join(tmpdir(), "issue-loop-settings-"));
+  roots.push(dir);
+  mkdirSync(join(dir, "agents"), { recursive: true });
+  for (const role of ["implement", "review"]) {
+    writeFileSync(
+      join(dir, "agents", `${role}.md`),
+      `---\ndescription: Test ${role}\nmodel: test-provider/model\ntools: []\n---\n\nGuidance.`,
+      "utf8",
+    );
+  }
+  writeFileSync(
+    join(dir, "loop-settings.json"),
+    JSON.stringify({
+      implementAgent: "./agents/implement.md",
+      reviewAgent: "./agents/review.md",
+    }),
+    "utf8",
+  );
+  const settings = loadLoopSettings(join(dir, "loop-settings.json"));
+  expect(settings.implement.tools).toEqual(["read", "grep", "find", "ls", "bash", "edit", "write"]);
+  expect(settings.review.tools).toEqual(["read", "grep", "find", "ls"]);
+});
+
+it("leaves a replaced run lock for its new owner", () => {
+  const f = fixture("replace-lock");
+  const result = f.start();
+  expect(result.status, result.stderr).toBe(0);
+  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+  expect(readFileSync(join(runDir, "run.lock"), "utf8")).toBe("new-owner\n");
+  expect(result.stderr).toContain("replaced");
+});
 
 it("can resume a setup failure in the already-created worktree", () => {
   const f = fixture();

@@ -6,15 +6,23 @@ export interface CommandOptions {
   timeoutMs?: number;
   log?: string;
   input?: string;
+  /** Environment overrides merged over process.env; `undefined` removes the variable. */
+  env?: Record<string, string | undefined>;
 }
 
 /** Run trusted commands without shell interpolation; only setup/check explicitly use a shell. */
 export function command(program: string, args: string[], options: CommandOptions): Promise<string> {
   return new Promise((resolve, reject) => {
     if (options.log) writeFileSync(options.log, "", { mode: 0o600 });
+    const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+    if (options.env)
+      for (const [key, value] of Object.entries(options.env)) {
+        if (value === undefined) delete env[key];
+        else env[key] = value;
+      }
     const child = spawn(program, args, {
       cwd: options.cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      env,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     });

@@ -1,7 +1,16 @@
-import { closeSync, existsSync, mkdirSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { buildPiAgentArgs } from "@pi-workspace/herdr-subagent/agents";
-import { getIssue, gh } from "./github.ts";
+import { getIssue, gh, githubHostFromOrigin } from "./github.ts";
 import { command, git, originUrl } from "./process.ts";
 import { MAX_REPAIRS, type RunState, save, type Ticket } from "./state.ts";
 
@@ -222,16 +231,17 @@ async function resolveTicket(state: RunState, ticket: Ticket): Promise<void> {
 }
 
 async function eligible(state: RunState, ticket: Ticket): Promise<boolean> {
+  const host = githubHostFromOrigin(state.origin);
+  const expectedHost = host ?? "github.com";
   for (const blocker of ticket.blockers) {
     const internal = state.tickets.find((item) => item.html_url === blocker.html_url);
     if (internal) {
       if (internal.status !== "accepted") return false;
     } else {
-      const match = blocker.html_url.match(
-        /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)$/,
-      );
-      if (!match) throw new Error(`Unsupported dependency URL: ${blocker.html_url}`);
-      const current = await getIssue(state.repo, match[1], Number(match[2]));
+      const match = blocker.html_url.match(/^https:\/\/([^/]+)\/([^/]+\/[^/]+)\/issues\/(\d+)$/);
+      if (!match || match[1].toLowerCase() !== expectedHost.toLowerCase())
+        throw new Error(`Unsupported dependency URL: ${blocker.html_url}`);
+      const current = await getIssue(state.repo, host, match[2], Number(match[3]));
       if (current.state !== "closed") return false;
     }
   }
@@ -255,9 +265,11 @@ async function publish(state: RunState): Promise<void> {
   if (await git(state.worktree, "status", "--porcelain"))
     throw new Error("Unreviewed changes exist before publication");
   await git(state.worktree, "push", "--set-upstream", "origin", `HEAD:refs/heads/${state.branch}`);
+  const host = githubHostFromOrigin(state.origin);
   const existing = JSON.parse(
     await gh(
       state.repo,
+      host,
       "pr",
       "list",
       "--repo",
@@ -299,6 +311,7 @@ async function publish(state: RunState): Promise<void> {
     existing[0]?.url ??
     (await gh(
       state.repo,
+      host,
       "pr",
       "create",
       "--repo",
@@ -321,14 +334,19 @@ async function publish(state: RunState): Promise<void> {
 export async function execute(state: RunState): Promise<void> {
   const lock = join(state.runDir, "run.lock");
   let fd: number;
+  let lockDev: number | undefined;
+  let lockIno: number | undefined;
   try {
     fd = openSync(lock, "wx", 0o600);
-    writeFileSync(fd, `${process.pid}\n`);
   } catch {
     throw new Error(
       `Run is locked: ${lock}. If the previous controller crashed, verify it and its workers have stopped before removing this lock`,
     );
   }
+  writeFileSync(fd, `${process.pid}\n`);
+  // Identity of our lock; the finally block only removes the path when it
+  // still refers to this file, so a replaced lock is left for its owner.
+  ({ dev: lockDev, ino: lockIno } = fstatSync(fd));
   try {
     if (state.status === "done") {
       save(state);
@@ -431,7 +449,14 @@ export async function execute(state: RunState): Promise<void> {
       console.error(`Warning: could not close run lock: ${String(error)}`);
     }
     try {
-      unlinkSync(lock);
+      const current = lstatSync(lock);
+      if (lockDev !== undefined && current.dev === lockDev && current.ino === lockIno) {
+        unlinkSync(lock);
+      } else {
+        console.error(
+          "Warning: could not remove run lock: it was replaced while this run was active; leaving it in place",
+        );
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         console.error(`Warning: could not remove run lock: ${String(error)}`);
