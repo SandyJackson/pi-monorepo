@@ -67,6 +67,12 @@ async function worker(
   const args = ["-p", "--approve", "--name", session.name, "--session", session.path];
   if (roleSettings.model) args.push("--model", roleSettings.model);
   if (roleSettings.tools.length > 0) args.push("--tools", roleSettings.tools.join(","));
+  // Deny-by-default: workers never inherit ambient skills. Curated loop skills
+  // are copied into the run dir at start and loaded explicitly by short name.
+  // Older snapshots predate `skills`; treat a missing field as empty.
+  args.push("--no-skills");
+  for (const skill of roleSettings.skills ?? [])
+    args.push("--skill", join(state.runDir, "skills", skill));
   if (state.settings.appendSystemPrompt) {
     const appendFile = join(state.runDir, "append-system-prompt.md");
     writeFileSync(appendFile, `${state.settings.appendSystemPrompt}\n`, { mode: 0o600 });
@@ -347,6 +353,17 @@ export async function execute(state: RunState): Promise<void> {
     await verifyOrigin(state);
     mkdirSync(join(state.runDir, "sessions"), { recursive: true, mode: 0o700 });
     mkdirSync(join(state.runDir, "logs"), { recursive: true, mode: 0o700 });
+    // Skills were copied into the run dir at start; resume reuses the copy.
+    // Fail here rather than launching a worker missing its curated skills.
+    for (const skill of [
+      ...(state.settings.implement.skills ?? []),
+      ...(state.settings.review.skills ?? []),
+    ]) {
+      if (!existsSync(join(state.runDir, "skills", skill, "SKILL.md")))
+        throw new Error(
+          `Loop skill ${JSON.stringify(skill)} is missing from ${join(state.runDir, "skills", skill)}; restore the run directory before resuming`,
+        );
+    }
     state.status = "running";
     state.lastError = undefined;
     save(state);

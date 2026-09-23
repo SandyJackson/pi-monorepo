@@ -46,11 +46,30 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
 {
   "implementAgent": "./agents/loop-implement.md",
   "reviewAgent": "./agents/loop-review.md",
+  "implementSkills": ["tdd"],
+  "reviewSkills": [],
   "appendSystemPrompt": "Prefer small, focused changes."
 }
 ```
 
 Agent files use the agent markdown format: frontmatter with `model` and `tools`, plus a prompt body that replaces the default role guidance only. Paths resolve relative to the settings file. The runner still supplies issue context, constraints, patch/check context, and the reviewer's required JSON verdict format.
+
+Without `--settings`, both roles use the blessed files in `agents/` (`loop-implement.md`, `loop-reviewer.md`) and the implementer gets the curated trio `tdd`, `diagnosing-bugs`, `deslop`. A settings file replaces one or both role files — the blessed files double as the template for user-authored replacements. Omitting `implementSkills` keeps the trio and omitting `reviewSkills` keeps empty; an explicit list (including `[]`) replaces the default.
+
+Workers always start with `--no-skills`: they never inherit ambient workspace or user skills. `implementSkills` / `reviewSkills` name curated loop skills by short name (closed set, from `packages/issue-loop/loop-skills/`; currently `tdd`, `deslop`, `diagnosing-bugs`). The reviewer default stays empty. At `start` the controller copies the selected skills into `<run>/skills/` and workers load them via `--skill`; `resume` reuses the copy.
+
+Blessed role files ship with the package and can be referenced from your settings file (paths resolve relative to it):
+
+- `agents/loop-implement.md` — implement worker: reaches for `/skill:tdd`, `/skill:diagnosing-bugs`, and `/skill:deslop` explicitly, with ponytail simplicity tags (`delete/stdlib/native/yagni/shrink`) baked in.
+- `agents/loop-reviewer.md` — review worker: single-pass Standards + Spec review condensed from the code-review skill and code-reviewer agent, ending in the required JSON verdict.
+
+```json
+{
+  "implementAgent": "<path-to-pi-monorepo>/packages/issue-loop/agents/loop-implement.md",
+  "reviewAgent": "<path-to-pi-monorepo>/packages/issue-loop/agents/loop-reviewer.md",
+  "implementSkills": ["tdd", "diagnosing-bugs", "deslop"]
+}
+```
 
 An absent `tools` field keeps the built-ins (implement: `read,grep,find,ls,bash,edit,write`; review: `read,grep,find,ls`). An explicit list replaces them. A reviewer asking for `bash`, `edit`, or `write` fails at startup.
 

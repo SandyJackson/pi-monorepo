@@ -2,7 +2,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_IMPLEMENT_TOOLS, DEFAULT_REVIEW_TOOLS, loadLoopSettings } from "./settings.js";
+import {
+  DEFAULT_IMPLEMENT_TOOLS,
+  DEFAULT_REVIEW_TOOLS,
+  loadLoopSettings,
+  materializeLoopSkills,
+  validateLoopSkills,
+} from "./settings.js";
 
 const roots: string[] = [];
 
@@ -57,12 +63,14 @@ describe("loadLoopSettings", () => {
         agentName: "implement",
         model: "provider/implement-model",
         tools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
+        skills: ["tdd", "diagnosing-bugs", "deslop"],
         promptBody: "Implement the ticket.",
       },
       review: {
         agentName: "review",
         model: "provider/review-model",
         tools: ["read", "grep", "find", "ls"],
+        skills: [],
         promptBody: "Review the patch.",
       },
       appendSystemPrompt: "Prefer small changes.",
@@ -73,12 +81,19 @@ describe("loadLoopSettings", () => {
     const settingsPath = writeSettingsDir({ "loop-settings.json": "{}" });
     const settings = loadLoopSettings(settingsPath);
     expect(settings.implement).toEqual({
-      agentName: undefined,
+      agentName: "loop-implement",
       model: undefined,
       tools: DEFAULT_IMPLEMENT_TOOLS,
-      promptBody: undefined,
+      skills: ["tdd", "diagnosing-bugs", "deslop"],
+      promptBody: expect.stringContaining("/skill:tdd"),
     });
-    expect(settings.review.tools).toEqual(DEFAULT_REVIEW_TOOLS);
+    expect(settings.review).toEqual({
+      agentName: "loop-reviewer",
+      model: undefined,
+      tools: DEFAULT_REVIEW_TOOLS,
+      skills: [],
+      promptBody: expect.stringContaining("[Spec]"),
+    });
     expect(settings.appendSystemPrompt).toBeUndefined();
   });
 
@@ -88,6 +103,91 @@ describe("loadLoopSettings", () => {
     });
     const settings = loadLoopSettings(settingsPath);
     expect(settings.appendSystemPrompt).toBeUndefined();
+  });
+
+  it("parses per-role skill short names", () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({
+        implementSkills: ["tdd"],
+        reviewSkills: [],
+      }),
+    });
+    const settings = loadLoopSettings(settingsPath);
+    expect(settings.implement.skills).toEqual(["tdd"]);
+    expect(settings.review.skills).toEqual([]);
+  });
+
+  it.each([
+    ["not-an-array", "implementSkills"],
+    [["ok", 42], "implementSkills"],
+    [["Has-Caps"], "implementSkills"],
+    [["has space"], "reviewSkills"],
+    [[""], "reviewSkills"],
+    [["tdd", "tdd"], "implementSkills"],
+    [["-tdd"], "implementSkills"],
+    [["tdd-"], "reviewSkills"],
+    [["test--skill"], "implementSkills"],
+  ])("rejects invalid skill lists (%j)", (value, field) => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({ [field as string]: value }),
+    });
+    expect(() => loadLoopSettings(settingsPath)).toThrow(/implementSkills|reviewSkills/);
+  });
+
+  it("validates skills against the curated dir and materializes them into the run dir", () => {
+    const curated = fs.mkdtempSync(path.join(os.tmpdir(), "loop-curated-test-"));
+    roots.push(curated);
+    fs.mkdirSync(path.join(curated, "tdd"), { recursive: true });
+    fs.writeFileSync(path.join(curated, "tdd", "SKILL.md"), "# tdd\n", "utf8");
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({ implementSkills: ["tdd"] }),
+    });
+    const settings = loadLoopSettings(settingsPath);
+    expect(() => validateLoopSkills(settings, curated)).not.toThrow();
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "loop-run-test-"));
+    roots.push(runDir);
+    materializeLoopSkills(settings, runDir, curated);
+    expect(fs.readFileSync(path.join(runDir, "skills", "tdd", "SKILL.md"), "utf8")).toBe("# tdd\n");
+  });
+
+  it("rejects unknown skills against the curated dir", () => {
+    const curated = fs.mkdtempSync(path.join(os.tmpdir(), "loop-curated-test-"));
+    roots.push(curated);
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({ implementSkills: ["nope"] }),
+    });
+    const settings = loadLoopSettings(settingsPath);
+    expect(() => validateLoopSkills(settings, curated)).toThrow(/Unknown loop skill "nope"/);
+  });
+
+  it("loads the blessed loop agent files with read-only review tools", () => {
+    const pkgDir = path.resolve(import.meta.dirname);
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({
+        implementAgent: path.join(pkgDir, "agents", "loop-implement.md"),
+        reviewAgent: path.join(pkgDir, "agents", "loop-reviewer.md"),
+        implementSkills: ["tdd", "diagnosing-bugs", "deslop"],
+      }),
+    });
+    const settings = loadLoopSettings(settingsPath);
+    expect(settings.implement.agentName).toBe("loop-implement");
+    expect(settings.implement.model).toBeUndefined();
+    expect(settings.implement.tools).toEqual([
+      "read",
+      "grep",
+      "find",
+      "ls",
+      "bash",
+      "edit",
+      "write",
+    ]);
+    expect(settings.implement.skills).toEqual(["tdd", "diagnosing-bugs", "deslop"]);
+    expect(settings.implement.promptBody).toContain("/skill:tdd");
+    expect(settings.review.agentName).toBe("loop-reviewer");
+    expect(settings.review.tools).toEqual(["read", "grep", "find", "ls"]);
+    expect(settings.review.skills).toEqual([]);
+    expect(settings.review.promptBody).toContain("Spec");
+    expect(() => validateLoopSkills(settings)).not.toThrow();
   });
 
   it("rejects a review agent that requests mutating tools", () => {

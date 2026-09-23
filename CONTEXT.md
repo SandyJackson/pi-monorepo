@@ -65,6 +65,9 @@ _Avoid_: Closure, merge
 
 **Loop worker session**:
 A named Pi session performing implementation or review for a loop run. It is distinct from an interactive visible subagent session.
+
+**Loop skill**:
+A skill vendored in the loop's curated directory and selectable by short name. It is distinct from workspace and user skills loaded through Pi discovery.
 ## Worktree switching
 
 **Worktrunk extension**:

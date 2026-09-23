@@ -167,6 +167,21 @@ it("accepts dependent tickets on one branch and opens one final PR without closi
   const reviews = workers.filter((worker) => worker.name.includes("review"));
   expect(reviews.length).toBeGreaterThanOrEqual(3);
   expect(reviews.every((worker) => worker.args.includes("read,grep,find,ls"))).toBe(true);
+  expect(workers.every((worker) => worker.args.includes("--no-skills"))).toBe(true);
+  // Blessed defaults: implementers get the curated trio, reviewers get none.
+  const implementers = workers.filter((worker) => worker.name.includes("implement"));
+  expect(implementers.length).toBeGreaterThan(0);
+  expect(
+    implementers.every(
+      (worker) =>
+        worker.args.includes("--skill") &&
+        worker.args.some((arg: string) => arg.endsWith(join("skills", "tdd"))) &&
+        worker.args.some((arg: string) => arg.endsWith(join("skills", "deslop"))),
+    ),
+  ).toBe(true);
+  expect(reviews.every((worker) => !worker.args.includes("--skill"))).toBe(true);
+  expect(existsSync(join(runDir!, "skills", "tdd", "SKILL.md"))).toBe(true);
+  expect(existsSync(join(runDir!, "skills", "diagnosing-bugs", "SKILL.md"))).toBe(true);
   const prArgs = JSON.parse(readFileSync(join(f.root, "pr.json"), "utf8"));
   expect(prArgs).toContain("--base");
   expect(prArgs).toContain("main");
@@ -254,12 +269,14 @@ it("applies settings roles to workers and snapshots them with the run", () => {
       agentName: "implement",
       model: "test-provider/implement-model",
       tools: ["read", "bash"],
+      skills: ["tdd", "diagnosing-bugs", "deslop"],
       promptBody: "CUSTOM IMPLEMENT GUIDANCE.",
     },
     review: {
       agentName: "review",
       model: "test-provider/review-model",
       tools: ["read", "grep"],
+      skills: [],
       promptBody: "CUSTOM REVIEW GUIDANCE.",
     },
     appendSystemPrompt: "SHARED STYLE NOTE.",
@@ -270,12 +287,17 @@ it("applies settings roles to workers and snapshots them with the run", () => {
   expect(implement!.args).toContain("test-provider/implement-model");
   expect(implement!.args).toContain("--tools");
   expect(implement!.args).toContain("read,bash");
+  expect(implement!.args).toContain("--no-skills");
+  expect(implement!.args).toContain("--skill");
+  expect(implement!.args.some((arg: string) => arg.endsWith(join("skills", "tdd")))).toBe(true);
   expect(implement!.args).toContain("--append-system-prompt");
   expect(implement!.prompt).toContain("CUSTOM IMPLEMENT GUIDANCE.");
   expect(implement!.prompt).not.toContain("You are the implementation worker");
   const review = workers.find((worker) => worker.name.includes("review"));
   expect(review!.args).toContain("test-provider/review-model");
   expect(review!.args).toContain("read,grep");
+  expect(review!.args).toContain("--no-skills");
+  expect(review!.args).not.toContain("--skill");
   expect(review!.prompt).toContain("CUSTOM REVIEW GUIDANCE.");
   expect(review!.prompt).toContain('"verdict"');
   expect(readFileSync(join(runDir!, "append-system-prompt.md"), "utf8")).toBe(
@@ -311,6 +333,28 @@ it("resumes from the settings snapshot after the original files are gone", () =>
   const workers = readWorkers(f.root);
   expect(workers.some((worker) => worker.args.includes("test-provider/review-model"))).toBe(true);
 }, 60_000);
+
+it("fails fast on an unknown loop skill without creating workers", () => {
+  const f = fixture();
+  const dir = join(f.root, "loop-settings");
+  mkdirSync(dir, { recursive: true });
+  const settingsPath = join(dir, "loop-settings.json");
+  writeFileSync(settingsPath, JSON.stringify({ implementSkills: ["no-such-skill"] }), "utf8");
+  const result = f.run(
+    "start",
+    "--repo",
+    f.repo,
+    "--issue",
+    "10",
+    "--check",
+    "true",
+    "--settings",
+    settingsPath,
+  );
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain('Unknown loop skill "no-such-skill"');
+  expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
+}, 30_000);
 
 it("stops on malformed review output rather than accepting a stray PASS string", () => {
   const f = fixture("malformed");

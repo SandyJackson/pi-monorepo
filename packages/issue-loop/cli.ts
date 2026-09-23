@@ -6,7 +6,12 @@ import { parseArgs } from "node:util";
 import { gh, githubHostFromOrigin, snapshot } from "./github.ts";
 import { git, originUrl } from "./process.ts";
 import { execute } from "./runner.ts";
-import { defaultLoopSettings, loadLoopSettings } from "./settings.ts";
+import {
+  defaultLoopSettings,
+  loadLoopSettings,
+  materializeLoopSkills,
+  validateLoopSkills,
+} from "./settings.ts";
 import { load, RUN_STATE_VERSION, type RunState, save } from "./state.ts";
 
 const usage = `Usage:
@@ -18,7 +23,9 @@ Starts from origin's default branch. Uses direct open GitHub child issues and na
 --setup runs once in the new worktree; --check runs after every change and before final publication.
 --timeout limits each worker/setup/check invocation (default 1800 seconds).
 --settings points at an optional JSON file customizing worker models, tool allowlists,
-role guidance and a shared system-prompt addition (see Customizing workers below).
+role guidance, per-role loop skills, and a shared system-prompt addition
+(see Customizing workers below). Workers always start with --no-skills; only
+curated loop skills named in the settings file are loaded.
 
 This command trusts the project's Pi resources and runs setup/check commands with your privileges.
 It commits accepted work, pushes only its feature branch and opens one PR. It never merges.
@@ -63,6 +70,8 @@ async function main(): Promise<void> {
   const settings = values.settings
     ? loadLoopSettings(resolve(values.settings))
     : defaultLoopSettings();
+  // Fail fast on unknown skills before creating the run; the copy lands in the
+  // run dir below so resume reuses the snapshot.
   const repo = await git(resolve(values.repo), "rev-parse", "--show-toplevel");
   const origin = await originUrl(repo);
   const host = githubHostFromOrigin(origin);
@@ -84,7 +93,9 @@ async function main(): Promise<void> {
   const baseSha = await git(repo, "rev-parse", "FETCH_HEAD");
   const id = `${parent.number}-${new Date().toISOString().replace(/[-:.]/g, "")}-${randomUUID().slice(0, 8)}`;
   const runDir = join(dirname(repo), ".pi-issue-loops", `${basename(repo)}-${id}`);
+  validateLoopSkills(settings);
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
+  materializeLoopSkills(settings, runDir);
   const state: RunState = {
     version: RUN_STATE_VERSION,
     name: `loop/${metadata.nameWithOwner}/${id}`,
