@@ -62,6 +62,13 @@ describe("subagent request schema", () => {
     expect(Value.Check(schema, { obsolete: true })).toBe(false);
     expect(
       Value.Check(schema, {
+        tasks: [{ agent: "alpha", instruction: "Review" }],
+        label: "review-issue-13",
+      }),
+    ).toBe(true);
+    expect(Value.Check(schema, { label: 42 })).toBe(false);
+    expect(
+      Value.Check(schema, {
         tasks: [{ agent: "alpha", instruction: "Review", extra: true }],
       }),
     ).toBe(false);
@@ -450,6 +457,22 @@ describe("subagent task validation", () => {
       ],
     });
     expect(executeDelegation).not.toHaveBeenCalled();
+  });
+
+  it("forwards the trimmed delegation label, or none, to the delegation call", async () => {
+    const { tool, executeDelegation } = createTool();
+    executeDelegation.mockImplementation(async (tasks) => [
+      { task: tasks[0], outcome: { status: "completed", session, answer: null } },
+    ]);
+
+    await executeTool(tool, {
+      tasks: [{ agent: "alpha", instruction: "Review" }],
+      label: "  review-issue-13  ",
+    });
+    expect(executeDelegation.mock.calls[0][1]).toMatchObject({ label: "review-issue-13" });
+
+    await executeTool(tool, { tasks: [{ agent: "alpha", instruction: "Review" }] });
+    expect(executeDelegation.mock.calls[1][1].label).toBeUndefined();
   });
 });
 

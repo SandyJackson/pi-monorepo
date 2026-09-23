@@ -33,6 +33,8 @@ interface HerdrDelegationContext {
 interface HerdrDelegationOptions extends HerdrDelegationContext {
   /** Per-task timeout, starting at each task's confirmed launch. */
   timeoutMs?: number;
+  /** Purpose label for this delegation's tab; falls back to "sub-agents". */
+  label?: string;
   signal?: AbortSignal;
   onProgress?: (update: { taskNumber: number; line: string }) => void;
 }
@@ -72,7 +74,7 @@ export function herdrDelegationEnvironment(
   if (!env.HERDR_WORKSPACE_ID) {
     throw new Error(
       [
-        "herdr-subagent requires HERDR_WORKSPACE_ID to create or reuse the workspace subagents tab.",
+        "herdr-subagent requires HERDR_WORKSPACE_ID to create the delegation's tab.",
         "Ensure the parent pi was launched from a Herdr-managed pane with complete Herdr environment metadata.",
       ].join(" "),
     );
@@ -85,54 +87,45 @@ export function herdrDelegationEnvironment(
 }
 
 // ---------------------------------------------------------------------------
-// Workspace placement
+// Tab placement
 // ---------------------------------------------------------------------------
-
-interface SubagentsTab {
-  /** Root pane of a tab this operation created, for the first child. */
-  rootPaneId?: string;
-  /** Any pane of a tab discovered in the workspace, for the first split. */
-  existingPaneId?: string;
-}
 
 interface HerdrTabInfo {
   tab_id?: string;
-  label?: string;
 }
 
 interface HerdrPaneInfo {
   pane_id?: string;
-  tab_id?: string;
 }
 
 /**
- * Find the workspace's shared subagent tab, creating it without focusing it
- * when absent.
+ * Resolve the delegation's tab label: the caller's trimmed purpose label, or
+ * the shared "sub-agents" fallback. Duplicate labels are allowed, so no
+ * uniqueness lookup or suffix allocation happens.
  */
-async function findOrCreateSubagentsTab(
+export function resolveTabLabel(label: string | undefined): string {
+  const trimmed = label?.trim();
+  if (trimmed) return trimmed;
+  return "sub-agents";
+}
+
+/**
+ * Create one unfocused Herdr tab for one delegation; its root pane hosts the
+ * first child. Existing tabs are never discovered or reused.
+ */
+async function createDelegationTab(
   rpc: HerdrRpcCall,
   workspaceId: string,
+  label: string,
   cwd: string,
   signal?: AbortSignal,
-): Promise<SubagentsTab> {
-  const listResult = (await rpc(
-    "tab.list",
-    { workspace_id: workspaceId },
-    DEFAULT_RPC_TIMEOUT,
-    signal,
-  )) as { tabs?: HerdrTabInfo[] };
-  const existingTab = listResult.tabs?.find((tab) => isSubagentsTabLabel(tab.label) && tab.tab_id);
-  if (existingTab?.tab_id) {
-    const existingPaneId = await findAnyTabPane(rpc, existingTab.tab_id, workspaceId, signal);
-    return { existingPaneId };
-  }
-
+): Promise<string> {
   const createResult = (await rpc(
     "tab.create",
     {
       workspace_id: workspaceId,
       cwd,
-      label: "subagents",
+      label,
       focus: false,
     },
     DEFAULT_RPC_TIMEOUT,
@@ -149,16 +142,16 @@ async function findOrCreateSubagentsTab(
       `tab.create returned no root_pane.pane_id:\n${JSON.stringify(createResult).slice(0, 300)}`,
     );
   }
-  return { rootPaneId };
+  return rootPaneId;
 }
 
 const workspaceLocks = new Map<string, Promise<unknown>>();
 
 /**
- * Serialize shared tab provisioning and child pane placement across this Pi
- * process for one Herdr workspace.
+ * Serialize tab creation and child pane placement across this Pi process for
+ * one Herdr workspace.
  *
- * The lock covers only provisioning and sequential launches; it never waits
+ * The lock covers only tab creation and sequential launches; it never waits
  * for child turns to settle. A queued delegation that is cancelled while
  * waiting still acquires the lock briefly and returns without acting; aborts
  * during the launch loop itself are handled positionally by the loop.
@@ -182,23 +175,6 @@ function withWorkspaceLock<T>(
   return result;
 }
 
-async function findAnyTabPane(
-  rpc: HerdrRpcCall,
-  tabId: string,
-  workspaceId: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const result = (await rpc(
-    "pane.list",
-    { workspace_id: workspaceId },
-    DEFAULT_RPC_TIMEOUT,
-    signal,
-  )) as { panes?: HerdrPaneInfo[] };
-  const paneId = result.panes?.find((pane) => pane.tab_id === tabId)?.pane_id;
-  if (!paneId) throw new Error(`subagents tab ${tabId} has no root pane`);
-  return paneId;
-}
-
 async function splitPane(
   rpc: HerdrRpcCall,
   targetPaneId: string,
@@ -217,11 +193,6 @@ async function splitPane(
   if (!paneId)
     throw new Error(`pane.split returned no new pane id:\n${JSON.stringify(result).slice(0, 300)}`);
   return paneId;
-}
-
-/** Herdr 0.7 displays numbered tab labels as, for example, "[4] subagents". */
-function isSubagentsTabLabel(label: string | undefined): boolean {
-  return label === "subagents" || /^\[\d+\] subagents$/.test(label ?? "");
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +219,7 @@ export async function executeHerdrDelegation(
 
   const { rpc, workspaceId, signal, onProgress } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
+  const tabLabel = resolveTabLabel(options.label);
 
   if (signal?.aborted) return abortedBeforeLaunch(tasks);
 
@@ -257,21 +229,20 @@ export async function executeHerdrDelegation(
   const lockResult = await withWorkspaceLock(workspaceId, signal, async () => {
     if (signal?.aborted) return undefined;
 
-    let tab: SubagentsTab;
+    let rootPaneId: string;
     try {
-      tab = await findOrCreateSubagentsTab(rpc, workspaceId, tasks[0].cwd, signal);
+      rootPaneId = await createDelegationTab(rpc, workspaceId, tabLabel, tasks[0].cwd, signal);
     } catch (err) {
       if (signal?.aborted) return undefined;
       throw err;
     }
 
-    // A new tab has one root terminal: the first child starts there; only
-    // later children receive explicit splits. In an existing tab every child
-    // splits, first right then down. A pane created for one task's cwd may
-    // only be reused by a sibling with the same cwd.
-    let targetPaneId = tab.rootPaneId;
-    let targetPaneCwd = tab.rootPaneId ? tasks[0].cwd : undefined;
-    let splitAnchorPaneId = tab.rootPaneId ?? tab.existingPaneId;
+    // This delegation's new tab has one root terminal: the first child starts
+    // there; only later children receive explicit splits. A pane created for
+    // one task's cwd may only be reused by a sibling with the same cwd.
+    let targetPaneId: string | undefined = rootPaneId;
+    let targetPaneCwd: string | undefined = tasks[0].cwd;
+    let splitAnchorPaneId = rootPaneId;
     let hasPlacedChild = false;
 
     for (let index = 0; index < tasks.length; index++) {
@@ -282,13 +253,6 @@ export async function executeHerdrDelegation(
       }
 
       if (!targetPaneId || targetPaneCwd !== task.cwd) {
-        if (!splitAnchorPaneId) {
-          outcomes[index] = {
-            status: "launch_failed",
-            error: "subagents tab has no pane to split",
-          };
-          continue;
-        }
         try {
           targetPaneId = await splitPane(
             rpc,

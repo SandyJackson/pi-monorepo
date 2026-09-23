@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@pi-workspace/bash-permission':
-        specifier: workspace:*
-        version: link:packages/bash-permission
       '@pi-workspace/herdr-bridge':
         specifier: workspace:*
         version: link:packages/herdr-bridge

@@ -101,7 +101,7 @@ No `SubagentBackend`, `BackendSelection`, `SpawnBatchResult`, or backend auto-de
 | `subagent-tool.ts` | Strict tool schema, semantic task validation, agent resolution, task numbering, mixed valid/invalid merging, progress semantics, final content/details | Herdr RPC, pane placement, launch-input files, polling |
 | `agents.ts` | Agent file discovery, frontmatter parsing, nearest project catalog, precedence, sorted immutable catalog | Per-task rediscovery, Herdr execution |
 | `pi-session.ts` | Pi header parsing, exact terminal assistant entry selection, answer-entry resolution | Polling Herdr, rendering tool output |
-| `herdr/delegation.ts` | Herdr environment validation, workspace tab lock/provisioning, pane placement, sequential launch, ordered outcome accounting | Model-facing formatting, agent discovery |
+| `herdr/delegation.ts` | Herdr environment validation, workspace tab creation/locking, pane placement, sequential launch, ordered outcome accounting | Model-facing formatting, agent discovery |
 | `herdr/session.ts` | One child launch, argv, labels, retries, launch certainty, launch-input lease and private task-file protocol, Pi-hook-backed turn observation, session metadata capture | Multi-task ordering, tool presentation |
 | `herdr/rpc.ts` | Request IDs, NDJSON framing, socket lifecycle, timeout, abort, JSON-RPC response errors | Domain classification, retries, pane policy |
 
@@ -242,7 +242,7 @@ sequenceDiagram
     participant Herdr
 
     Tool->>Delegation: execute(tasks ordered by taskNumber)
-    Delegation->>Herdr: find or create shared subagents tab
+    Delegation->>Herdr: create this delegation's tab (unfocused)
     alt environment or workspace unavailable
         Herdr-->>Delegation: setup failure before launch
         Delegation-->>Tool: throw Error
@@ -266,7 +266,7 @@ sequenceDiagram
     end
 ```
 
-The process-wide workspace lock covers shared tab provisioning and sequential pane placement. It does not wait for child turns to settle.
+The process-wide workspace lock covers tab creation and sequential pane placement. It does not wait for child turns to settle.
 
 ### Positional accounting
 
