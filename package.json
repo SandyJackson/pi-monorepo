@@ -18,7 +18,8 @@
     "extensions": [
       "./packages/herdr-subagent/index.ts",
       "./packages/herdr-bridge/index.ts",
-      "./packages/session-auto-name/index.ts"
+      "./packages/session-auto-name/index.ts",
+      "./packages/code-actions/index.ts"
     ],
     "skills": [
       "./skills"
@@ -28,7 +29,8 @@
     "@pi-workspace/herdr-bridge": "workspace:*",
     "@pi-workspace/herdr-contract": "workspace:*",
     "@pi-workspace/herdr-subagent": "workspace:*",
-    "@pi-workspace/session-auto-name": "workspace:*"
+    "@pi-workspace/session-auto-name": "workspace:*",
+    "@tmustier/pi-code-actions": "workspace:*"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.10",
