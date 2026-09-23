@@ -27,6 +27,7 @@ export function command(program: string, args: string[], options: CommandOptions
     });
     let stdout = "";
     let stderr = "";
+    let outputBytes = 0;
     let failure: string | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const kill = (signal: NodeJS.Signals) => {
@@ -64,6 +65,8 @@ export function command(program: string, args: string[], options: CommandOptions
       if (!failure) {
         if (stream === "stdout") stdout += data;
         else stderr += data;
+        outputBytes += Buffer.byteLength(data, "utf8");
+        if (outputBytes > 16 * 1024 * 1024) stop("Command output exceeded 16 MiB");
       }
     };
     child.stdout.setEncoding("utf8");
@@ -84,7 +87,7 @@ export function command(program: string, args: string[], options: CommandOptions
           ? `${program} terminated by ${signal}`
           : `${program} exited ${code}`;
         const error = new Error(
-          `${failure ?? exitReason}\n${stderr.slice(-4000)}${options.log ? `\nLog: ${options.log}` : ""}`,
+          `${failure ?? exitReason}\n${tailText(stderr, 4000)}${options.log ? `\nLog: ${options.log}` : ""}`,
         );
         if (failure || signal) error.name = "CommandStoppedError";
         reject(error);
@@ -95,6 +98,12 @@ export function command(program: string, args: string[], options: CommandOptions
 }
 
 export const git = (cwd: string, ...args: string[]) => command("git", args, { cwd });
+
+/** Last `max` chars without splitting a surrogate pair at the cut. */
+function tailText(text: string, max: number): string {
+  const tail = text.slice(-max);
+  return /^[\uDC00-\uDFFF]/.test(tail) ? tail.slice(1) : tail;
+}
 
 export async function originUrl(cwd: string): Promise<string> {
   const fetchUrls = (await git(cwd, "remote", "get-url", "--all", "origin")).split("\n");

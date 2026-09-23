@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { LoopSettings } from "./settings.ts";
 
@@ -61,11 +61,14 @@ export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+function atomicWrite(path: string, text: string): void {
+  writeFileSync(`${path}.tmp`, text, { mode: 0o600 });
+  renameSync(`${path}.tmp`, path);
+}
+
 export function save(state: RunState): void {
   mkdirSync(state.runDir, { recursive: true, mode: 0o700 });
-  writeFileSync(join(state.runDir, "state.json"), `${JSON.stringify(state, null, 2)}\n`, {
-    mode: 0o600,
-  });
+  atomicWrite(join(state.runDir, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
   const rows = state.tickets.map(
     (ticket) =>
       `| #${ticket.number} ${ticket.title.replaceAll("|", "\\|").replaceAll("\n", " ")} | ${ticket.status} | ${ticket.repairs}/${MAX_REPAIRS} | ${ticket.commit ?? ""} |`,
