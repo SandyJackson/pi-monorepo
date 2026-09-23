@@ -81,10 +81,6 @@ export function createScriptedHerdr(respondToRequest: (request: RpcRequest) => R
 
 export function standardLaunchResponse(request: RpcRequest): RpcResponse | undefined {
   switch (request.method) {
-    case "tab.list":
-      return { result: { tabs: [{ tab_id: "subagent-tab", label: "subagents" }] } };
-    case "pane.list":
-      return { result: { panes: [{ pane_id: "target-pane", tab_id: "subagent-tab" }] } };
     case "pane.split":
       return { result: { type: "pane_info", pane: { pane_id: "launch-pane" } } };
     case "agent.list":
