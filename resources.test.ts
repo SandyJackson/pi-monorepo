@@ -1,59 +1,53 @@
 /**
  * Resource inventory tests for workspace skills and agents.
  *
- * These tests ensure that all expected skills and agents are present,
- * properly formatted, and contain required fields.
+ * Skills and agents are discovered from disk rather than hardcoded, so adding
+ * or removing one does not break the suite. Each discovered resource is
+ * checked for shape: present, non-empty, with a description and (for agents)
+ * a prompt body.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { parseFrontmatter as piParseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 const ROOT = import.meta.dirname;
 
 // ---------------------------------------------------------------------------
-// Expected resource inventories
+// Resource discovery
 // ---------------------------------------------------------------------------
 
-/** All 26 skills that must exist in the workspace. */
-const EXPECTED_SKILLS = [
-  "ask-matt",
-  "code-review",
-  "codebase-design",
-  "deslop",
-  "diagnosing-bugs",
-  "domain-modeling",
-  "git-rebase",
-  "great-tables",
-  "grill-me",
-  "grill-with-docs",
-  "grilling",
-  "handoff",
-  "implement",
-  "improve-codebase-architecture",
-  "ponytail-review",
-  "prototype",
-  "research",
-  "resolving-merge-conflicts",
-  "setup-matt-pocock-skills",
-  "shrink-images",
-  "tdd",
-  "to-spec",
-  "to-tickets",
-  "triage",
-  "unslop",
-  "wayfinder",
-];
+/**
+ * Every SKILL.md under skills/, including nested vendor directories such as
+ * skills/matt-pocock/. Directories without a SKILL.md (e.g. skills/scripts/)
+ * are not skills and are skipped.
+ */
+function findSkillFiles(): string[] {
+  const out: string[] = [];
+  const visit = (dir: string) => {
+    for (const entry of fs.readdirSync(dir)) {
+      if (entry.startsWith(".")) continue;
+      const full = path.join(dir, entry);
+      if (!fs.statSync(full).isDirectory()) continue;
+      if (exists(path.join(full, "SKILL.md"))) {
+        out.push(path.join(full, "SKILL.md"));
+      }
+      visit(full);
+    }
+  };
+  visit(path.join(ROOT, "skills"));
+  return out;
+}
 
-/** All 6 agents that must exist in the workspace. */
-const EXPECTED_AGENTS = [
-  "code-reviewer",
-  "codebase-analyser",
-  "docs-researcher",
-  "explain",
-  "implement",
-  "refactor",
-];
+/** Every agent definition in agents/. */
+function findAgentFiles(): string[] {
+  const dir = path.join(ROOT, "agents");
+  return fs
+    .readdirSync(dir)
+    .filter((entry) => !entry.startsWith(".") && entry.endsWith(".md"))
+    .map((entry) => path.join(dir, entry));
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -67,40 +61,20 @@ function readMarkdown(p: string): string {
   return fs.readFileSync(p, "utf-8");
 }
 
-function parseFrontmatter(content: string): Record<string, unknown> {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
-  if (!match) return {};
-
-  const fm: Record<string, unknown> = {};
-  const lines = match[1].split("\n");
-
-  for (const line of lines) {
-    const colonIdx = line.indexOf(":");
-    if (colonIdx === -1) continue;
-
-    const key = line.slice(0, colonIdx).trim();
-    let value: string | string[] = line.slice(colonIdx + 1).trim();
-
-    // Handle arrays like [bash-permission]
-    if (value.startsWith("[") && value.endsWith("]")) {
-      value = value
-        .slice(1, -1)
-        .split(",")
-        .map((s) => s.trim());
-    }
-
-    fm[key] = value;
-  }
-
-  return fm;
+/**
+ * Parse with Pi's own frontmatter parser, so the suite fails on anything Pi
+ * would choke on at runtime (bad indentation, tabs, duplicate keys). A YAML
+ * syntax error throws, failing the test.
+ */
+function parseResource(content: string): {
+  frontmatter: Record<string, unknown>;
+  body: string;
+} {
+  return piParseFrontmatter<Record<string, unknown>>(content);
 }
 
-function getSkillFile(name: string): string {
-  return path.join(ROOT, "skills", name, "SKILL.md");
-}
-
-function getAgentFile(name: string): string {
-  return path.join(ROOT, "agents", `${name}.md`);
+function displayName(file: string): string {
+  return path.relative(ROOT, file);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,40 +82,19 @@ function getAgentFile(name: string): string {
 // ---------------------------------------------------------------------------
 
 describe("Skills inventory", () => {
-  it("all expected skills are present", () => {
-    const skillsDir = path.join(ROOT, "skills");
-    expect(exists(skillsDir)).toBe(true);
+  const skillFiles = findSkillFiles();
 
-    const actual = fs.readdirSync(skillsDir);
-    for (const expected of EXPECTED_SKILLS) {
-      expect(actual).toContain(expected);
-    }
+  it("discovers at least one skill", () => {
+    expect(skillFiles.length).toBeGreaterThan(0);
   });
 
-  it("no unexpected skill directories exist", () => {
-    const skillsDir = path.join(ROOT, "skills");
-    const actual = fs.readdirSync(skillsDir).filter((entry) => {
-      const fullPath = path.join(skillsDir, entry);
-      return fs.statSync(fullPath).isDirectory() && entry !== "scripts";
-    });
-    for (const skill of actual) {
-      expect(EXPECTED_SKILLS).toContain(skill);
-    }
-  });
-
-  for (const skill of EXPECTED_SKILLS) {
-    it(`${skill} has SKILL.md`, () => {
-      const skillFile = getSkillFile(skill);
-      expect(exists(skillFile)).toBe(true);
-
-      const content = readMarkdown(skillFile);
-      expect(content.length).toBeGreaterThan(0);
+  for (const skillFile of skillFiles) {
+    it(`${displayName(skillFile)} is non-empty`, () => {
+      expect(readMarkdown(skillFile).length).toBeGreaterThan(0);
     });
 
-    it(`${skill} has valid frontmatter with description`, () => {
-      const skillFile = getSkillFile(skill);
-      const content = readMarkdown(skillFile);
-      const fm = parseFrontmatter(content);
+    it(`${displayName(skillFile)} has valid frontmatter with description`, () => {
+      const fm = parseResource(readMarkdown(skillFile)).frontmatter;
 
       expect(fm.description).toBeDefined();
       expect(typeof fm.description).toBe("string");
@@ -151,51 +104,28 @@ describe("Skills inventory", () => {
 });
 
 describe("Agents inventory", () => {
-  it("all expected agents are present", () => {
-    const agentsDir = path.join(ROOT, "agents");
-    expect(exists(agentsDir)).toBe(true);
+  const agentFiles = findAgentFiles();
 
-    const actual = fs.readdirSync(agentsDir);
-    for (const expected of EXPECTED_AGENTS) {
-      expect(actual).toContain(`${expected}.md`);
-    }
+  it("discovers at least one agent", () => {
+    expect(agentFiles.length).toBeGreaterThan(0);
   });
 
-  it("no unexpected agents exist", () => {
-    const agentsDir = path.join(ROOT, "agents");
-    const actual = fs.readdirSync(agentsDir);
-    for (const agent of actual) {
-      const name = agent.replace(".md", "");
-      expect(EXPECTED_AGENTS).toContain(name);
-    }
-  });
-
-  for (const agent of EXPECTED_AGENTS) {
-    it(`${agent} has markdown file`, () => {
-      const agentFile = getAgentFile(agent);
-      expect(exists(agentFile)).toBe(true);
-
-      const content = readMarkdown(agentFile);
-      expect(content.length).toBeGreaterThan(0);
+  for (const agentFile of agentFiles) {
+    it(`${displayName(agentFile)} is non-empty`, () => {
+      expect(readMarkdown(agentFile).length).toBeGreaterThan(0);
     });
 
-    it(`${agent} has valid frontmatter with description`, () => {
-      const agentFile = getAgentFile(agent);
-      const content = readMarkdown(agentFile);
-      const fm = parseFrontmatter(content);
+    it(`${displayName(agentFile)} has valid frontmatter with description`, () => {
+      const fm = parseResource(readMarkdown(agentFile)).frontmatter;
 
       expect(fm.description).toBeDefined();
       expect(typeof fm.description).toBe("string");
       expect((fm.description as string).length).toBeGreaterThan(0);
     });
 
-    it(`${agent} has system prompt body`, () => {
-      const agentFile = getAgentFile(agent);
-      const content = readMarkdown(agentFile);
-
-      // Content after frontmatter
-      const body = content.replace(/^---\n[\s\S]*?\n---\n?/, "");
-      expect(body.length).toBeGreaterThan(0);
+    it(`${displayName(agentFile)} has system prompt body`, () => {
+      const { body } = parseResource(readMarkdown(agentFile));
+      expect(body.trim().length).toBeGreaterThan(0);
     });
   }
 });
