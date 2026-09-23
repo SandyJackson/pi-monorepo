@@ -51,6 +51,21 @@ The event-bus contract emitted by authored extensions when a user interaction is
 **External Pi package**:
 A separately installed third-party Pi package that is not owned by the Pi workspace but may be required by a workspace resource, such as an agent's extension-tool references.
 
+## Issue loops
+
+**Issue loop**:
+A sequential implementation of a parent GitHub issue through its child tickets, with independent implementation and review and one final human-reviewed pull request.
+
+**Loop run**:
+One execution of an issue loop, including any interruptions and explicit resumptions. Its tickets, work, and worker sessions share a stable identity.
+
+**Ticket acceptance**:
+The decision that a ticket's implementation passes the required checks and independent review within a loop run. Acceptance can unblock dependent tickets in that run without closing the GitHub issue.
+_Avoid_: Closure, merge
+
+**Loop worker session**:
+A named Pi session performing implementation or review for a loop run. It is distinct from an interactive visible subagent session.
+
 ## Installation modes
 
 **Development installation**:

@@ -1,0 +1,427 @@
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { afterEach, expect, it } from "vitest";
+
+const roots: string[] = [];
+const cli = resolve(import.meta.dirname, "run.mjs");
+
+function fixture(mode = "pass") {
+  const root = mkdtempSync(join(tmpdir(), "issue-loop-test-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  const remote = join(root, "remote.git");
+  const bin = join(root, "bin");
+  const home = join(root, "home");
+  for (const path of [repo, bin, home]) mkdirSync(path);
+  const env = {
+    ...process.env,
+    HOME: home,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "Loop Test",
+    GIT_AUTHOR_EMAIL: "loop@example.test",
+    GIT_COMMITTER_NAME: "Loop Test",
+    GIT_COMMITTER_EMAIL: "loop@example.test",
+    PATH: `${bin}:${process.env.PATH}`,
+    FIXTURE_ROOT: root,
+    FIXTURE_MODE: mode,
+  };
+  const git = (...args: string[]) =>
+    execFileSync("git", args, {
+      cwd: repo,
+      env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  git("init", "--initial-branch=main");
+  writeFileSync(join(repo, "README.md"), "A test project\n");
+  git("add", ".");
+  git("commit", "-m", "Initial commit");
+  git("init", "--bare", remote);
+  git("remote", "add", "origin", remote);
+  git("push", "-u", "origin", "main");
+  writeFileSync(
+    join(bin, "gh"),
+    `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+const root = process.env.FIXTURE_ROOT;
+const mode = process.env.FIXTURE_MODE;
+const issue = n => ({number:n, title:n === 10 ? 'Parent feature' : 'Ticket '+n, body:'Implement the requested feature.', state:'open', html_url:'https://github.com/test/project/issues/'+n});
+let result;
+if (args[0] === 'repo' && args[1] === 'view') result = {nameWithOwner:process.env.GH_REPO && args[2] === '--json' ? process.env.GH_REPO : 'test/project', defaultBranchRef:{name:'main'}};
+else if (args[0] === 'api') {
+ const endpoint = args.find(a => a.startsWith('repos/'));
+ if (endpoint.endsWith('/sub_issues')) result = mode === 'empty' ? [[]] : [[issue(11)], [issue(12)]];
+ else if (endpoint.endsWith('/dependencies/blocked_by')) result = [endpoint.includes('/12/') ? [issue(11)] : mode === 'cycle' ? [issue(12)] : []];
+ else if (endpoint.endsWith('/comments')) result = [[]];
+ else result = issue(Number(endpoint.split('/').pop()));
+} else if (args[0] === 'pr' && args[1] === 'list') result = fs.existsSync(path.join(root, 'pr.json')) ? [{url:'https://github.com/test/project/pull/99', state:'OPEN'}] : [];
+else if (args[0] === 'pr' && args[1] === 'create') {
+ fs.writeFileSync(path.join(root, 'pr.json'), JSON.stringify(args));
+ fs.appendFileSync(path.join(root, 'pr-created.txt'), 'created\\n');
+ if (mode === 'publish-fail') { console.error('Connection lost after creating PR'); process.exit(1); }
+ console.log('https://github.com/test/project/pull/99'); process.exit(0);
+} else {console.error('Unexpected gh args', args); process.exit(2);}
+console.log(JSON.stringify(result));
+`,
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    join(bin, "pi"),
+    `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+const value = flag => args[args.indexOf(flag)+1];
+const name = value('--name');
+const session = value('--session');
+fs.writeFileSync(session, JSON.stringify({type:'session_info', name})+'\\n');
+fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'workers.jsonl'), JSON.stringify({name, session, args, cwd:process.cwd()})+'\\n');
+if (name.includes('implement')) {
+ if (process.env.FIXTURE_MODE === 'stubborn') {
+   process.on('SIGTERM', () => {});
+   fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'stubborn.pid'), String(process.pid));
+   setInterval(() => {}, 1000);
+ } else if (process.env.FIXTURE_MODE === 'commit-fail') {
+   require('node:child_process').execFileSync('git', ['commit', '--allow-empty', '-m', 'Unauthorized worker commit']);
+   process.exit(1);
+ } else if (process.env.FIXTURE_MODE === 'fail') {console.error('Provider unavailable'); process.exit(1);}
+ fs.writeFileSync('feature.txt', 'implemented\\n');
+ console.log('Implemented the requested ticket.');
+} else if (process.env.FIXTURE_MODE === 'malformed') console.log('PASS, probably.');
+else if (process.env.FIXTURE_MODE === 'reject' || (process.env.FIXTURE_MODE === 'parent-reject' && name.includes('parent review'))) console.log(JSON.stringify({verdict:'changes_requested', findings:['Missing acceptance criterion']}));
+else console.log(JSON.stringify({verdict:'pass', findings:[]}));
+`,
+    { mode: 0o755 },
+  );
+  const run = (...args: string[]) =>
+    spawnSync(process.execPath, [cli, ...args], { env, encoding: "utf8", timeout: 30_000 });
+  const start = () =>
+    run(
+      "start",
+      "--repo",
+      repo,
+      "--issue",
+      "10",
+      "--check",
+      `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('feature.txt')"`,
+    );
+  return { root, repo, env, git, run, start };
+}
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+it("accepts dependent tickets on one branch and opens one final PR without closing issues", () => {
+  const f = fixture();
+  const result = f.start();
+  expect(result.status, result.stderr).toBe(0);
+  const runDir = result.stdout.match(/Run directory: (.+)/)?.[1];
+  expect(runDir).toBeTruthy();
+  const state = JSON.parse(readFileSync(join(runDir!, "state.json"), "utf8"));
+  expect(state.status).toBe("done");
+  expect(state.tickets.map((ticket: { status: string }) => ticket.status)).toEqual([
+    "accepted",
+    "accepted",
+  ]);
+  expect(f.git("branch", "--show-current")).toBe("main");
+  const summary = readFileSync(join(runDir!, "summary.md"), "utf8");
+  expect(summary).toContain("https://github.com/test/project/pull/99");
+  const workers = readFileSync(join(f.root, "workers.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(workers.every((worker) => worker.name.startsWith(state.name))).toBe(true);
+  expect(new Set(workers.map((worker) => worker.session)).size).toBe(workers.length);
+  const reviews = workers.filter((worker) => worker.name.includes("review"));
+  expect(reviews.length).toBeGreaterThanOrEqual(3);
+  expect(reviews.every((worker) => worker.args.includes("read,grep,find,ls"))).toBe(true);
+  const prArgs = JSON.parse(readFileSync(join(f.root, "pr.json"), "utf8"));
+  expect(prArgs).toContain("--base");
+  expect(prArgs).toContain("main");
+}, 30_000);
+
+it("preserves a first-ticket failure, then reviews manual fixes on resume without repeating implementation", () => {
+  const f = fixture("fail");
+  const first = f.start();
+  expect(first.status).toBe(1);
+  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+  const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(blocked.status).toBe("blocked");
+  expect(blocked.tickets.map((ticket: { status: string }) => ticket.status)).toEqual([
+    "blocked",
+    "pending",
+  ]);
+  expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("Provider unavailable");
+  expect(blocked.sessions[0].name).toContain("#11 implement · attempt 1");
+  writeFileSync(join(blocked.worktree, "feature.txt"), "Manually fixed\n");
+  f.env.FIXTURE_MODE = "pass";
+  const resumed = f.run("resume", runDir);
+  expect(resumed.status, resumed.stderr).toBe(0);
+  const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(finished.status).toBe("done");
+  expect(finished.name).toBe(blocked.name);
+  expect(
+    finished.sessions.filter((session: { name: string }) => session.name.includes("#11 implement")),
+  ).toHaveLength(1);
+  expect(finished.sessions[1].name).toContain("#11 review · attempt 1");
+  expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("pi --session");
+}, 30_000);
+
+it("stops on malformed review output rather than accepting a stray PASS string", () => {
+  const f = fixture("malformed");
+  const result = f.start();
+  expect(result.status).toBe(1);
+  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(state.tickets[0].status).toBe("blocked");
+  expect(state.lastError).toContain("invalid verdict");
+  expect(state.pr).toBeUndefined();
+}, 30_000);
+
+it("stops after two repair attempts and keeps the review findings for handoff", () => {
+  const f = fixture("reject");
+  const result = f.start();
+  expect(result.status).toBe(1);
+  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(
+    state.sessions.filter((session: { name: string }) => session.name.includes("implement")),
+  ).toHaveLength(3);
+  expect(state.tickets[0].status).toBe("blocked");
+  expect(state.tickets[1].status).toBe("pending");
+  expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain(
+    "Missing acceptance criterion",
+  );
+}, 30_000);
+
+it("finds an already-created PR after publication was interrupted", () => {
+  const f = fixture("publish-fail");
+  const first = f.start();
+  expect(first.status).toBe(1);
+  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(state.phase).toBe("publish");
+  const resumed = f.run("resume", runDir);
+  expect(resumed.status, resumed.stderr).toBe(0);
+  expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
+  expect(f.run("resume", runDir).status).toBe(0);
+  expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
+}, 30_000);
+
+it("reports a dependency cycle without starting a worker or publishing", () => {
+  const f = fixture("cycle");
+  const result = f.start();
+  expect(result.status).toBe(1);
+  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(state.sessions).toEqual([]);
+  expect(state.lastError).toContain("dependency cycle");
+  expect(state.status).toBe("blocked");
+}, 30_000);
+
+it("rejects an empty queue rather than claiming the parent is complete", () => {
+  const f = fixture("empty");
+  const result = f.start();
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("No open direct child issues");
+}, 30_000);
+
+it("stops a timed-out check instead of launching repair workers", () => {
+  const f = fixture();
+  const check = `${JSON.stringify(process.execPath)} -e "setInterval(() => {}, 1000)"`;
+  const result = f.run(
+    "start",
+    "--repo",
+    f.repo,
+    "--issue",
+    "10",
+    "--check",
+    check,
+    "--timeout",
+    "1",
+  );
+  expect(result.status).toBe(1);
+  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(state.sessions).toHaveLength(1);
+  expect(state.lastError).toContain("Timed out");
+}, 30_000);
+
+it("rechecks manual edits made after a publication failure", () => {
+  const f = fixture("publish-fail");
+  const first = f.start();
+  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  writeFileSync(join(state.worktree, "feature.txt"), "Manual integration fix\n");
+  const resumed = f.run("resume", runDir);
+  expect(resumed.status, resumed.stderr).toBe(0);
+  const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(
+    finished.sessions.filter((session: { name: string }) => session.name.includes("parent review")),
+  ).toHaveLength(2);
+  expect(readFileSync(join(state.worktree, "feature.txt"), "utf8")).toBe(
+    "Manual integration fix\n",
+  );
+}, 30_000);
+
+it.each(["reject", "parent-reject"])(
+  "does not replenish an exhausted repair budget on resume (%s)",
+  (mode) => {
+    const f = fixture(mode);
+    const first = f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const before = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const implementations = (state: typeof before) =>
+      state.sessions.filter((session: { name: string }) => session.name.includes("implement"))
+        .length;
+    expect(f.run("resume", runDir).status).toBe(1);
+    const after = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(implementations(after)).toBe(implementations(before));
+    // A human fix can still be verified after the automatic repair budget is gone.
+    f.env.FIXTURE_MODE = "pass";
+    expect(f.run("resume", runDir).status).toBe(0);
+  },
+  30_000,
+);
+
+it("binds GitHub operations to origin instead of an inherited GH_REPO", () => {
+  const f = fixture();
+  Object.assign(f.env, { GH_REPO: "wrong/repository" });
+  const result = f.start();
+  expect(result.status, result.stderr).toBe(0);
+  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+  expect(JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")).githubRepo).toBe(
+    "test/project",
+  );
+}, 30_000);
+
+it("refuses to resume after origin is changed", () => {
+  const f = fixture("fail");
+  const first = f.start();
+  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+  f.git("remote", "set-url", "origin", "https://github.com/wrong/repository.git");
+  const result = f.run("resume", runDir);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("origin");
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(state.sessions).toHaveLength(1);
+}, 30_000);
+
+it("reports a forbidden HEAD change even when the worker exits unsuccessfully", () => {
+  const f = fixture("commit-fail");
+  const result = f.start();
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("HEAD changed outside the controller");
+  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  expect(state.tickets[0].status).toBe("blocked");
+}, 30_000);
+
+it("handles repeated interrupts without leaving a detached worker running", async () => {
+  const f = fixture("stubborn");
+  const child = spawn(
+    process.execPath,
+    [cli, "start", "--repo", f.repo, "--issue", "10", "--check", "true"],
+    { env: f.env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let output = "";
+  child.stdout.on("data", (data) => {
+    output += data.toString();
+  });
+  child.stderr.resume();
+  const closed = new Promise<void>((resolve) => child.on("close", () => resolve()));
+  let workerPid: number | undefined;
+  try {
+    const marker = join(f.root, "stubborn.pid");
+    for (let i = 0; i < 200 && !existsSync(marker); i++) await delay(50);
+    expect(existsSync(marker)).toBe(true);
+    workerPid = Number(readFileSync(marker, "utf8"));
+    child.kill("SIGINT");
+    await delay(100);
+    child.kill("SIGINT");
+    await Promise.race([
+      closed,
+      delay(5000).then(() => {
+        throw new Error("Controller did not stop");
+      }),
+    ]);
+    const runDir = output.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("blocked");
+    expect(existsSync(join(runDir, "run.lock"))).toBe(false);
+    expect(() => process.kill(workerPid!, 0)).toThrow();
+  } finally {
+    child.kill("SIGKILL");
+    if (workerPid) {
+      try {
+        process.kill(-workerPid, "SIGKILL");
+      } catch {
+        /* Already stopped. */
+      }
+    }
+    await closed;
+  }
+}, 30_000);
+
+it("rejects origin with multiple push destinations", () => {
+  const f = fixture();
+  const origin = f.git("remote", "get-url", "origin");
+  f.git("config", "--add", "remote.origin.pushurl", origin);
+  f.git("config", "--add", "remote.origin.pushurl", join(f.root, "unintended.git"));
+  const result = f.start();
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("exactly one");
+  expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
+}, 30_000);
+
+it("checks worktree-local remote settings before publication", () => {
+  const f = fixture("publish-fail");
+  const first = f.start();
+  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  f.git("config", "extensions.worktreeConfig", "true");
+  f.git(
+    "-C",
+    state.worktree,
+    "config",
+    "--worktree",
+    "remote.origin.pushurl",
+    join(f.root, "unintended.git"),
+  );
+  const resumed = f.run("resume", runDir);
+  expect(resumed.status).toBe(1);
+  expect(resumed.stderr).toContain("origin must have exactly one");
+}, 30_000);
+
+it("can resume a setup failure in the already-created worktree", () => {
+  const f = fixture();
+  const setup = `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('setup-ready')"`;
+  const first = f.run(
+    "start",
+    "--repo",
+    f.repo,
+    "--issue",
+    "10",
+    "--check",
+    "true",
+    "--setup",
+    setup,
+  );
+  expect(first.status).toBe(1);
+  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+  writeFileSync(join(state.worktree, "setup-ready"), "ready");
+  // Setup artifacts would normally be ignored dependency directories.
+  writeFileSync(join(f.root, "ignore"), "setup-ready\n");
+  f.git("config", "core.excludesFile", join(f.root, "ignore"));
+  const resumed = f.run("resume", runDir);
+  expect(resumed.status, resumed.stderr).toBe(0);
+}, 30_000);

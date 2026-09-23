@@ -1,0 +1,8 @@
+{
+  "name": "@pi-workspace/issue-loop",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^22.18.0 || >=24.0.0"
+  }
+}

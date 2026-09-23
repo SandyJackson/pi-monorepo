@@ -95,6 +95,8 @@ importers:
         specifier: '*'
         version: 1.3.10
 
+  packages/issue-loop: {}
+
   packages/session-auto-name:
     devDependencies:
       '@earendil-works/pi-ai':
