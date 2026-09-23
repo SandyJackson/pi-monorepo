@@ -51,6 +51,26 @@ The event-bus contract emitted by authored extensions when a user interaction is
 **External Pi package**:
 A separately installed third-party Pi package that is not owned by the Pi workspace but may be required by a workspace resource, such as an agent's extension-tool references.
 
+## Worktree switching
+
+**Worktrunk extension**:
+The workspace extension package that relocates the active Pi session between Git worktrees using the Worktrunk CLI. It does not create, merge, or remove worktrees; Worktrunk owns that lifecycle.
+
+**Worktree relocation**:
+Moving the active Pi conversation into a different worktree by replacing the session runtime with a session whose recorded cwd is the target worktree. Uncommitted changes stay in the originating worktree.
+
+**Continuity move**:
+A worktree relocation that carries the active conversation into the target session. The default relocation behavior; resuming a pre-existing target session is a future option, not a relocation mode.
+
+**Creation switch**:
+A worktree relocation combined with creating a new Worktrunk worktree and branch. The new branch is based on the repository's default branch as chosen by Worktrunk.
+
+**Relocation note**:
+A context-visible message queued at the next prompt after a worktree relocation, telling the model it now operates in the target worktree. It does not trigger a turn.
+
+**Recovery worktree**:
+The main checkout recorded by the Worktrunk extension at session start, used to relocate the session when the current worktree directory no longer exists.
+
 ## Installation modes
 
 **Development installation**:
