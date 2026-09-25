@@ -219,12 +219,12 @@ function writeLoopSettings(root: string): string {
   mkdirSync(join(dir, "agents"), { recursive: true });
   writeFileSync(
     join(dir, "agents", "implement.md"),
-    `---\ndescription: Test implementer\nmodel: test-provider/implement-model\ntools: read, bash\n---\n\nCUSTOM IMPLEMENT GUIDANCE.`,
+    `---\ndescription: Test implementer\nmodel: test-provider/implement-model\nthinking: high\ntools: read, bash\n---\n\nCUSTOM IMPLEMENT GUIDANCE.`,
     "utf8",
   );
   writeFileSync(
     join(dir, "agents", "review.md"),
-    `---\ndescription: Test reviewer\nmodel: test-provider/review-model\ntools: read, grep\n---\n\nCUSTOM REVIEW GUIDANCE.`,
+    `---\ndescription: Test reviewer\nmodel: test-provider/review-model\nthinking: low\ntools: read, grep\n---\n\nCUSTOM REVIEW GUIDANCE.`,
     "utf8",
   );
   const settingsPath = join(dir, "loop-settings.json");
@@ -268,6 +268,7 @@ it("applies settings roles to workers and snapshots them with the run", () => {
     implement: {
       agentName: "implement",
       model: "test-provider/implement-model",
+      thinking: "high",
       tools: ["read", "bash"],
       skills: ["tdd", "diagnosing-bugs", "deslop"],
       promptBody: "CUSTOM IMPLEMENT GUIDANCE.",
@@ -275,6 +276,7 @@ it("applies settings roles to workers and snapshots them with the run", () => {
     review: {
       agentName: "review",
       model: "test-provider/review-model",
+      thinking: "low",
       tools: ["read", "grep"],
       skills: [],
       promptBody: "CUSTOM REVIEW GUIDANCE.",
@@ -285,6 +287,8 @@ it("applies settings roles to workers and snapshots them with the run", () => {
   const implement = workers.find((worker) => worker.name.includes("implement"));
   expect(implement!.args).toContain("--model");
   expect(implement!.args).toContain("test-provider/implement-model");
+  expect(implement!.args).toContain("--thinking");
+  expect(implement!.args).toContain("high");
   expect(implement!.args).toContain("--tools");
   expect(implement!.args).toContain("read,bash");
   expect(implement!.args).toContain("--no-skills");
@@ -295,6 +299,8 @@ it("applies settings roles to workers and snapshots them with the run", () => {
   expect(implement!.prompt).not.toContain("You are the implementation worker");
   const review = workers.find((worker) => worker.name.includes("review"));
   expect(review!.args).toContain("test-provider/review-model");
+  expect(review!.args).toContain("--thinking");
+  expect(review!.args).toContain("low");
   expect(review!.args).toContain("read,grep");
   expect(review!.args).toContain("--no-skills");
   expect(review!.args).not.toContain("--skill");

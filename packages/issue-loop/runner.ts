@@ -61,11 +61,12 @@ async function worker(
   save(state);
   console.log(session.name);
   const head = await git(state.worktree, "rev-parse", "HEAD");
-  // Model/tools come from the run's settings snapshot (loop defaults when no
+  // Model/thinking/tools come from the run's settings snapshot (loop defaults when no
   // --settings was given); resume never re-reads the source files.
   const roleSettings = role === "review" ? state.settings.review : state.settings.implement;
   const args = ["-p", "--approve", "--name", session.name, "--session", session.path];
   if (roleSettings.model) args.push("--model", roleSettings.model);
+  if (roleSettings.thinking) args.push("--thinking", roleSettings.thinking);
   if (roleSettings.tools.length > 0) args.push("--tools", roleSettings.tools.join(","));
   // Deny-by-default: workers never inherit ambient skills. Curated loop skills
   // are copied into the run dir at start and loaded explicitly by short name.

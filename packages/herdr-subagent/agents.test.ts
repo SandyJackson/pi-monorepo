@@ -18,6 +18,7 @@ Review the patch.`,
       description: "Loop reviewer",
       tools: ["read", "grep", "find", "ls"],
       model: "openai-codex/gpt-5.6-sol",
+      thinking: undefined,
       systemPromptBody: "Review the patch.",
     });
   });
@@ -48,5 +49,18 @@ Body.`,
       "agent",
     );
     expect(parsed.model).toBeUndefined();
+  });
+
+  it("extracts thinking level", () => {
+    const parsed = parseAgentFileContent(
+      `---
+description: Thinker
+thinking: high
+---
+
+Body.`,
+      "agent",
+    );
+    expect(parsed.thinking).toBe("high");
   });
 });

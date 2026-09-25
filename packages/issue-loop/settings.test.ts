@@ -62,6 +62,7 @@ describe("loadLoopSettings", () => {
       implement: {
         agentName: "implement",
         model: "provider/implement-model",
+        thinking: undefined,
         tools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
         skills: ["tdd", "diagnosing-bugs", "deslop"],
         promptBody: "Implement the ticket.",
@@ -69,6 +70,7 @@ describe("loadLoopSettings", () => {
       review: {
         agentName: "review",
         model: "provider/review-model",
+        thinking: undefined,
         tools: ["read", "grep", "find", "ls"],
         skills: [],
         promptBody: "Review the patch.",
@@ -83,6 +85,7 @@ describe("loadLoopSettings", () => {
     expect(settings.implement).toEqual({
       agentName: "loop-implement",
       model: undefined,
+      thinking: undefined,
       tools: DEFAULT_IMPLEMENT_TOOLS,
       skills: ["tdd", "diagnosing-bugs", "deslop"],
       promptBody: expect.stringContaining("/skill:tdd"),
@@ -90,6 +93,7 @@ describe("loadLoopSettings", () => {
     expect(settings.review).toEqual({
       agentName: "loop-reviewer",
       model: undefined,
+      thinking: undefined,
       tools: DEFAULT_REVIEW_TOOLS,
       skills: [],
       promptBody: expect.stringContaining("[Spec]"),
@@ -204,5 +208,35 @@ describe("loadLoopSettings", () => {
       "implement.md": `---\ndescription: Empty\nmodel: provider/x\n---\n`,
     });
     expect(() => loadLoopSettings(settingsPath)).toThrow(/empty/i);
+  });
+
+  it("resolves per-role thinking levels from agent frontmatter", () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({
+        implementAgent: "./implement.md",
+        reviewAgent: "./review.md",
+      }),
+      "implement.md": `---\ndescription: Thinker\nmodel: provider/x\nthinking: high\n---\n\nImplement.`,
+      "review.md": `---\ndescription: Skimmer\nthinking: low\n---\n\nReview.`,
+    });
+    const settings = loadLoopSettings(settingsPath);
+    expect(settings.implement.thinking).toBe("high");
+    expect(settings.review.thinking).toBe("low");
+  });
+
+  it("leaves thinking undefined when the frontmatter omits it", () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({ implementAgent: "./implement.md" }),
+      "implement.md": `---\ndescription: Plain\nmodel: provider/x\n---\n\nImplement.`,
+    });
+    expect(loadLoopSettings(settingsPath).implement.thinking).toBeUndefined();
+  });
+
+  it.each(["ultra", "none"])("rejects unsupported thinking level %s", (thinking) => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({ implementAgent: "./implement.md" }),
+      "implement.md": `---\ndescription: Thinker\nthinking: ${thinking}\n---\n\nImplement.`,
+    });
+    expect(() => loadLoopSettings(settingsPath)).toThrow(`unknown thinking level "${thinking}"`);
   });
 });

@@ -44,6 +44,8 @@ export interface ParsedAgentFile {
   tools?: string[];
   /** Model override from frontmatter `model`; `undefined` means Pi's default. */
   model?: string;
+  /** Thinking-level override from frontmatter `thinking`; `undefined` means Pi's default. */
+  thinking?: string;
   /** Body text after frontmatter (role guidance for the system prompt). */
   systemPromptBody: string;
 }
@@ -77,7 +79,11 @@ export function parseAgentFileContent(content: string, fallbackName: string): Pa
     typeof modelRaw === "string" && modelRaw.trim().toLowerCase() !== "none"
       ? modelRaw.trim()
       : undefined;
-  return { name, description, tools, model, systemPromptBody: body.trim() };
+  const thinkingRaw = frontmatter.thinking;
+  if (thinkingRaw !== undefined && typeof thinkingRaw !== "string")
+    throw new Error("frontmatter `thinking` must be a string");
+  const thinking = typeof thinkingRaw === "string" ? thinkingRaw.trim() : undefined;
+  return { name, description, tools, model, thinking, systemPromptBody: body.trim() };
 }
 
 /** A resolved agent definition from a markdown file. */

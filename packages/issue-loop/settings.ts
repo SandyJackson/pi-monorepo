@@ -2,7 +2,7 @@
  * settings.ts — Optional `--settings` role configuration for the issue loop.
  *
  * A settings file is a JSON object whose agent fields reference agent-format
- * markdown files (YAML frontmatter `model`/`tools` plus a prompt body).
+ * markdown files (YAML frontmatter `model`/`thinking`/`tools` plus a prompt body).
  */
 import { cpSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -14,10 +14,15 @@ export const DEFAULT_IMPLEMENT_TOOLS = ["read", "grep", "find", "ls", "bash", "e
 /** Tool allowlist used when the review agent file omits `tools`. */
 export const DEFAULT_REVIEW_TOOLS = ["read", "grep", "find", "ls"];
 
+/** Thinking levels accepted in an agent file's `thinking` field (Pi's `--thinking` set). */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
 /** Resolved configuration for one loop role. Plain data: safe to snapshot into state.json. */
 export interface RoleSettings {
   agentName?: string;
   model?: string;
+  /** Pi thinking level for this role; `undefined` means Pi's default. */
+  thinking?: string;
   tools: string[];
   /** Curated loop-skill short names; `[]` means the worker gets `--no-skills` only. */
   skills: string[];
@@ -71,7 +76,17 @@ function readAgent(role: string, settingsDir: string, ref: unknown): Omit<RoleSe
         `Review agent file ${filePath} requests mutating tools (${forbidden.join(", ")}); the reviewer must stay read-only`,
       );
   }
-  return { agentName: agent.name, model: agent.model, tools, promptBody: agent.systemPromptBody };
+  if (agent.thinking !== undefined && !THINKING_LEVELS.includes(agent.thinking))
+    throw new Error(
+      `Agent file ${filePath} requests unknown thinking level ${JSON.stringify(agent.thinking)}; use one of ${THINKING_LEVELS.join(", ")}`,
+    );
+  return {
+    agentName: agent.name,
+    model: agent.model,
+    thinking: agent.thinking,
+    tools,
+    promptBody: agent.systemPromptBody,
+  };
 }
 
 /**
