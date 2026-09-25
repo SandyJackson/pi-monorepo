@@ -52,7 +52,7 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
 }
 ```
 
-Agent files use the agent markdown format: frontmatter with `model`, `thinking`, and `tools`, plus a prompt body that replaces the default role guidance only. `thinking` accepts one of Pi's levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); omitting it keeps Pi's default. Paths resolve relative to the settings file. The runner still supplies issue context, constraints, patch/check context, and the reviewer's required JSON verdict format.
+Agent files use the agent markdown format: frontmatter with `model`, `thinking`, and `tools`, plus a prompt body that replaces the default role guidance only. `thinking` accepts one of Pi's levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); omitting it keeps Pi's default, while `off` disables thinking. Paths resolve relative to the settings file. The runner still supplies issue context, constraints, patch/check context, and the reviewer's required JSON verdict format.
 
 Without `--settings`, both roles use the blessed files in `agents/` (`loop-implement.md`, `loop-reviewer.md`) and the implementer gets the curated trio `tdd`, `diagnosing-bugs`, `deslop`. A settings file replaces one or both role files — the blessed files double as the template for user-authored replacements. Omitting `implementSkills` keeps the trio and omitting `reviewSkills` keeps empty; an explicit list (including `[]`) replaces the default.
 

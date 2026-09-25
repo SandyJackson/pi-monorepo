@@ -18,6 +18,7 @@ Review the patch.`,
       description: "Loop reviewer",
       tools: ["read", "grep", "find", "ls"],
       model: "openai-codex/gpt-5.6-sol",
+      thinking: undefined,
       systemPromptBody: "Review the patch.",
     });
   });
@@ -50,7 +51,7 @@ Body.`,
     expect(parsed.model).toBeUndefined();
   });
 
-  it("extracts thinking level and treats none as unset", () => {
+  it("extracts thinking level", () => {
     const parsed = parseAgentFileContent(
       `---
 description: Thinker
@@ -61,15 +62,5 @@ Body.`,
       "agent",
     );
     expect(parsed.thinking).toBe("high");
-    const none = parseAgentFileContent(
-      `---
-description: Plain
-thinking: none
----
-
-Body.`,
-      "agent",
-    );
-    expect(none.thinking).toBeUndefined();
   });
 });
