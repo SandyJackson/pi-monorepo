@@ -49,4 +49,27 @@ Body.`,
     );
     expect(parsed.model).toBeUndefined();
   });
+
+  it("extracts thinking level and treats none as unset", () => {
+    const parsed = parseAgentFileContent(
+      `---
+description: Thinker
+thinking: high
+---
+
+Body.`,
+      "agent",
+    );
+    expect(parsed.thinking).toBe("high");
+    const none = parseAgentFileContent(
+      `---
+description: Plain
+thinking: none
+---
+
+Body.`,
+      "agent",
+    );
+    expect(none.thinking).toBeUndefined();
+  });
 });

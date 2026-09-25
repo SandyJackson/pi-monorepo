@@ -205,4 +205,34 @@ describe("loadLoopSettings", () => {
     });
     expect(() => loadLoopSettings(settingsPath)).toThrow(/empty/i);
   });
+
+  it("resolves per-role thinking levels from agent frontmatter", () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({
+        implementAgent: "./implement.md",
+        reviewAgent: "./review.md",
+      }),
+      "implement.md": `---\ndescription: Thinker\nmodel: provider/x\nthinking: high\n---\n\nImplement.`,
+      "review.md": `---\ndescription: Skimmer\nthinking: low\n---\n\nReview.`,
+    });
+    const settings = loadLoopSettings(settingsPath);
+    expect(settings.implement.thinking).toBe("high");
+    expect(settings.review.thinking).toBe("low");
+  });
+
+  it("leaves thinking undefined when the frontmatter omits it", () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({ implementAgent: "./implement.md" }),
+      "implement.md": `---\ndescription: Plain\nmodel: provider/x\n---\n\nImplement.`,
+    });
+    expect(loadLoopSettings(settingsPath).implement.thinking).toBeUndefined();
+  });
+
+  it('rejects an unknown thinking level ("ultra")', () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({ implementAgent: "./implement.md" }),
+      "implement.md": `---\ndescription: Thinker\nthinking: ultra\n---\n\nImplement.`,
+    });
+    expect(() => loadLoopSettings(settingsPath)).toThrow(/thinking.*ultra/i);
+  });
 });
