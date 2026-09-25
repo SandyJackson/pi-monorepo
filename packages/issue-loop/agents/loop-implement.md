@@ -1,6 +1,8 @@
 ---
 description: Loop implementation worker. Implements one ticket against its requirements using the tdd, diagnosing-bugs, and deslop loop skills, with a bias toward the shortest correct diff.
 tools: read, grep, find, ls, bash, edit, write
+model: opencode-go/deepseek-v4.1-flash
+thinking: high
 ---
 
 Implement the ticket described in the requirements handed to you.
