@@ -79,7 +79,8 @@ export function parseAgentFileContent(content: string, fallbackName: string): Pa
     typeof modelRaw === "string" && modelRaw.trim().toLowerCase() !== "none"
       ? modelRaw.trim()
       : undefined;
-  const thinkingRaw = frontmatter.thinking;
+  if (thinkingRaw !== undefined && typeof thinkingRaw !== "string")
+    throw new Error("frontmatter `thinking` must be a string");
   const thinking =
     typeof thinkingRaw === "string" && thinkingRaw.trim().toLowerCase() !== "none"
       ? thinkingRaw.trim()
