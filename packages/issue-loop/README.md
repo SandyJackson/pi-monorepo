@@ -36,7 +36,7 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
 
 `--setup` is optional. A fresh worktree has no untracked dependencies such as `node_modules`, so provide setup when you need it. It runs before the first ticket and again on resume after a failed setup, so keep it repeatable.
 
-`--timeout SECONDS` caps each worker, setup, and check invocation. Default 1800, accepts 1-7200. Git/GitHub operations get 60 seconds. Ctrl-C stops the active process group, preserves work, and records a blocked run. A second interrupt escalates to SIGKILL.
+`--timeout SECONDS` caps each worker, setup, and check invocation. Default 3600, accepts 1-7200. Git/GitHub operations get 60 seconds. Ctrl-C stops the active process group, preserves work, and records a blocked run. A second interrupt escalates to SIGKILL.
 
 ## Customizing workers
 

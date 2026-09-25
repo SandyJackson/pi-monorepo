@@ -21,7 +21,7 @@ const usage = `Usage:
 Requires Node 22.18+ or 24+, Git, authenticated gh and Pi. macOS/Linux only.
 Starts from origin's default branch. Uses direct open GitHub child issues and native dependencies.
 --setup runs once in the new worktree; --check runs after every change and before final publication.
---timeout limits each worker/setup/check invocation (default 1800 seconds).
+--timeout limits each worker/setup/check invocation (default 3600 seconds).
 --settings points at an optional JSON file customizing worker models, tool allowlists,
 role guidance, per-role loop skills, and a shared system-prompt addition
 (see Customizing workers below). Workers always start with --no-skills; only
@@ -57,15 +57,15 @@ async function main(): Promise<void> {
       issue: { type: "string" },
       check: { type: "string" },
       setup: { type: "string" },
-      timeout: { type: "string", default: "1800" },
+      timeout: { type: "string", default: "3600" },
       settings: { type: "string" },
     },
   });
   if (!values.repo || !values.issue || !/^[1-9]\d*$/.test(values.issue) || !values.check?.trim())
     throw new Error(usage);
   const timeout = Number(values.timeout);
-  if (!Number.isInteger(timeout) || timeout < 1 || timeout > 7200)
-    throw new Error("--timeout must be 1 to 7200 seconds");
+  if (!Number.isInteger(timeout) || timeout < 300 || timeout > 7200)
+    throw new Error("--timeout must be 300 to 7200 seconds");
   // Fail fast on bad settings before creating the run; resume reuses the snapshot.
   const settings = values.settings
     ? loadLoopSettings(resolve(values.settings))
