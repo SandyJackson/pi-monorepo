@@ -13,6 +13,11 @@ export interface Issue {
   state: "open" | "closed";
 }
 
+export interface Review {
+  verdict: "pass" | "changes_requested" | "blocked";
+  body: string;
+}
+
 export interface Ticket extends Issue {
   blockers: Issue[];
   repairs: number;
@@ -20,6 +25,7 @@ export interface Ticket extends Issue {
   baseline?: string;
   commit?: string;
   feedback?: string;
+  review?: Review;
 }
 
 export interface Session {
@@ -53,6 +59,7 @@ export interface RunState {
   status: "running" | "blocked" | "done";
   currentTicket?: number;
   feedback?: string;
+  review?: Review;
   lastError?: string;
   pr?: string;
 }
@@ -79,6 +86,16 @@ export function save(state: RunState): void {
     (session) =>
       `- ${session.name}\n  - Log: ${session.log}\n  - Reopen: \`cd ${shellQuote(state.worktree)} && pi --session ${shellQuote(session.path)}\``,
   );
+  const minorReviews = [
+    ...state.tickets.flatMap((ticket) =>
+      ticket.review?.verdict === "pass" && ticket.review.body.trim()
+        ? [`### #${ticket.number} ${ticket.title}`, ticket.review.body, ""]
+        : [],
+    ),
+    ...(state.review?.verdict === "pass" && state.review.body.trim()
+      ? ["### Parent review", state.review.body, ""]
+      : []),
+  ];
   writeFileSync(
     join(state.runDir, "summary.md"),
     [
@@ -92,6 +109,7 @@ export function save(state: RunState): void {
       "",
       state.lastError ?? "No recorded failure.",
       active?.feedback ?? state.feedback ?? "",
+      ...(minorReviews.length ? ["", "## Remaining minor review issues", ...minorReviews] : []),
       `Resume: \`node ${shellQuote(cli)} resume ${shellQuote(state.runDir)}\``,
       "",
       ...sessions,
