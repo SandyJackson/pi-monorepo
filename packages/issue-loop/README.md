@@ -94,15 +94,15 @@ The original checkout is untouched and its uncommitted work excluded. The featur
 
 1. Snapshot the parent and open direct child bodies, plus native dependencies. Sub-issue order survives API pagination; dependencies pick the next eligible ticket. Closed children stay out.
 2. Implement one eligible ticket in a fresh session, then run the configured checks outside the agent.
-3. Stage the patch, new files included, and start a fresh read-only reviewer with requirements, patch, and check log. The verdict must be strict JSON. Anything else cannot pass.
+3. Stage the patch, new files included, and start a fresh read-only reviewer with requirements, patch, and check log. The review returns strict JSON with `verdict` and `body`. A passing review can record minor issues without triggering repair; material findings request changes.
 4. Commit accepted work and record its SHA. At most two implementation repairs per ticket, and two more for the final parent review. A ticket whose requirements already hold passes without a new commit; its checkpoint records the existing HEAD.
-5. Push only the feature branch and open one PR. A publication retry looks for the existing PR before creating one.
+5. Push only the feature branch and open one PR. The run summary and new PR body include remaining minor issues from passing ticket and parent reviews. A publication retry looks for the existing PR before creating one.
 
 The controller never merges. Issues stay open until a human merges the final PR, whose body references the parent and accepted children for closing. Internal dependencies resolve through acceptance on the run's branch, not GitHub closure. External blockers must be closed with their implementation already in the pinned base. The runner never rebases. If tickets remain but none can run, it stops instead of declaring victory.
 
 ## Resume after a failure or manual fix
 
-Read `summary.md` for statuses, commits, repair counts, the failure and findings, paths, sessions, and the exact resume command.
+Read `summary.md` for statuses, commits, repair counts, the failure, remaining minor review issues, paths, sessions, and the exact resume command.
 
 Fix manually **in the run's worktree**, never in the original checkout. Then:
 

@@ -127,8 +127,11 @@ if (name.includes('implement')) {
  fs.writeFileSync('feature.txt', 'implemented\\n');
  console.log('Implemented the requested ticket.');
 } else if (process.env.FIXTURE_MODE === 'malformed') console.log('PASS, probably.');
-else if (process.env.FIXTURE_MODE === 'reject' || (process.env.FIXTURE_MODE === 'parent-reject' && name.includes('parent review'))) console.log(JSON.stringify({verdict:'changes_requested', findings:['Missing acceptance criterion']}));
-else console.log(JSON.stringify({verdict:'pass', findings:[]}));
+else if (process.env.FIXTURE_MODE === 'legacy-review') console.log(JSON.stringify({verdict:'pass', findings:[]}));
+else if (process.env.FIXTURE_MODE === 'reject' || (process.env.FIXTURE_MODE === 'parent-reject' && name.includes('parent review'))) console.log(JSON.stringify({verdict:'changes_requested', body:'Missing acceptance criterion'}));
+else if (process.env.FIXTURE_MODE === 'blocked-review') console.log(JSON.stringify({verdict:'blocked', body:'Cannot assess required behavior'}));
+else if (process.env.FIXTURE_MODE === 'pass-notes') console.log(JSON.stringify({verdict:'pass', body: name.includes('parent review') ? '[Standards][Minor] Parent cleanup' : '[Spec][Minor] Ticket cleanup'}));
+else console.log(JSON.stringify({verdict:'pass', body:''}));
 `,
     { mode: 0o755 },
   );
@@ -203,6 +206,50 @@ cliTest(
     const prArgs = JSON.parse(readFileSync(join(f.root, "pr.json"), "utf8"));
     const baseIndex = prArgs.indexOf("--base");
     expect(prArgs.slice(baseIndex, baseIndex + 2)).toEqual(["--base", "main"]);
+  },
+  30_000,
+);
+
+cliTest(
+  "keeps passing review bodies for tickets and parent without starting repairs",
+  async () => {
+    const f = fixture("pass-notes");
+    const result = await f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("done");
+    expect(state.tickets.every((ticket: { repairs: number }) => ticket.repairs === 0)).toBe(true);
+    expect(
+      state.tickets.every(
+        (ticket: { review: { verdict: string; body: string } }) =>
+          ticket.review.verdict === "pass" && ticket.review.body === "[Spec][Minor] Ticket cleanup",
+      ),
+    ).toBe(true);
+    expect(state.review).toEqual({ verdict: "pass", body: "[Standards][Minor] Parent cleanup" });
+    const summary = readFileSync(join(runDir, "summary.md"), "utf8");
+    expect(summary).toContain("[Spec][Minor] Ticket cleanup");
+    expect(summary).toContain("[Standards][Minor] Parent cleanup");
+    const pr = readFileSync(join(runDir, "pr.md"), "utf8");
+    expect(pr).toContain("[Spec][Minor] Ticket cleanup");
+    expect(pr).toContain("[Standards][Minor] Parent cleanup");
+  },
+  30_000,
+);
+
+cliTest(
+  "persists a blocked review body before stopping",
+  async () => {
+    const f = fixture("blocked-review");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.tickets[0].review).toEqual({
+      verdict: "blocked",
+      body: "Cannot assess required behavior",
+    });
+    expect(state.tickets[0].repairs).toBe(0);
   },
   30_000,
 );
@@ -422,6 +469,20 @@ cliTest(
 );
 
 cliTest(
+  "rejects the old findings contract",
+  async () => {
+    const f = fixture("legacy-review");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain("invalid verdict");
+    expect(state.tickets[0].review).toBeUndefined();
+  },
+  30_000,
+);
+
+cliTest(
   "stops after two repair attempts and keeps the review findings for handoff",
   async () => {
     const f = fixture("reject");
@@ -434,6 +495,10 @@ cliTest(
     ).toHaveLength(3);
     expect(state.tickets[0].status).toBe("blocked");
     expect(state.tickets[1].status).toBe("pending");
+    expect(state.tickets[0].review).toEqual({
+      verdict: "changes_requested",
+      body: "Missing acceptance criterion",
+    });
     const summary = readFileSync(join(runDir, "summary.md"), "utf8");
     expect(summary).toContain("Missing acceptance criterion");
     expect(summary).toContain("| blocked | 2/2 |");

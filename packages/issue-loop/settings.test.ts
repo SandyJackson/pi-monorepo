@@ -96,7 +96,7 @@ describe("loadLoopSettings", () => {
       thinking: "high",
       tools: DEFAULT_REVIEW_TOOLS,
       skills: [],
-      promptBody: expect.stringContaining("[Spec]"),
+      promptBody: expect.stringContaining("[Spec][Major]"),
     });
     expect(settings.appendSystemPrompt).toBeUndefined();
   });
