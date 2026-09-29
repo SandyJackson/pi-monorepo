@@ -163,46 +163,84 @@ export function parseWorktreeList(stdout: string): Worktree[] {
   return worktrees;
 }
 
-function formatChanges(changes: WorktreeChanges): string {
-  let markers = "";
-  if (changes.staged) markers += "+";
-  if (changes.modified) markers += "!";
-  if (changes.untracked) markers += "?";
-  if (changes.renamed) markers += "r";
-  if (changes.deleted) markers += "d";
-  if (changes.conflicted) markers += "✘";
+export type WorktrunkNotifyType = "info" | "warning" | "error";
 
-  const diff = changes.diff;
-  if (diff && (diff.added > 0 || diff.deleted > 0)) {
-    markers += `${markers ? " " : ""}+${diff.added} -${diff.deleted}`;
-  }
+/** UI surface `/wt` needs; `index.ts` supplies the SelectList, tests inject a fake. */
+export interface WorktrunkUi {
+  cwd: string;
+  notify(message: string, type: WorktrunkNotifyType): void;
+  selectWorktree(worktrees: readonly Worktree[]): Promise<Worktree | null>;
+}
+
+export type PickerColor = "accent" | "success" | "error" | "warning" | "muted" | "dim" | "text";
+
+/** Subset of Pi's theme the picker rows need. */
+export interface PickerTheme {
+  fg(color: PickerColor, text: string): string;
+}
+
+/** One `SelectList` row. `value` is the worktree path. */
+export interface WorktreeRow {
+  value: string;
+  label: string;
+  description: string;
+}
+
+function branchName(worktree: Worktree): string {
+  return worktree.branch ?? "(detached)";
+}
+
+function changeMarkers(changes: WorktreeChanges | null, theme: PickerTheme): string {
+  if (!changes) return "";
+  let markers = "";
+  if (changes.staged) markers += theme.fg("success", "+");
+  if (changes.modified) markers += theme.fg("warning", "!");
+  if (changes.untracked) markers += theme.fg("muted", "?");
+  if (changes.renamed) markers += theme.fg("accent", "r");
+  if (changes.deleted) markers += theme.fg("error", "d");
+  if (changes.conflicted) markers += theme.fg("error", "✘");
   return markers;
 }
 
-/** Plain-text summary of worktree state for the `/wt` notification. */
-export function formatWorktreeList(worktrees: Worktree[]): string {
-  if (worktrees.length === 0) return "Worktrunk reported no worktrees.";
-
-  const lines = worktrees.map((worktree) => {
-    const flags: string[] = [];
-    if (worktree.current) flags.push("current");
-    if (worktree.previous) flags.push("previous");
-    if (worktree.main) flags.push("main");
-    if (worktree.detached) flags.push("detached");
-
-    const branch = worktree.branch ?? "(detached)";
-    const marker = worktree.marker ? ` ${worktree.marker}` : "";
-    const changes = worktree.changes ? formatChanges(worktree.changes) : "";
-    const parts = [`${branch}${marker}`, flags.length > 0 ? `[${flags.join(", ")}]` : "", changes];
-    return `  ${parts.filter(Boolean).join("  ")}`;
-  });
-
-  return [`Worktrunk worktrees (${worktrees.length}):`, ...lines].join("\n");
+function diffCounts(diff: WorktreeDiff | null, theme: PickerTheme): string {
+  if (!diff) return "";
+  const counts: string[] = [];
+  if (diff.added > 0) counts.push(theme.fg("success", `+${diff.added}`));
+  if (diff.deleted > 0) counts.push(theme.fg("error", `-${diff.deleted}`));
+  return counts.join(" ");
 }
 
-export interface WorktrunkUi {
-  cwd: string;
-  notify(message: string, type: "info" | "warning" | "error"): void;
+/** Build picker rows from Worktrunk JSON, re-rendering state in Pi theme colors. */
+export function buildWorktreeRows(
+  worktrees: readonly Worktree[],
+  theme: PickerTheme,
+): WorktreeRow[] {
+  return worktrees.map((worktree) => {
+    const branch = branchName(worktree);
+    const branchText = worktree.detached
+      ? theme.fg("dim", branch)
+      : worktree.current
+        ? theme.fg("accent", branch)
+        : theme.fg("text", branch);
+    const label = worktree.marker
+      ? `${branchText} ${theme.fg("accent", worktree.marker)}`
+      : branchText;
+
+    const flags: string[] = [];
+    if (worktree.current) flags.push(theme.fg("success", "current"));
+    if (worktree.previous) flags.push(theme.fg("warning", "previous"));
+    if (worktree.main) flags.push(theme.fg("muted", "main"));
+
+    const description = [
+      ...flags,
+      changeMarkers(worktree.changes, theme),
+      diffCounts(worktree.changes?.diff ?? null, theme),
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return { value: worktree.path, label, description };
+  });
 }
 
 function failureDetail(result: WtResult): string {
@@ -210,8 +248,8 @@ function failureDetail(result: WtResult): string {
   return parts.length > 0 ? parts.join("\n") : "no output";
 }
 
-/** Run `wt list` and report either the worktree inventory or the CLI failure. */
-export async function runWorktreeList(executor: WtExecutor, ui: WorktrunkUi): Promise<void> {
+/** `/wt`: list worktrees, let the user pick one, and report the choice. */
+export async function runWorktreePicker(executor: WtExecutor, ui: WorktrunkUi): Promise<void> {
   let result: WtResult;
   try {
     result = await executor(["list", "--format=json"], ui.cwd);
@@ -226,10 +264,30 @@ export async function runWorktreeList(executor: WtExecutor, ui: WorktrunkUi): Pr
     return;
   }
 
+  let worktrees: Worktree[];
   try {
-    ui.notify(formatWorktreeList(parseWorktreeList(result.stdout)), "info");
+    worktrees = parseWorktreeList(result.stdout);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     ui.notify(`wt list failed: ${message}\n${failureDetail(result)}`, "error");
+    return;
   }
+
+  if (worktrees.length === 0) {
+    ui.notify("Worktrunk reported no worktrees.", "info");
+    return;
+  }
+
+  const choice = await ui.selectWorktree(worktrees);
+  if (!choice) {
+    return;
+  }
+
+  const branch = branchName(choice);
+  if (choice.current) {
+    ui.notify(`Already in ${branch}.`, "info");
+    return;
+  }
+
+  ui.notify(`Selected ${branch}; switching is not implemented yet.`, "info");
 }

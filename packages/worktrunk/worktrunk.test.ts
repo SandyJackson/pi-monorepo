@@ -1,7 +1,15 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { registerWorktrunk } from "./index.ts";
-import { parseWorktreeList, runWorktreeList, type WtExecutor, type WtResult } from "./worktrunk.ts";
+import {
+  buildWorktreeRows,
+  type PickerColor,
+  parseWorktreeList,
+  runWorktreePicker,
+  type Worktree,
+  type WtExecutor,
+  type WtResult,
+} from "./worktrunk.ts";
 
 const SCHEMA_2_LIST = JSON.stringify({
   schema: 2,
@@ -40,7 +48,11 @@ const SCHEMA_2_LIST = JSON.stringify({
       default_branch: { ahead: 4, behind: 1 },
       upstream: { remote: "origin", branch: "feature-api", ahead: 3, behind: 0 },
       marker: "🤖",
-      display: { state: "diverged", symbols: "+!↕", statusline: "feature-api …" },
+      display: {
+        state: "diverged",
+        symbols: "+!↕",
+        statusline: "\u001b[36mfeature-api\u001b[39m ..",
+      },
     },
     {
       branch: "main",
@@ -72,14 +84,38 @@ function scriptedExecutor(result: WtResult): {
   };
 }
 
-function captureUi(cwd = "/repo") {
-  const notifications: Array<{ message: string; type: "info" | "warning" | "error" }> = [];
+interface Notification {
+  message: string;
+  type: "info" | "warning" | "error";
+}
+
+function captureUi(choose: (worktrees: Worktree[]) => Worktree | null, cwd = "/repo") {
+  const notifications: Notification[] = [];
+  const selections: Worktree[][] = [];
   return {
     notifications,
+    selections,
     ui: {
       cwd,
-      notify: (message: string, type: "info" | "warning" | "error") =>
+      notify: (message: string, type: Notification["type"]) =>
         notifications.push({ message, type }),
+      selectWorktree: async (worktrees: readonly Worktree[]) => {
+        selections.push([...worktrees]);
+        return choose([...worktrees]);
+      },
+    },
+  };
+}
+
+function recordingTheme() {
+  const calls: Array<{ color: PickerColor; text: string }> = [];
+  return {
+    calls,
+    theme: {
+      fg: (color: PickerColor, text: string) => {
+        calls.push({ color, text });
+        return text;
+      },
     },
   };
 }
@@ -168,36 +204,145 @@ describe("parseWorktreeList", () => {
   });
 });
 
-describe("runWorktreeList", () => {
-  it("runs wt list with argv and reports the parsed worktrees", async () => {
+describe("buildWorktreeRows", () => {
+  it("renders branch, flags, activity marker and change counts with theme colors", () => {
+    const worktrees = parseWorktreeList(SCHEMA_2_LIST);
+    const { theme, calls } = recordingTheme();
+
+    const rows = buildWorktreeRows(worktrees, theme);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.value).toBe("/repo.feature-api");
+    expect(rows[0]?.label).toContain("feature-api");
+    expect(rows[0]?.label).toContain("🤖");
+    expect(rows[0]?.description).toContain("current");
+    expect(rows[0]?.description).toContain("+54 -5");
+    expect(rows[1]?.description).toContain("previous");
+    expect(calls).toContainEqual({ color: "accent", text: "🤖" });
+    expect(calls).toContainEqual({ color: "success", text: "+54" });
+    expect(calls).toContainEqual({ color: "error", text: "-5" });
+    expect(calls).toContainEqual({ color: "success", text: "current" });
+    expect(calls).toContainEqual({ color: "warning", text: "previous" });
+  });
+
+  it("renders dirty change markers with theme colors", () => {
+    const worktrees = parseWorktreeList(SCHEMA_2_LIST);
+    const { theme, calls } = recordingTheme();
+
+    buildWorktreeRows(worktrees, theme);
+
+    expect(calls).toContainEqual({ color: "success", text: "+" });
+    expect(calls).toContainEqual({ color: "warning", text: "!" });
+  });
+
+  it("shows a detached worktree as a dimmed placeholder", () => {
+    const worktrees = parseWorktreeList(
+      JSON.stringify({
+        schema: 2,
+        items: [
+          {
+            branch: null,
+            worktree: { path: "/repo.detached", detached: true, changes: null },
+          },
+        ],
+      }),
+    );
+    const { theme, calls } = recordingTheme();
+
+    const [row] = buildWorktreeRows(worktrees, theme);
+
+    expect(row?.label).toContain("(detached)");
+    expect(calls).toContainEqual({ color: "dim", text: "(detached)" });
+  });
+
+  it("never passes Worktrunk's ANSI statusline through", () => {
+    const { theme } = recordingTheme();
+    const rows = buildWorktreeRows(parseWorktreeList(SCHEMA_2_LIST), theme);
+
+    const rendered = rows.map((row) => `${row.label} ${row.description}`).join(" ");
+    expect(rendered).not.toContain("\u001b");
+  });
+});
+
+describe("runWorktreePicker", () => {
+  it("lists worktrees, opens the picker and reports the current worktree as a no-op", async () => {
     const { executor, calls } = scriptedExecutor({
       exitCode: 0,
       stdout: SCHEMA_2_LIST,
       stderr: "",
     });
-    const { ui, notifications } = captureUi("/repo");
+    const { ui, notifications, selections } = captureUi(
+      (choices) => choices.find((worktree) => worktree.current) ?? null,
+    );
 
-    await runWorktreeList(executor, ui);
+    await runWorktreePicker(executor, ui);
+
+    expect(calls).toEqual([{ args: ["list", "--format=json"], cwd: "/repo" }]);
+    expect(selections[0]?.map((worktree) => worktree.branch)).toEqual(["feature-api", "main"]);
+    expect(notifications).toEqual([
+      { message: expect.stringContaining("feature-api"), type: "info" },
+    ]);
+    expect(notifications[0]?.message).toContain("Already in");
+  });
+
+  it("reports the chosen branch for another worktree without switching", async () => {
+    const { executor, calls } = scriptedExecutor({
+      exitCode: 0,
+      stdout: SCHEMA_2_LIST,
+      stderr: "",
+    });
+    const { ui, notifications } = captureUi(
+      (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+    );
+
+    await runWorktreePicker(executor, ui);
 
     expect(calls).toEqual([{ args: ["list", "--format=json"], cwd: "/repo" }]);
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.type).toBe("info");
-    expect(notifications[0]?.message).toContain("feature-api");
     expect(notifications[0]?.message).toContain("main");
-    expect(notifications[0]?.message).toContain("+54 -5");
-    expect(notifications[0]?.message).toContain("🤖");
   });
 
-  it("reports Worktrunk's stderr and stdout on a non-zero exit", async () => {
+  it("stays silent and unchanged when the picker is cancelled", async () => {
+    const { executor, calls } = scriptedExecutor({
+      exitCode: 0,
+      stdout: SCHEMA_2_LIST,
+      stderr: "",
+    });
+    const { ui, notifications } = captureUi(() => null);
+
+    await runWorktreePicker(executor, ui);
+
+    expect(calls).toEqual([{ args: ["list", "--format=json"], cwd: "/repo" }]);
+    expect(notifications).toEqual([]);
+  });
+
+  it("reports an empty listing instead of opening an empty picker", async () => {
+    const { executor } = scriptedExecutor({
+      exitCode: 0,
+      stdout: JSON.stringify({ schema: 2, items: [] }),
+      stderr: "",
+    });
+    const { ui, notifications, selections } = captureUi(() => null);
+
+    await runWorktreePicker(executor, ui);
+
+    expect(selections).toEqual([]);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.type).toBe("info");
+  });
+
+  it("reports Worktrunk's stderr and stdout on a non-zero exit without opening the picker", async () => {
     const { executor } = scriptedExecutor({
       exitCode: 1,
       stdout: "stdout detail",
       stderr: "fatal: not a git repository",
     });
-    const { ui, notifications } = captureUi();
+    const { ui, notifications, selections } = captureUi(() => null);
 
-    await runWorktreeList(executor, ui);
+    await runWorktreePicker(executor, ui);
 
+    expect(selections).toEqual([]);
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.type).toBe("error");
     expect(notifications[0]?.message).toContain("fatal: not a git repository");
@@ -210,10 +355,11 @@ describe("runWorktreeList", () => {
       stdout: "",
       stderr: "spawn wt ENOENT",
     });
-    const { ui, notifications } = captureUi();
+    const { ui, notifications, selections } = captureUi(() => null);
 
-    await runWorktreeList(executor, ui);
+    await runWorktreePicker(executor, ui);
 
+    expect(selections).toEqual([]);
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.type).toBe("error");
     expect(notifications[0]?.message).toContain("spawn wt ENOENT");
@@ -225,10 +371,11 @@ describe("runWorktreeList", () => {
       stdout: "{ broken",
       stderr: "warning: schema drift",
     });
-    const { ui, notifications } = captureUi();
+    const { ui, notifications, selections } = captureUi(() => null);
 
-    await runWorktreeList(executor, ui);
+    await runWorktreePicker(executor, ui);
 
+    expect(selections).toEqual([]);
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.type).toBe("error");
     expect(notifications[0]?.message).toContain("{ broken");
@@ -241,10 +388,11 @@ describe("runWorktreeList", () => {
       stdout: JSON.stringify([{ branch: "main" }]),
       stderr: "",
     });
-    const { ui, notifications } = captureUi();
+    const { ui, notifications, selections } = captureUi(() => null);
 
-    await runWorktreeList(executor, ui);
+    await runWorktreePicker(executor, ui);
 
+    expect(selections).toEqual([]);
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.type).toBe("error");
     expect(notifications[0]?.message).toContain("schema");
@@ -254,10 +402,11 @@ describe("runWorktreeList", () => {
     const executor: WtExecutor = async () => {
       throw new Error("spawn failed");
     };
-    const { ui, notifications } = captureUi();
+    const { ui, notifications, selections } = captureUi(() => null);
 
-    await runWorktreeList(executor, ui);
+    await runWorktreePicker(executor, ui);
 
+    expect(selections).toEqual([]);
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.type).toBe("error");
     expect(notifications[0]?.message).toContain("spawn failed");
