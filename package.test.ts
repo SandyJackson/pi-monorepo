@@ -14,6 +14,7 @@ describe("Pi workspace package", () => {
   it("declares pi extensions", () => {
     expect(packageJson.pi?.extensions).toBeDefined();
     expect(packageJson.pi?.extensions.length).toBeGreaterThan(0);
+    expect(packageJson.pi?.extensions).toContain("./packages/worktrunk/index.ts");
   });
 
   it("declares pi skills path", () => {
@@ -36,5 +37,6 @@ describe("Pi workspace package", () => {
     expect(packageJson.dependencies?.["@pi-workspace/herdr-subagent"]).toBeDefined();
     expect(packageJson.dependencies?.["@pi-workspace/herdr-bridge"]).toBeDefined();
     expect(packageJson.dependencies?.["@pi-workspace/session-auto-name"]).toBeDefined();
+    expect(packageJson.dependencies?.["@pi-workspace/worktrunk"]).toBeDefined();
   });
 });

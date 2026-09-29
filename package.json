@@ -20,7 +20,8 @@
       "./packages/herdr-subagent/index.ts",
       "./packages/herdr-bridge/index.ts",
       "./packages/session-auto-name/index.ts",
-      "./packages/code-actions/index.ts"
+      "./packages/code-actions/index.ts",
+      "./packages/worktrunk/index.ts"
     ],
     "skills": [
       "./skills"
@@ -31,6 +32,7 @@
     "@pi-workspace/herdr-contract": "workspace:*",
     "@pi-workspace/herdr-subagent": "workspace:*",
     "@pi-workspace/session-auto-name": "workspace:*",
+    "@pi-workspace/worktrunk": "workspace:*",
     "@tmustier/pi-code-actions": "workspace:*"
   },
   "devDependencies": {
