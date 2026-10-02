@@ -1,10 +1,18 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { BorderedLoader, DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, SelectList, Text } from "@earendil-works/pi-tui";
 import {
   buildWorktreeRows,
   createWtExecutor,
+  errorMessage,
+  findUndeliveredRelocation,
+  prepareTargetSession,
+  RELOCATION_CUSTOM_TYPE,
+  type RelocatedSession,
+  type RelocationRecord,
+  renderRelocationEntry,
   runWorktreePicker,
+  type SwitchExecutor,
   type Worktree,
   type WtExecutor,
 } from "./worktrunk.ts";
@@ -45,6 +53,44 @@ async function pickWorktree(
   });
 }
 
+type LoaderOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+/**
+ * Run one step behind a loader that shows no cancel affordance: Worktrunk's
+ * hooks are the transaction, so the switch must run to completion.
+ */
+async function runWithLoader<T>(
+  ctx: ExtensionCommandContext,
+  label: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const outcome = await ctx.ui.custom<LoaderOutcome<T>>((tui, theme, _keybindings, done) => {
+    const loader = new BorderedLoader(tui, theme, label, { cancellable: false });
+    void run().then(
+      (value) => done({ ok: true, value }),
+      (error) => done({ ok: false, error }),
+    );
+    return loader;
+  });
+  if (!outcome.ok) throw outcome.error;
+  return outcome.value;
+}
+
+/** Adapt `ctx` to the relocation boundary used by `runWorktreePicker`. */
+function createSwitchExecutor(ctx: ExtensionCommandContext): SwitchExecutor {
+  return {
+    waitForIdle: () => ctx.waitForIdle(),
+    prepare: (targetPath, record) => prepareTargetSession(ctx.sessionManager, targetPath, record),
+    switch: (sessionFile, withSession) =>
+      ctx.switchSession(sessionFile, {
+        withSession: (replaced) =>
+          withSession({
+            notify: (message, type) => replaced.ui.notify(message, type),
+          } satisfies RelocatedSession),
+      }),
+  };
+}
+
 /** Register `/wt` against an injected Worktrunk CLI executor. */
 export function registerWorktrunk(pi: ExtensionAPI, executor: WtExecutor): void {
   pi.registerCommand("wt", {
@@ -54,12 +100,52 @@ export function registerWorktrunk(pi: ExtensionAPI, executor: WtExecutor): void 
         ctx.ui.notify("/wt requires the interactive TUI.", "warning");
         return;
       }
-      await runWorktreePicker(executor, {
+      await runWorktreePicker(executor, createSwitchExecutor(ctx), {
         cwd: ctx.cwd,
         notify: (message, type) => ctx.ui.notify(message, type),
         selectWorktree: (worktrees) => pickWorktree(ctx, worktrees),
+        withLoader: (label, run) => runWithLoader(ctx, label, run),
       });
     },
+  });
+
+  // The relocation record persisted into the target session is the durable
+  // transcript entry; custom entries never enter the LLM context.
+  pi.registerEntryRenderer<RelocationRecord>(RELOCATION_CUSTOM_TYPE, renderRelocationEntry);
+
+  // Queue the LLM-facing relocation note on the runtime that owns the target
+  // session. It rides the nextTurn queue, so it is delivered with the next
+  // prompt after that prompt's compaction check, without starting a turn.
+  pi.on("session_start", async (event, ctx) => {
+    // A reload reuses the same AgentSession, which still holds any undelivered
+    // nextTurn message; re-enqueueing here would duplicate it.
+    if (event.reason === "reload") return;
+
+    const pending = findUndeliveredRelocation(ctx.sessionManager.getBranch(), ctx.cwd);
+    if (!pending) return;
+
+    try {
+      // Hidden copy for the model only; the visible one is the persisted record.
+      // details keys the delivery so later session starts do not re-queue an
+      // already delivered note. Async failures surface via the extension error
+      // listener, not here.
+      pi.sendMessage(
+        {
+          customType: RELOCATION_CUSTOM_TYPE,
+          content: pending.note,
+          display: false,
+          details: { relocationId: pending.relocationId },
+        },
+        { deliverAs: "nextTurn" },
+      );
+    } catch (error) {
+      // Only synchronous failures land here; do not promise a retry on a later
+      // session start (a reload reuses the same runtime and its queue).
+      ctx.ui.notify(
+        `Moved here, but the relocation notice could not be queued; the relocation record is saved and can be retried on resume: ${errorMessage(error)}`,
+        "error",
+      );
+    }
   });
 }
 

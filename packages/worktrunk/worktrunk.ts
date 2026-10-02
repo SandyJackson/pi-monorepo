@@ -1,4 +1,20 @@
 import { spawn } from "node:child_process";
+import { realpathSync, statSync, writeFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+import type {
+  CustomEntry,
+  EntryRenderOptions,
+  SessionEntry,
+} from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { type Component, Container, Text } from "@earendil-works/pi-tui";
+
+/** The active-session surface the relocation path reads. */
+export interface SessionSource {
+  getSessionFile(): string | undefined;
+  getLeafId(): string | null;
+  getBranch(fromId?: string): SessionEntry[];
+}
 
 /** Result of one `wt` invocation. A null exit code means the binary never ran. */
 export interface WtResult {
@@ -163,13 +179,70 @@ export function parseWorktreeList(stdout: string): Worktree[] {
   return worktrees;
 }
 
+function invalidSwitch(detail: string): Error {
+  return new Error(`unexpected wt switch output: ${detail}`);
+}
+
+/** Read the target path from the object emitted by `wt switch --format=json`. */
+export function parseWorktreeSwitch(stdout: string): string {
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(stdout);
+  } catch {
+    throw invalidSwitch("not JSON");
+  }
+  if (!isRecord(envelope)) throw invalidSwitch("not an object");
+  if (typeof envelope.path !== "string" || envelope.path.length === 0) {
+    throw invalidSwitch("path is missing");
+  }
+  return envelope.path;
+}
+
 export type WorktrunkNotifyType = "info" | "warning" | "error";
 
-/** UI surface `/wt` needs; `index.ts` supplies the SelectList, tests inject a fake. */
+/** UI surface `/wt` needs; `index.ts` supplies the components, tests inject a fake. */
 export interface WorktrunkUi {
   cwd: string;
   notify(message: string, type: WorktrunkNotifyType): void;
   selectWorktree(worktrees: readonly Worktree[]): Promise<Worktree | null>;
+  /** Run one step under a loader that offers no cancel affordance. */
+  withLoader<T>(label: string, run: () => Promise<T>): Promise<T>;
+}
+
+/** Session-bound surface available only after the runtime has been replaced. */
+export interface RelocatedSession {
+  notify(message: string, type: WorktrunkNotifyType): void;
+}
+
+/** Durable record persisted into the target session before the switch. It is
+ * rendered by the entry renderer, never enters the LLM context, and is the
+ * recovery key for re-queueing the LLM-facing note on later session starts. */
+export interface RelocationRecord {
+  branch: string;
+  sourcePath: string;
+  targetPath: string;
+  note: string;
+}
+
+/** A relocation record whose LLM-facing note still has to reach the model. */
+export interface RelocationDelivery {
+  /** Entry id of the relocation record; keys the persisted delivery marker. */
+  relocationId: string;
+  note: string;
+}
+
+/** Session-relocation boundary. `prepare` carries the active conversation into
+ * the target worktree, appends the relocation record, and returns the persisted
+ * session file; `switch` replaces the runtime. Tests inject a fake.
+ * `waitForIdle` must run before `prepare` so a mid-turn agent cannot write
+ * entries past the captured leaf. */
+export interface SwitchExecutor {
+  waitForIdle(): Promise<void>;
+  prepare(targetPath: string, record: RelocationRecord): string;
+  switch(
+    sessionFile: string,
+    withSession: (session: RelocatedSession) => Promise<void>,
+  ): Promise<{ cancelled: boolean }>;
 }
 
 export type PickerColor = "accent" | "success" | "error" | "warning" | "muted" | "dim" | "text";
@@ -248,14 +321,230 @@ function failureDetail(result: WtResult): string {
   return parts.length > 0 ? parts.join("\n") : "no output";
 }
 
-/** `/wt`: list worktrees, let the user pick one, and report the choice. */
-export async function runWorktreePicker(executor: WtExecutor, ui: WorktrunkUi): Promise<void> {
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Carry the active conversation into `targetCwd` as a persisted session.
+ *
+ * The source file is forked when its persisted leaf still matches the active
+ * leaf. A drifted leaf means the file no longer reflects the active branch, so
+ * the active branch entries are written into a fresh target session instead.
+ * Empty or ephemeral conversations get a fresh session. The prepared session
+ * is always reopened and verified before it is returned.
+ */
+export function prepareTargetSession(
+  source: SessionSource,
+  targetCwd: string,
+  record: RelocationRecord,
+  sessionDir?: string,
+): string {
+  const activeLeaf = source.getLeafId();
+  const sourceFile = source.getSessionFile();
+
+  if (!sourceFile || activeLeaf === null) {
+    return createFreshTargetSession(targetCwd, sessionDir, sourceFile ?? null, record);
+  }
+
+  const persistedLeaf = SessionManager.open(sourceFile).getLeafId();
+  if (persistedLeaf !== null && persistedLeaf === activeLeaf) {
+    const forked = SessionManager.forkFrom(sourceFile, targetCwd, sessionDir);
+    const file = forked.getSessionFile();
+    if (!file) throw new Error("could not persist the target session");
+    return appendRelocationRecord(file, record, activeLeaf);
+  }
+
+  return copyActiveBranch(source, sourceFile, activeLeaf, targetCwd, sessionDir, record);
+}
+
+function targetHeader(manager: SessionManager, parentSession: string | null): string {
+  const header = manager.getHeader();
+  if (!header) throw new Error("could not build the target session header");
+  return JSON.stringify({ ...header, parentSession: parentSession ?? undefined });
+}
+
+function createFreshTargetSession(
+  targetCwd: string,
+  sessionDir: string | undefined,
+  parentSession: string | null,
+  record: RelocationRecord,
+): string {
+  const manager = SessionManager.create(targetCwd, sessionDir);
+  const file = manager.getSessionFile();
+  if (!file) throw new Error("could not persist the target session");
+  writeFileSync(file, `${targetHeader(manager, parentSession)}\n`, { flag: "wx" });
+  return appendRelocationRecord(file, record, null);
+}
+
+function copyActiveBranch(
+  source: SessionSource,
+  sourceFile: string,
+  activeLeaf: string,
+  targetCwd: string,
+  sessionDir: string | undefined,
+  record: RelocationRecord,
+): string {
+  const entries = source.getBranch(activeLeaf);
+  if (entries.length === 0) {
+    throw new Error(`active session branch ${activeLeaf} has no entries`);
+  }
+  const manager = SessionManager.create(targetCwd, sessionDir);
+  const file = manager.getSessionFile();
+  if (!file) throw new Error("could not persist the target session");
+  const lines = [targetHeader(manager, sourceFile)];
+  for (const entry of entries) lines.push(JSON.stringify(entry));
+  writeFileSync(file, `${lines.join("\n")}\n`, { flag: "wx" });
+  return appendRelocationRecord(file, record, activeLeaf);
+}
+
+/** Append the relocation record on top of the carried branch, then verify the
+ * reopened file: the record must be the new leaf, its parent must still be the
+ * carried leaf, and the cwd must match the target worktree. */
+function appendRelocationRecord(
+  file: string,
+  record: RelocationRecord,
+  priorLeaf: string | null,
+): string {
+  const manager = SessionManager.open(file);
+  if (manager.getLeafId() !== priorLeaf) {
+    throw new Error(`prepared session leaf ${manager.getLeafId()} does not match ${priorLeaf}`);
+  }
+  const recordId = manager.appendCustomEntry(RELOCATION_CUSTOM_TYPE, record);
+  verifyTargetSession(file, record, recordId, priorLeaf);
+  return file;
+}
+
+function verifyTargetSession(
+  file: string,
+  record: RelocationRecord,
+  recordId: string,
+  priorLeaf: string | null,
+): void {
+  const reopened = SessionManager.open(file);
+  const expectedCwd = resolvePath(record.targetPath);
+  if (reopened.getCwd() !== expectedCwd) {
+    throw new Error(`prepared session cwd ${reopened.getCwd()} does not match ${expectedCwd}`);
+  }
+  if (reopened.getLeafId() !== recordId) {
+    throw new Error(
+      `prepared session leaf ${reopened.getLeafId()} does not match the relocation record ${recordId}`,
+    );
+  }
+  const entry = reopened.getEntry(recordId);
+  if (entry?.type !== "custom" || entry.customType !== RELOCATION_CUSTOM_TYPE) {
+    throw new Error(`prepared session is missing the relocation record ${recordId}`);
+  }
+  if (entry.parentId !== priorLeaf) {
+    throw new Error(
+      `relocation record parent ${entry.parentId} does not match the carried leaf ${priorLeaf}`,
+    );
+  }
+  if (!isRelocationRecord(entry.data) || JSON.stringify(entry.data) !== JSON.stringify(record)) {
+    throw new Error(`relocation record ${recordId} did not survive persistence`);
+  }
+}
+
+export const RELOCATION_CUSTOM_TYPE = "worktrunk-relocation";
+
+export function isRelocationRecord(value: unknown): value is RelocationRecord {
+  return (
+    isRecord(value) &&
+    typeof value.branch === "string" &&
+    typeof value.sourcePath === "string" &&
+    typeof value.targetPath === "string" &&
+    typeof value.note === "string"
+  );
+}
+
+function isRelocationRecordEntry(
+  entry: SessionEntry,
+): entry is CustomEntry<RelocationRecord> & { data: RelocationRecord } {
+  return (
+    entry.type === "custom" &&
+    entry.customType === RELOCATION_CUSTOM_TYPE &&
+    isRelocationRecord(entry.data)
+  );
+}
+
+/** Pick the relocation note that still has to reach the model on this branch.
+ * Only the latest record counts: it supersedes prior undelivered records even
+ * when it is already delivered. A record whose target cwd no longer matches the
+ * active cwd is never used, and an older record is never fallen back to. */
+export function findUndeliveredRelocation(
+  branch: readonly SessionEntry[],
+  cwd: string,
+): RelocationDelivery | null {
+  const records = branch.filter(isRelocationRecordEntry);
+  const latest = records[records.length - 1];
+  if (!latest) return null;
+
+  const record = latest.data;
+  if (resolvePath(record.targetPath) !== resolvePath(cwd)) return null;
+
+  const delivered = branch.some(
+    (entry) =>
+      entry.type === "custom_message" &&
+      entry.customType === RELOCATION_CUSTOM_TYPE &&
+      isRecord(entry.details) &&
+      entry.details.relocationId === latest.id,
+  );
+  if (delivered) return null;
+
+  return { relocationId: latest.id, note: record.note };
+}
+
+/** Render the persisted relocation record in the transcript. The record never
+ * enters the LLM context; this is the durable, visible relocation notice. */
+export function renderRelocationEntry(
+  entry: CustomEntry<RelocationRecord>,
+  options: EntryRenderOptions,
+  theme: PickerTheme,
+): Component | undefined {
+  // The entry comes from persisted JSONL, so the data still needs validation.
+  if (!isRelocationRecord(entry.data)) return undefined;
+  const record = entry.data;
+  const container = new Container();
+  container.addChild(new Text(`${theme.fg("accent", "[worktrunk]")} ${record.note}`, 0, 0));
+  if (options.expanded) {
+    container.addChild(
+      new Text(
+        theme.fg("dim", `branch ${record.branch} · ${record.sourcePath} → ${record.targetPath}`),
+        0,
+        0,
+      ),
+    );
+  }
+  return container;
+}
+
+function relocationNote(branch: string, sourcePath: string, targetPath: string): string {
+  return [
+    `Worktree relocation: this session moved from ${sourcePath} to ${targetPath} (branch ${branch}).`,
+    `Your working directory is now ${targetPath}.`,
+    "Absolute paths from earlier in this conversation belong to the previous checkout: do not reuse them and do not cd back.",
+  ].join(" ");
+}
+
+function canonicalWorktreePath(reported: string): string {
+  const resolved = realpathSync(reported);
+  if (!statSync(resolved).isDirectory()) {
+    throw new Error(`${reported} is not a directory`);
+  }
+  return resolved;
+}
+
+/** `/wt`: list worktrees, let the user pick one, and relocate into it. */
+export async function runWorktreePicker(
+  executor: WtExecutor,
+  switchExecutor: SwitchExecutor,
+  ui: WorktrunkUi,
+): Promise<void> {
   let result: WtResult;
   try {
     result = await executor(["list", "--format=json"], ui.cwd);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    ui.notify(`wt list failed: ${message}`, "error");
+    ui.notify(`wt list failed: ${errorMessage(error)}`, "error");
     return;
   }
 
@@ -268,8 +557,7 @@ export async function runWorktreePicker(executor: WtExecutor, ui: WorktrunkUi): 
   try {
     worktrees = parseWorktreeList(result.stdout);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    ui.notify(`wt list failed: ${message}\n${failureDetail(result)}`, "error");
+    ui.notify(`wt list failed: ${errorMessage(error)}\n${failureDetail(result)}`, "error");
     return;
   }
 
@@ -289,5 +577,72 @@ export async function runWorktreePicker(executor: WtExecutor, ui: WorktrunkUi): 
     return;
   }
 
-  ui.notify(`Selected ${branch}; switching is not implemented yet.`, "info");
+  await relocateToWorktree(executor, switchExecutor, ui, branch, choice.branch ?? choice.path);
+}
+
+async function relocateToWorktree(
+  executor: WtExecutor,
+  switchExecutor: SwitchExecutor,
+  ui: WorktrunkUi,
+  branch: string,
+  target: string,
+): Promise<void> {
+  let result: WtResult;
+  try {
+    result = await ui.withLoader(`Switching to ${branch}…`, () =>
+      executor(["switch", target, "--no-cd", "--format=json"], ui.cwd),
+    );
+  } catch (error) {
+    ui.notify(`wt switch failed: ${errorMessage(error)}`, "error");
+    return;
+  }
+
+  if (result.exitCode !== 0) {
+    ui.notify(`wt switch failed:\n${failureDetail(result)}`, "error");
+    return;
+  }
+
+  let outcome: string;
+  try {
+    outcome = parseWorktreeSwitch(result.stdout);
+  } catch (error) {
+    ui.notify(`wt switch failed: ${errorMessage(error)}\n${failureDetail(result)}`, "error");
+    return;
+  }
+
+  let targetPath: string;
+  try {
+    targetPath = canonicalWorktreePath(outcome);
+  } catch (error) {
+    ui.notify(`wt switch failed: ${errorMessage(error)}`, "error");
+    return;
+  }
+
+  let preparedFile: string;
+  const note = relocationNote(branch, ui.cwd, targetPath);
+  try {
+    await switchExecutor.waitForIdle();
+    preparedFile = switchExecutor.prepare(targetPath, {
+      branch,
+      sourcePath: ui.cwd,
+      targetPath,
+      note,
+    });
+  } catch (error) {
+    ui.notify(
+      `Could not prepare the target session: ${errorMessage(error)}\n${failureDetail(result)}`,
+      "error",
+    );
+    return;
+  }
+
+  try {
+    await switchExecutor.switch(preparedFile, async (session) => {
+      // The entry renderer shows the persisted record; the LLM-facing copy is
+      // queued by the session_start handler on the new runtime.
+      session.notify(`Moved to ${branch} at ${targetPath}.`, "info");
+    });
+  } catch (error) {
+    ui.notify(`Could not complete the session switch: ${errorMessage(error)}`, "error");
+  }
 }
