@@ -120,6 +120,20 @@ function readBoolean(value: unknown, field: string): boolean {
   return value;
 }
 
+/** Dirty flags come from a `changes` object that Worktrunk only emits when the
+ * worktree state is known. An absent flag means the output is not the schema-2
+ * shape, so it must fail parsing rather than defaulting to clean. */
+function readFlag(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") throw invalid(`${field} is not a boolean`);
+  return value;
+}
+
+/** `conflicted` is the one change flag Worktrunk documents as boolean/null:
+ * null means the conflict check was skipped, not that conflicts are impossible. */
+function readConflictFlag(value: unknown, field: string): boolean {
+  return value === null ? false : readFlag(value, field);
+}
+
 function readCount(value: unknown, field: string): number {
   if (value === undefined || value === null) return 0;
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -141,12 +155,12 @@ function parseChanges(value: unknown): WorktreeChanges | null {
   if (value === undefined || value === null) return null;
   if (!isRecord(value)) throw invalid("worktree.changes is not an object");
   return {
-    staged: readBoolean(value.staged, "worktree.changes.staged"),
-    modified: readBoolean(value.modified, "worktree.changes.modified"),
-    untracked: readBoolean(value.untracked, "worktree.changes.untracked"),
-    renamed: readBoolean(value.renamed, "worktree.changes.renamed"),
-    deleted: readBoolean(value.deleted, "worktree.changes.deleted"),
-    conflicted: readBoolean(value.conflicted, "worktree.changes.conflicted"),
+    staged: readFlag(value.staged, "worktree.changes.staged"),
+    modified: readFlag(value.modified, "worktree.changes.modified"),
+    untracked: readFlag(value.untracked, "worktree.changes.untracked"),
+    renamed: readFlag(value.renamed, "worktree.changes.renamed"),
+    deleted: readFlag(value.deleted, "worktree.changes.deleted"),
+    conflicted: readConflictFlag(value.conflicted, "worktree.changes.conflicted"),
     diff: parseDiff(value.diff),
   };
 }
@@ -763,8 +777,8 @@ async function listWorktrees(executor: WtExecutor, cwd: string): Promise<ListWor
   }
 }
 
-/** Read dirty state only after the run stops, including after an approved abort.
- * Cancelling prevents switching but does not undo an already approved abort. */
+/** Read dirty state after the run stops, including after an approved abort.
+ * Declining confirmation prevents relocation but does not undo that abort. */
 async function confirmSwitchGates(
   wt: WtExecutor,
   switchExecutor: SwitchExecutor,
@@ -776,34 +790,37 @@ async function confirmSwitchGates(
     busyAction = await ui.chooseBusyAction();
     if (!busyAction) return false;
   }
-
-  if (busyAction === "abort") {
-    switchExecutor.abort();
-  }
+  if (busyAction === "abort") switchExecutor.abort();
   await switchExecutor.waitForIdle();
+  if (cancelIfBusy(switchExecutor, ui)) return false;
 
   // The session did not occupy the recovery anchor, so there is no source
   // worktree whose uncommitted changes could be left behind.
-  if (context.recovery) return true;
+  if (!context.recovery) {
+    const listed = await listWorktrees(wt, context.cwd);
+    if (!listed.ok) {
+      ui.notify(listed.message, "error");
+      return false;
+    }
+    if (cancelIfBusy(switchExecutor, ui)) return false;
+    const source = listed.worktrees.find((worktree) => worktree.current);
+    if (!source) {
+      ui.notify("Could not identify the source worktree. Switch cancelled.", "error");
+      return false;
+    }
+    if (!source.changes) {
+      ui.notify(
+        "Could not determine the source worktree's dirty state. Switch cancelled.",
+        "error",
+      );
+      return false;
+    }
+    if (hasUncommittedChanges(source.changes)) {
+      if (!(await ui.confirmDirty(branchName(source)))) return false;
+    }
+  }
 
-  const listed = await listWorktrees(wt, context.cwd);
-  if (!listed.ok) {
-    ui.notify(listed.message, "error");
-    return false;
-  }
   if (cancelIfBusy(switchExecutor, ui)) return false;
-  const source = listed.worktrees.find((worktree) => worktree.current);
-  if (!source) {
-    ui.notify("Could not identify the source worktree. Switch cancelled.", "error");
-    return false;
-  }
-  if (!source.changes) {
-    ui.notify("Could not determine the source worktree's dirty state. Switch cancelled.", "error");
-    return false;
-  }
-  if (hasUncommittedChanges(source.changes)) {
-    if (!(await ui.confirmDirty(branchName(source)))) return false;
-  }
 
   return true;
 }

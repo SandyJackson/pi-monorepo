@@ -19,6 +19,7 @@ import {
   runWorktreePicker,
   type SwitchExecutor,
   type Worktree,
+  type WorktrunkNotifyType,
   type WtExecutor,
 } from "./worktrunk.ts";
 
@@ -137,19 +138,37 @@ async function runWithLoader<T>(
 }
 
 /** Adapt `ctx` to the relocation boundary used by `runWorktreePicker`. */
-function createSwitchExecutor(ctx: ExtensionCommandContext): SwitchExecutor {
+export function createSwitchExecutor(ctx: ExtensionCommandContext): SwitchExecutor {
   return {
     isBusy: () => !ctx.isIdle(),
     abort: () => ctx.abort(),
     waitForIdle: () => ctx.waitForIdle(),
     prepare: (targetPath, record) => prepareTargetSession(ctx.sessionManager, targetPath, record),
-    switch: (sessionFile, withSession) =>
-      ctx.switchSession(sessionFile, {
-        withSession: (replaced) =>
-          withSession({
-            notify: (message, type) => replaced.ui.notify(message, type),
-          } satisfies RelocatedSession),
-      }),
+    switch: async (sessionFile, withSession) => {
+      // Capture the UI before the source context becomes stale. This handles
+      // rejecting hosts, not the TUI's fatal process exit on runtime failure.
+      // See docs/research/worktrunk-runtime-replacement-blocker.md.
+      const sourceUi = ctx.ui;
+      let replacementNotify: ((message: string, type: WorktrunkNotifyType) => void) | null = null;
+      try {
+        return await ctx.switchSession(sessionFile, {
+          withSession: async (replaced) => {
+            const notify = (message: string, type: WorktrunkNotifyType) =>
+              replaced.ui.notify(message, type);
+            replacementNotify = notify;
+            await withSession({ notify } satisfies RelocatedSession);
+          },
+        });
+      } catch (error) {
+        // For errors the host propagates, prefer the replacement context;
+        // otherwise use the UI captured before source teardown.
+        const notify =
+          replacementNotify ??
+          ((message: string, type: WorktrunkNotifyType) => sourceUi.notify(message, type));
+        notify(`Could not complete the session switch: ${errorMessage(error)}`, "error");
+        return { cancelled: false };
+      }
+    },
   };
 }
 
