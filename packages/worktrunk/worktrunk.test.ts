@@ -4,12 +4,14 @@ import * as path from "node:path";
 import {
   type CustomEntry,
   type ExtensionAPI,
+  type ExtensionCommandContext,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerWorktrunk } from "./index.ts";
 import {
+  type BusyAction,
   buildWorktreeRows,
   findUndeliveredRelocation,
   type PickerColor,
@@ -89,6 +91,14 @@ const SCHEMA_2_LIST = JSON.stringify({
 });
 
 const TARGET_PATH = "/repo.target";
+const CLEAN_CHANGES = {
+  staged: false,
+  modified: false,
+  untracked: false,
+  renamed: false,
+  deleted: false,
+  conflicted: false,
+};
 
 let tempDir: string;
 let sessionDir: string;
@@ -157,17 +167,23 @@ interface SentMessage {
 function fakePi(overrides?: { sendMessageError?: Error }): {
   pi: ExtensionAPI;
   commands: string[];
+  commandHandlers: Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]["handler"]>;
   entryRenderers: Array<{ customType: string; renderer: unknown }>;
   sessionStartHandlers: Array<(event: unknown, ctx: unknown) => Promise<void> | void>;
   sentMessages: SentMessage[];
 } {
   const commands: string[] = [];
+  const commandHandlers = new Map<
+    string,
+    Parameters<ExtensionAPI["registerCommand"]>[1]["handler"]
+  >();
   const entryRenderers: Array<{ customType: string; renderer: unknown }> = [];
   const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => Promise<void> | void> = [];
   const sentMessages: SentMessage[] = [];
   const pi = {
-    registerCommand: (name: string) => {
+    registerCommand: (name: string, command: Parameters<ExtensionAPI["registerCommand"]>[1]) => {
       commands.push(name);
+      commandHandlers.set(name, command.handler);
     },
     registerEntryRenderer: (customType: string, renderer: unknown) => {
       entryRenderers.push({ customType, renderer });
@@ -180,7 +196,7 @@ function fakePi(overrides?: { sendMessageError?: Error }): {
       sentMessages.push({ message, options });
     },
   } as unknown as ExtensionAPI;
-  return { pi, commands, entryRenderers, sessionStartHandlers, sentMessages };
+  return { pi, commands, commandHandlers, entryRenderers, sessionStartHandlers, sentMessages };
 }
 
 /** ExtensionContext seam for a session_start dispatch. */
@@ -215,10 +231,22 @@ async function dispatchSessionStart(
   return notifications;
 }
 
-function captureUi(choose: (worktrees: Worktree[]) => Worktree | null, cwd = "/repo") {
+function captureUi(
+  choose: (worktrees: Worktree[]) => Worktree | null,
+  options: {
+    cwd?: string;
+    busyAction?: BusyAction | null;
+    dirty?: boolean;
+    events?: string[];
+  } = {},
+) {
+  const cwd = options.cwd ?? "/repo";
+  const events = options.events;
   const notifications: Notification[] = [];
   const selections: Worktree[][] = [];
   const loaders: string[] = [];
+  const busyChoices: BusyAction[] = [];
+  const dirtyConfirms: string[] = [];
   const ui: WorktrunkUi = {
     cwd,
     notify: (message, type) => notifications.push({ message, type }),
@@ -230,8 +258,19 @@ function captureUi(choose: (worktrees: Worktree[]) => Worktree | null, cwd = "/r
       loaders.push(label);
       return run();
     },
+    chooseBusyAction: async () => {
+      events?.push("busy");
+      const action = options.busyAction === undefined ? "wait" : options.busyAction;
+      if (action) busyChoices.push(action);
+      return action;
+    },
+    confirmDirty: async (branch) => {
+      events?.push("dirty");
+      dirtyConfirms.push(branch);
+      return options.dirty ?? true;
+    },
   };
-  return { notifications, selections, loaders, ui };
+  return { notifications, selections, loaders, busyChoices, dirtyConfirms, ui };
 }
 
 interface FakeSwitch {
@@ -246,17 +285,25 @@ function fakeSwitchExecutor(overrides?: {
   prepareFn?: (targetPath: string, record: RelocationRecord) => string;
   prepareError?: Error;
   switchError?: Error;
+  busy?: boolean;
+  events?: string[];
 }): FakeSwitch {
   const preparedPaths: string[] = [];
   const switches: SwitchRecord[] = [];
-  const events: string[] = [];
+  const events = overrides?.events ?? [];
+  let busy = overrides?.busy ?? false;
   return {
     preparedPaths,
     switches,
     events,
     executor: {
+      isBusy: () => busy,
+      abort: () => {
+        events.push("abort");
+      },
       waitForIdle: async () => {
         events.push("waitForIdle");
+        busy = false;
       },
       prepare: (targetPath, record) => {
         events.push("prepare");
@@ -633,6 +680,7 @@ describe("runWorktreePicker relocation", () => {
 
     expect(calls).toEqual([
       { args: ["list", "--format=json"], cwd: "/repo" },
+      { args: ["list", "--format=json"], cwd: "/repo" },
       { args: ["switch", "main", "--no-cd", "--format=json"], cwd: "/repo" },
     ]);
     expect(loaders).toHaveLength(1);
@@ -649,15 +697,379 @@ describe("runWorktreePicker relocation", () => {
   it("waits for the agent to be idle before it prepares or replaces the session", async () => {
     const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
     const { executor } = commandExecutor(switchOutput(target));
-    const { ui } = captureUi(
+    const { ui, busyChoices } = captureUi(
       (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
     );
     const switchExecutor = fakeSwitchExecutor();
 
     await runWorktreePicker(executor, switchExecutor.executor, ui);
 
-    expect(switchExecutor.events).toEqual(["waitForIdle", "prepare", "switch"]);
+    expect(busyChoices).toEqual([]);
+    expect(switchExecutor.events).toEqual(["waitForIdle", "waitForIdle", "prepare", "switch"]);
   });
+
+  it("offers wait or abort while the agent is mid-run, then waits for idle before switching", async () => {
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+    const { executor } = commandExecutor(switchOutput(target));
+    const { ui, busyChoices } = captureUi(
+      (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+      { busyAction: "wait" },
+    );
+    const switchExecutor = fakeSwitchExecutor({ busy: true });
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+    expect(busyChoices).toEqual(["wait"]);
+    expect(switchExecutor.events).toEqual(["waitForIdle", "waitForIdle", "prepare", "switch"]);
+  });
+
+  it("aborts the running agent on request and still waits for idle before switching", async () => {
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+    const { executor } = commandExecutor(switchOutput(target));
+    const { ui } = captureUi(
+      (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+      { busyAction: "abort" },
+    );
+    const switchExecutor = fakeSwitchExecutor({ busy: true });
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+    expect(switchExecutor.events).toEqual([
+      "abort",
+      "waitForIdle",
+      "waitForIdle",
+      "prepare",
+      "switch",
+    ]);
+  });
+
+  it("changes nothing when the busy dialog is dismissed", async () => {
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+    const { executor, calls } = commandExecutor(switchOutput(target));
+    const { ui } = captureUi(
+      (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+      { busyAction: null },
+    );
+    const switchExecutor = fakeSwitchExecutor({ busy: true });
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+    expect(calls).toEqual([{ args: ["list", "--format=json"], cwd: "/repo" }]);
+    expect(switchExecutor.events).toEqual([]);
+    expect(switchExecutor.preparedPaths).toEqual([]);
+    expect(switchExecutor.switches).toEqual([]);
+  });
+
+  it("confirms the switch once when the originating worktree is dirty", async () => {
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+    const { executor } = commandExecutor(switchOutput(target));
+    const { ui, dirtyConfirms } = captureUi(
+      (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+      { dirty: true },
+    );
+    const switchExecutor = fakeSwitchExecutor();
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+    expect(dirtyConfirms).toEqual(["feature-api"]);
+    expect(switchExecutor.switches).toHaveLength(1);
+  });
+
+  it.each(["missing source", "unknown status"] as const)(
+    "does not switch when the refreshed list reports %s",
+    async (scenario) => {
+      const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+      let lists = 0;
+      const executor: WtExecutor = async (args) => {
+        if (args[0] !== "list") return switchOutput(target);
+        lists += 1;
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout:
+            lists === 1
+              ? SCHEMA_2_LIST
+              : JSON.stringify({
+                  schema: 2,
+                  items: [
+                    ...(scenario === "missing source"
+                      ? []
+                      : [
+                          {
+                            branch: "feature-api",
+                            worktree: { path: "/repo.feature-api", current: true, changes: null },
+                          },
+                        ]),
+                    { branch: "main", worktree: { path: "/repo", current: false, changes: {} } },
+                  ],
+                }),
+        };
+      };
+      const { ui, notifications, loaders, dirtyConfirms } = captureUi(
+        (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+      );
+      const switchExecutor = fakeSwitchExecutor();
+
+      await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+      expect(loaders).toEqual([]);
+      expect(dirtyConfirms).toEqual([]);
+      expect(switchExecutor.preparedPaths).toEqual([]);
+      expect(switchExecutor.switches).toEqual([]);
+      expect(notifications).toEqual([
+        { message: expect.stringMatching(/source worktree|dirty state/), type: "error" },
+      ]);
+    },
+  );
+
+  it.each([null, "wait", "abort"] as const)(
+    "skips the dirty confirm when the originating worktree stays clean after %s",
+    async (busyAction) => {
+      const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+      const cleanList = JSON.stringify({
+        schema: 2,
+        items: [
+          {
+            branch: "main",
+            worktree: { path: "/repo", main: true, current: true, changes: CLEAN_CHANGES },
+          },
+          {
+            branch: "feature-api",
+            worktree: {
+              path: "/repo.feature-api",
+              changes: {
+                staged: false,
+                modified: false,
+                untracked: false,
+                renamed: false,
+                deleted: false,
+                conflicted: false,
+                diff: { added: 0, deleted: 0 },
+              },
+            },
+          },
+        ],
+      });
+      const executor: WtExecutor = async (args) => {
+        if (args[0] === "list") return { exitCode: 0, stdout: cleanList, stderr: "" };
+        return switchOutput(target);
+      };
+      const { ui, dirtyConfirms } = captureUi(
+        (choices) => choices.find((worktree) => worktree.branch === "feature-api") ?? null,
+        { busyAction },
+      );
+      const switchExecutor = fakeSwitchExecutor({ busy: busyAction !== null });
+
+      await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+      expect(dirtyConfirms).toEqual([]);
+      expect(switchExecutor.switches).toHaveLength(1);
+    },
+  );
+
+  it("changes nothing when the dirty confirm is declined", async () => {
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+    const { executor, calls } = commandExecutor(switchOutput(target));
+    const { ui } = captureUi(
+      (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+      { dirty: false },
+    );
+    const switchExecutor = fakeSwitchExecutor();
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+    expect(calls).toEqual([
+      { args: ["list", "--format=json"], cwd: "/repo" },
+      { args: ["list", "--format=json"], cwd: "/repo" },
+    ]);
+    expect(switchExecutor.preparedPaths).toEqual([]);
+    expect(switchExecutor.switches).toEqual([]);
+  });
+
+  it("orders the busy gate, the dirty gate and wt switch", async () => {
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+    const events: string[] = [];
+    const executor: WtExecutor = async (args) => {
+      events.push(`wt:${args[0]}`);
+      if (args[0] === "list") return { exitCode: 0, stdout: SCHEMA_2_LIST, stderr: "" };
+      return switchOutput(target);
+    };
+    const { ui } = captureUi(
+      (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+      { busyAction: "wait", dirty: true, events },
+    );
+    const switchExecutor = fakeSwitchExecutor({ busy: true, events });
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+    expect(events).toEqual([
+      "wt:list",
+      "busy",
+      "waitForIdle",
+      "wt:list",
+      "dirty",
+      "wt:switch",
+      "waitForIdle",
+      "prepare",
+      "switch",
+    ]);
+  });
+
+  it("does not switch when the dirty confirm is declined after an approved abort", async () => {
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+    const { executor, calls } = commandExecutor(switchOutput(target));
+    const { ui } = captureUi(
+      (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+      { busyAction: "abort", dirty: false },
+    );
+    const switchExecutor = fakeSwitchExecutor({ busy: true });
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+    expect(switchExecutor.events).toEqual(["abort", "waitForIdle"]);
+    expect(switchExecutor.preparedPaths).toEqual([]);
+    expect(switchExecutor.switches).toEqual([]);
+    expect(calls).toEqual([
+      { args: ["list", "--format=json"], cwd: "/repo" },
+      { args: ["list", "--format=json"], cwd: "/repo" },
+    ]);
+  });
+
+  it.each([
+    { busyAction: "wait", dirty: true },
+    { busyAction: "abort", dirty: true },
+    { busyAction: "abort", dirty: false },
+  ] as const)(
+    "confirms dirty changes written before $busyAction completes, acceptance=$dirty",
+    async ({ busyAction, dirty }) => {
+      const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+      const cleanList = JSON.stringify({
+        schema: 2,
+        items: [
+          {
+            branch: "main",
+            worktree: { path: "/repo", main: true, current: true, changes: CLEAN_CHANGES },
+          },
+          { branch: "feature-api", worktree: { path: "/repo.feature-api", changes: null } },
+        ],
+      });
+      const dirtyList = JSON.stringify({
+        schema: 2,
+        items: [
+          {
+            branch: "main",
+            worktree: {
+              path: "/repo",
+              main: true,
+              current: true,
+              changes: { modified: true },
+            },
+          },
+          { branch: "feature-api", worktree: { path: "/repo.feature-api", changes: null } },
+        ],
+      });
+      let finished = false;
+      const events: string[] = [];
+      const executor: WtExecutor = async (args) => {
+        events.push(`wt:${args[0]}`);
+        if (args[0] === "list") {
+          return { exitCode: 0, stdout: finished ? dirtyList : cleanList, stderr: "" };
+        }
+        return switchOutput(target);
+      };
+      const { ui, dirtyConfirms } = captureUi(
+        (choices) => choices.find((worktree) => worktree.branch === "feature-api") ?? null,
+        { busyAction, dirty, events },
+      );
+      const switchExecutor = fakeSwitchExecutor({ busy: true, events });
+
+      await runWorktreePicker(
+        executor,
+        {
+          ...switchExecutor.executor,
+          waitForIdle: async () => {
+            await switchExecutor.executor.waitForIdle();
+            finished = true;
+          },
+        },
+        ui,
+      );
+
+      expect(dirtyConfirms).toEqual(["main"]);
+      expect(events).toEqual([
+        "wt:list",
+        "busy",
+        ...(busyAction === "abort" ? ["abort"] : []),
+        "waitForIdle",
+        "wt:list",
+        "dirty",
+        ...(dirty ? ["wt:switch", "waitForIdle", "prepare", "switch"] : []),
+      ]);
+      expect(switchExecutor.preparedPaths).toEqual(dirty ? [target] : []);
+      expect(switchExecutor.switches).toHaveLength(dirty ? 1 : 0);
+    },
+  );
+
+  it.each(["list", "dirty confirmation", "loader", "hooks", "preparation barrier"] as const)(
+    "stops relocation when a new run starts during %s",
+    async (stage) => {
+      const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+      let busy = false;
+      let lists = 0;
+      let waits = 0;
+      const commands: string[] = [];
+      const executor: WtExecutor = async (args) => {
+        commands.push(args[0]!);
+        if (args[0] === "list") {
+          lists += 1;
+          if (lists === 2 && stage === "list") busy = true;
+          return { exitCode: 0, stdout: SCHEMA_2_LIST, stderr: "" };
+        }
+        if (stage === "hooks") busy = true;
+        return switchOutput(target);
+      };
+      const { ui, notifications } = captureUi(
+        (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+      );
+      const switchExecutor = fakeSwitchExecutor();
+
+      await runWorktreePicker(
+        executor,
+        {
+          ...switchExecutor.executor,
+          isBusy: () => busy,
+          waitForIdle: async () => {
+            waits += 1;
+            await switchExecutor.executor.waitForIdle();
+            if (waits === 2 && stage === "preparation barrier") busy = true;
+          },
+        },
+        {
+          ...ui,
+          confirmDirty: async (branch) => {
+            if (stage === "dirty confirmation") busy = true;
+            return ui.confirmDirty(branch);
+          },
+          withLoader: async (label, run) => {
+            if (stage === "loader") busy = true;
+            return ui.withLoader(label, run);
+          },
+        },
+      );
+
+      expect(commands).toEqual(
+        stage === "hooks" || stage === "preparation barrier"
+          ? ["list", "list", "switch"]
+          : ["list", "list"],
+      );
+      expect(switchExecutor.events).not.toContain("abort");
+      expect(switchExecutor.preparedPaths).toEqual([]);
+      expect(switchExecutor.switches).toEqual([]);
+      expect(notifications).toEqual([
+        { message: expect.stringMatching(/new agent run.*cancelled/i), type: "warning" },
+      ]);
+    },
+  );
 
   it("does not send anything through the replacement session; the note is queued by session_start", async () => {
     const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
@@ -805,7 +1217,7 @@ describe("runWorktreePicker relocation", () => {
     }
 
     expect(appendCalls).toBe(1);
-    expect(switchExecutor.events).toEqual(["waitForIdle", "prepare"]);
+    expect(switchExecutor.events).toEqual(["waitForIdle", "waitForIdle", "prepare"]);
     expect(switchExecutor.switches).toEqual([]);
     expect(fs.readFileSync(file, "utf8")).toBe(sourceBefore);
     expect(notifications).toHaveLength(1);
@@ -1217,6 +1629,51 @@ describe("session_start relocation queueing", () => {
 });
 
 describe("worktrunk extension", () => {
+  it.each([false, true])(
+    "rejects overlapping /wt commands and releases the guard after picker failure=%s",
+    async (pickerFails) => {
+      const { pi, commandHandlers } = fakePi();
+      let resolveList!: (result: WtResult) => void;
+      const pendingList = new Promise<WtResult>((resolve) => {
+        resolveList = resolve;
+      });
+      let lists = 0;
+      registerWorktrunk(pi, async () => {
+        lists += 1;
+        return lists === 1 ? pendingList : { exitCode: 0, stdout: SCHEMA_2_LIST, stderr: "" };
+      });
+      const notifications: Notification[] = [];
+      const custom = vi.fn().mockResolvedValue(null);
+      if (pickerFails) custom.mockRejectedValueOnce(new Error("picker failed"));
+      const ctx = {
+        mode: "tui",
+        cwd: "/repo",
+        ui: {
+          custom,
+          notify: (message: string, type: Notification["type"]) => {
+            notifications.push({ message, type });
+          },
+        },
+      } as unknown as ExtensionCommandContext;
+      const handler = commandHandlers.get("wt")!;
+      const first = handler("", ctx);
+
+      await handler("", ctx);
+
+      expect(lists).toBe(1);
+      expect(notifications).toEqual([
+        { message: expect.stringMatching(/already in progress/i), type: "warning" },
+      ]);
+      resolveList({ exitCode: 0, stdout: SCHEMA_2_LIST, stderr: "" });
+      if (pickerFails) await expect(first).rejects.toThrow("picker failed");
+      else await first;
+
+      await handler("", ctx);
+      expect(lists).toBe(2);
+      expect(custom).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it("registers /wt, the relocation entry renderer and the session_start handler", () => {
     const { pi, commands, entryRenderers, sessionStartHandlers } = fakePi();
 

@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { BorderedLoader, DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, SelectList, Text } from "@earendil-works/pi-tui";
 import {
+  type BusyAction,
   buildWorktreeRows,
   createWtExecutor,
   errorMessage,
@@ -53,6 +54,16 @@ async function pickWorktree(
   });
 }
 
+/** Ask whether to wait for or abort a running agent before switching. */
+async function chooseBusyAction(ctx: ExtensionCommandContext): Promise<BusyAction | null> {
+  const choice = await ctx.ui.select("The agent is still running", [
+    "Wait for the current run to finish",
+    "Abort and switch",
+  ]);
+  if (choice === undefined) return null;
+  return choice === "Abort and switch" ? "abort" : "wait";
+}
+
 type LoaderOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
 
 /**
@@ -79,6 +90,8 @@ async function runWithLoader<T>(
 /** Adapt `ctx` to the relocation boundary used by `runWorktreePicker`. */
 function createSwitchExecutor(ctx: ExtensionCommandContext): SwitchExecutor {
   return {
+    isBusy: () => !ctx.isIdle(),
+    abort: () => ctx.abort(),
     waitForIdle: () => ctx.waitForIdle(),
     prepare: (targetPath, record) => prepareTargetSession(ctx.sessionManager, targetPath, record),
     switch: (sessionFile, withSession) =>
@@ -93,6 +106,7 @@ function createSwitchExecutor(ctx: ExtensionCommandContext): SwitchExecutor {
 
 /** Register `/wt` against an injected Worktrunk CLI executor. */
 export function registerWorktrunk(pi: ExtensionAPI, executor: WtExecutor): void {
+  let switchInProgress = false;
   pi.registerCommand("wt", {
     description: "Pick a Worktrunk worktree for this session",
     handler: async (_args, ctx) => {
@@ -100,12 +114,27 @@ export function registerWorktrunk(pi: ExtensionAPI, executor: WtExecutor): void 
         ctx.ui.notify("/wt requires the interactive TUI.", "warning");
         return;
       }
-      await runWorktreePicker(executor, createSwitchExecutor(ctx), {
-        cwd: ctx.cwd,
-        notify: (message, type) => ctx.ui.notify(message, type),
-        selectWorktree: (worktrees) => pickWorktree(ctx, worktrees),
-        withLoader: (label, run) => runWithLoader(ctx, label, run),
-      });
+      if (switchInProgress) {
+        ctx.ui.notify("A worktree switch is already in progress.", "warning");
+        return;
+      }
+      switchInProgress = true;
+      try {
+        await runWorktreePicker(executor, createSwitchExecutor(ctx), {
+          cwd: ctx.cwd,
+          notify: (message, type) => ctx.ui.notify(message, type),
+          selectWorktree: (worktrees) => pickWorktree(ctx, worktrees),
+          withLoader: (label, run) => runWithLoader(ctx, label, run),
+          chooseBusyAction: () => chooseBusyAction(ctx),
+          confirmDirty: (branch) =>
+            ctx.ui.confirm(
+              "Uncommitted changes",
+              `${branch} has uncommitted changes. Switch anyway? Your changes stay in the current worktree.`,
+            ),
+        });
+      } finally {
+        switchInProgress = false;
+      }
     },
   });
 

@@ -200,6 +200,9 @@ export function parseWorktreeSwitch(stdout: string): string {
 
 export type WorktrunkNotifyType = "info" | "warning" | "error";
 
+/** What to do about an agent that is still streaming when `/wt` is invoked. */
+export type BusyAction = "wait" | "abort";
+
 /** UI surface `/wt` needs; `index.ts` supplies the components, tests inject a fake. */
 export interface WorktrunkUi {
   cwd: string;
@@ -207,6 +210,10 @@ export interface WorktrunkUi {
   selectWorktree(worktrees: readonly Worktree[]): Promise<Worktree | null>;
   /** Run one step under a loader that offers no cancel affordance. */
   withLoader<T>(label: string, run: () => Promise<T>): Promise<T>;
+  /** Ask what to do about a running agent; null when the dialog is dismissed. */
+  chooseBusyAction(): Promise<BusyAction | null>;
+  /** Confirm switching away from a worktree with uncommitted changes. */
+  confirmDirty(branch: string): Promise<boolean>;
 }
 
 /** Session-bound surface available only after the runtime has been replaced. */
@@ -237,6 +244,10 @@ export interface RelocationDelivery {
  * `waitForIdle` must run before `prepare` so a mid-turn agent cannot write
  * entries past the captured leaf. */
 export interface SwitchExecutor {
+  /** Whether the agent is still streaming. */
+  isBusy(): boolean;
+  /** Abort the running agent; the caller waits for idle afterwards. */
+  abort(): void;
   waitForIdle(): Promise<void>;
   prepare(targetPath: string, record: RelocationRecord): string;
   switch(
@@ -281,6 +292,19 @@ function diffCounts(diff: WorktreeDiff | null, theme: PickerTheme): string {
   if (diff.added > 0) counts.push(theme.fg("success", `+${diff.added}`));
   if (diff.deleted > 0) counts.push(theme.fg("error", `-${diff.deleted}`));
   return counts.join(" ");
+}
+
+/** True when Worktrunk reports uncommitted changes in a worktree. */
+function hasUncommittedChanges(changes: WorktreeChanges | null): boolean {
+  if (!changes) return false;
+  return (
+    changes.staged ||
+    changes.modified ||
+    changes.untracked ||
+    changes.renamed ||
+    changes.deleted ||
+    changes.conflicted
+  );
 }
 
 /** Build picker rows from Worktrunk JSON, re-rendering state in Pi theme colors. */
@@ -540,26 +564,12 @@ export async function runWorktreePicker(
   switchExecutor: SwitchExecutor,
   ui: WorktrunkUi,
 ): Promise<void> {
-  let result: WtResult;
-  try {
-    result = await executor(["list", "--format=json"], ui.cwd);
-  } catch (error) {
-    ui.notify(`wt list failed: ${errorMessage(error)}`, "error");
+  const listed = await listWorktrees(executor, ui.cwd);
+  if (!listed.ok) {
+    ui.notify(listed.message, "error");
     return;
   }
-
-  if (result.exitCode !== 0) {
-    ui.notify(`wt list failed:\n${failureDetail(result)}`, "error");
-    return;
-  }
-
-  let worktrees: Worktree[];
-  try {
-    worktrees = parseWorktreeList(result.stdout);
-  } catch (error) {
-    ui.notify(`wt list failed: ${errorMessage(error)}\n${failureDetail(result)}`, "error");
-    return;
-  }
+  const worktrees = listed.worktrees;
 
   if (worktrees.length === 0) {
     ui.notify("Worktrunk reported no worktrees.", "info");
@@ -577,7 +587,85 @@ export async function runWorktreePicker(
     return;
   }
 
+  if (!(await confirmSwitchGates(executor, switchExecutor, ui))) {
+    return;
+  }
+
   await relocateToWorktree(executor, switchExecutor, ui, branch, choice.branch ?? choice.path);
+}
+
+type ListWorktreesResult = { ok: true; worktrees: Worktree[] } | { ok: false; message: string };
+
+/** Run `wt list` and parse it, collecting the message the caller reports. */
+async function listWorktrees(executor: WtExecutor, cwd: string): Promise<ListWorktreesResult> {
+  let result: WtResult;
+  try {
+    result = await executor(["list", "--format=json"], cwd);
+  } catch (error) {
+    return { ok: false, message: `wt list failed: ${errorMessage(error)}` };
+  }
+
+  if (result.exitCode !== 0) {
+    return { ok: false, message: `wt list failed:\n${failureDetail(result)}` };
+  }
+
+  try {
+    return { ok: true, worktrees: parseWorktreeList(result.stdout) };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `wt list failed: ${errorMessage(error)}\n${failureDetail(result)}`,
+    };
+  }
+}
+
+/** Read dirty state only after the run stops, including after an approved abort.
+ * Cancelling prevents switching but does not undo an already approved abort. */
+async function confirmSwitchGates(
+  executor: WtExecutor,
+  switchExecutor: SwitchExecutor,
+  ui: WorktrunkUi,
+): Promise<boolean> {
+  let busyAction: BusyAction | null = null;
+  if (switchExecutor.isBusy()) {
+    busyAction = await ui.chooseBusyAction();
+    if (!busyAction) return false;
+  }
+
+  if (busyAction === "abort") {
+    switchExecutor.abort();
+  }
+  await switchExecutor.waitForIdle();
+
+  const listed = await listWorktrees(executor, ui.cwd);
+  if (!listed.ok) {
+    ui.notify(listed.message, "error");
+    return false;
+  }
+  if (cancelIfBusy(switchExecutor, ui)) return false;
+  const source = listed.worktrees.find((worktree) => worktree.current);
+  if (!source) {
+    ui.notify("Could not identify the source worktree. Switch cancelled.", "error");
+    return false;
+  }
+  if (!source.changes) {
+    ui.notify("Could not determine the source worktree's dirty state. Switch cancelled.", "error");
+    return false;
+  }
+  if (hasUncommittedChanges(source.changes)) {
+    if (!(await ui.confirmDirty(branchName(source)))) return false;
+  }
+
+  return true;
+}
+
+function cancelIfBusy(switchExecutor: SwitchExecutor, ui: WorktrunkUi): boolean {
+  if (!switchExecutor.isBusy()) return false;
+  ui.notify(
+    "A new agent run started. Worktree relocation cancelled; run /wt again when it finishes.",
+    "warning",
+  );
+  return true;
 }
 
 async function relocateToWorktree(
@@ -587,16 +675,20 @@ async function relocateToWorktree(
   branch: string,
   target: string,
 ): Promise<void> {
-  let result: WtResult;
+  if (cancelIfBusy(switchExecutor, ui)) return;
+
+  let result: WtResult | null;
   try {
-    result = await ui.withLoader(`Switching to ${branch}…`, () =>
-      executor(["switch", target, "--no-cd", "--format=json"], ui.cwd),
-    );
+    result = await ui.withLoader(`Switching to ${branch}…`, async () => {
+      if (cancelIfBusy(switchExecutor, ui)) return null;
+      return executor(["switch", target, "--no-cd", "--format=json"], ui.cwd);
+    });
   } catch (error) {
     ui.notify(`wt switch failed: ${errorMessage(error)}`, "error");
     return;
   }
 
+  if (!result) return;
   if (result.exitCode !== 0) {
     ui.notify(`wt switch failed:\n${failureDetail(result)}`, "error");
     return;
@@ -621,7 +713,9 @@ async function relocateToWorktree(
   let preparedFile: string;
   const note = relocationNote(branch, ui.cwd, targetPath);
   try {
+    if (cancelIfBusy(switchExecutor, ui)) return;
     await switchExecutor.waitForIdle();
+    if (cancelIfBusy(switchExecutor, ui)) return;
     preparedFile = switchExecutor.prepare(targetPath, {
       branch,
       sourcePath: ui.cwd,
