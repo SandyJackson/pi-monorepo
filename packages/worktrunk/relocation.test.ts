@@ -128,11 +128,15 @@ function extensionFactories(): InlineExtension[] {
     {
       name: "worktrunk",
       factory: (pi) =>
-        registerWorktrunk(pi, async () => ({
-          exitCode: 0,
-          stdout: JSON.stringify({ schema: 2, items: [] }),
-          stderr: "",
-        })),
+        registerWorktrunk(
+          pi,
+          async () => ({
+            exitCode: 0,
+            stdout: JSON.stringify({ schema: 2, items: [] }),
+            stderr: "",
+          }),
+          { stateDir: agentDir },
+        ),
     },
     {
       name: "canned-compaction",

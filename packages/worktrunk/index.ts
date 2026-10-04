@@ -1,5 +1,6 @@
+import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { BorderedLoader, DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { BorderedLoader, DynamicBorder, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Container, Input, Key, matchesKey, SelectList, Text } from "@earendil-works/pi-tui";
 import {
   type BusyAction,
@@ -12,6 +13,8 @@ import {
   RELOCATION_CUSTOM_TYPE,
   type RelocatedSession,
   type RelocationRecord,
+  readRecoveryWorktree,
+  recordRecoveryWorktree,
   renderRelocationEntry,
   runWorktreePicker,
   type SwitchExecutor,
@@ -150,8 +153,19 @@ function createSwitchExecutor(ctx: ExtensionCommandContext): SwitchExecutor {
   };
 }
 
+/** Where the extension reads and writes its machine-local recovery state. */
+export interface WorktrunkOptions {
+  /** Directory holding the recovery state file; defaults to the Pi agent dir. */
+  stateDir?: string;
+}
+
 /** Register `/wt` against an injected Worktrunk CLI executor. */
-export function registerWorktrunk(pi: ExtensionAPI, executor: WtExecutor): void {
+export function registerWorktrunk(
+  pi: ExtensionAPI,
+  executor: WtExecutor,
+  options: WorktrunkOptions = {},
+): void {
+  const stateDir = options.stateDir ?? getAgentDir();
   let switchInProgress = false;
   pi.registerCommand("wt", {
     description: "Pick a Worktrunk worktree for this session",
@@ -166,18 +180,26 @@ export function registerWorktrunk(pi: ExtensionAPI, executor: WtExecutor): void 
       }
       switchInProgress = true;
       try {
-        await runWorktreePicker(executor, createSwitchExecutor(ctx), {
-          cwd: ctx.cwd,
-          notify: (message, type) => ctx.ui.notify(message, type),
-          selectWorktree: (worktrees) => pickWorktree(ctx, worktrees),
-          withLoader: (label, run) => runWithLoader(ctx, label, run),
-          chooseBusyAction: () => chooseBusyAction(ctx),
-          confirmDirty: (branch) =>
-            ctx.ui.confirm(
-              "Uncommitted changes",
-              `${branch} has uncommitted changes. Switch anyway? Your changes stay in the current worktree.`,
-            ),
-        });
+        await runWorktreePicker(
+          executor,
+          createSwitchExecutor(ctx),
+          {
+            cwd: ctx.cwd,
+            notify: (message, type) => ctx.ui.notify(message, type),
+            selectWorktree: (worktrees) => pickWorktree(ctx, worktrees),
+            withLoader: (label, run) => runWithLoader(ctx, label, run),
+            chooseBusyAction: () => chooseBusyAction(ctx),
+            confirmDirty: (branch) =>
+              ctx.ui.confirm(
+                "Uncommitted changes",
+                `${branch} has uncommitted changes. Switch anyway? Your changes stay in the current worktree.`,
+              ),
+          },
+          {
+            cwdExists: existsSync(ctx.cwd),
+            recoveryWorktree: readRecoveryWorktree(stateDir, ctx.sessionManager.getSessionId()),
+          },
+        );
       } finally {
         switchInProgress = false;
       }
@@ -192,6 +214,12 @@ export function registerWorktrunk(pi: ExtensionAPI, executor: WtExecutor): void 
   // session. It rides the nextTurn queue, so it is delivered with the next
   // prompt after that prompt's compaction check, without starting a turn.
   pi.on("session_start", async (event, ctx) => {
+    // Recovery is durable local state: record this session's main checkout
+    // before the session cwd can be deleted elsewhere. Best effort, never
+    // blocks startup. Keyed by session so sessions in other repositories do
+    // not overwrite it.
+    await recordRecoveryWorktree(executor, stateDir, ctx.sessionManager.getSessionId(), ctx.cwd);
+
     // A reload reuses the same AgentSession, which still holds any undelivered
     // nextTurn message; re-enqueueing here would duplicate it.
     if (event.reason === "reload") return;

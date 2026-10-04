@@ -23,6 +23,7 @@ import {
   type RelocatedSession,
   type RelocationDelivery,
   type RelocationRecord,
+  readRecoveryWorktree,
   renderRelocationEntry,
   runWorktreePicker,
   type SwitchExecutor,
@@ -30,6 +31,7 @@ import {
   type WorktrunkUi,
   type WtExecutor,
   type WtResult,
+  writeRecoveryWorktree,
 } from "./worktrunk.ts";
 
 const SCHEMA_2_LIST = JSON.stringify({
@@ -101,6 +103,19 @@ const CLEAN_CHANGES = {
   conflicted: false,
 };
 
+/** A minimal `wt list` whose only row is the main checkout at `path`. */
+function mainWorktreeList(path: string): string {
+  return JSON.stringify({
+    schema: 2,
+    items: [
+      {
+        branch: "main",
+        worktree: { path, main: true, current: true, changes: CLEAN_CHANGES },
+      },
+    ],
+  });
+}
+
 let tempDir: string;
 let sessionDir: string;
 
@@ -141,7 +156,9 @@ function commandExecutor(
     calls,
     executor: async (args, cwd) => {
       calls.push({ args, cwd });
-      if (args[0] === "list") return { exitCode: 0, stdout: list, stderr: "" };
+      if (args.includes("list")) {
+        return { exitCode: 0, stdout: list, stderr: "" };
+      }
       return switchResult;
     },
   };
@@ -233,6 +250,11 @@ async function dispatchSessionStart(
     sessionStartContext(cwd, sessionManager, notifications),
   );
   return notifications;
+}
+
+/** The slice of SessionManager the handlers touch for a fixed session id. */
+function stubSessionManager(sessionId: string): unknown {
+  return { getSessionId: () => sessionId, getBranch: () => [] };
 }
 
 function captureUi(
@@ -1552,9 +1574,11 @@ describe("renderRelocationEntry", () => {
 });
 
 /** Register the extension against the seam and return it. */
-function registeredExtension(overrides?: { sendMessageError?: Error }) {
+function registeredExtension(overrides?: { sendMessageError?: Error; stateDir?: string }) {
   const seam = fakePi(overrides);
-  registerWorktrunk(seam.pi, async () => ({ exitCode: 0, stdout: SCHEMA_2_LIST, stderr: "" }));
+  registerWorktrunk(seam.pi, async () => ({ exitCode: 0, stdout: SCHEMA_2_LIST, stderr: "" }), {
+    stateDir: overrides?.stateDir ?? tempDir,
+  });
   return seam;
 }
 
@@ -1760,7 +1784,8 @@ describe("worktrunk extension", () => {
       if (pickerFails) custom.mockRejectedValueOnce(new Error("picker failed"));
       const ctx = {
         mode: "tui",
-        cwd: "/repo",
+        cwd: tempDir,
+        sessionManager: stubSessionManager("session-a"),
         ui: {
           custom,
           notify: (message: string, type: Notification["type"]) => {
@@ -1840,5 +1865,442 @@ describe("worktrunk extension", () => {
     expect(sentMessages[0]?.message.display).toBe(false);
     expect(sentMessages[0]?.message.details).toEqual({ relocationId: recordEntry.id });
     expect(sentMessages[0]?.options).toEqual({ deliverAs: "nextTurn" });
+  });
+});
+
+describe("recovery state", () => {
+  it("writes and reads the recorded main checkout path", () => {
+    const stateDir = path.join(tempDir, "agent-state");
+
+    writeRecoveryWorktree(stateDir, "session-a", "/repo/main");
+
+    expect(readRecoveryWorktree(stateDir, "session-a")).toBe("/repo/main");
+  });
+
+  it("keeps each session's recovery worktree separate", () => {
+    const stateDir = path.join(tempDir, "agent-state");
+
+    writeRecoveryWorktree(stateDir, "session-a", "/repo-a");
+    writeRecoveryWorktree(stateDir, "session-b", "/repo-b");
+
+    expect(readRecoveryWorktree(stateDir, "session-a")).toBe("/repo-a");
+    expect(readRecoveryWorktree(stateDir, "session-b")).toBe("/repo-b");
+    expect(readRecoveryWorktree(stateDir, "session-c")).toBeNull();
+  });
+
+  it("stores each session's recovery worktree in its own state file", () => {
+    const stateDir = path.join(tempDir, "agent-state");
+    const stateFile = (sessionId: string) =>
+      JSON.parse(
+        fs.readFileSync(path.join(stateDir, "worktrunk-recovery", `${sessionId}.json`), "utf8"),
+      );
+
+    // Concurrent session starts must not read-modify-write one shared file: a
+    // lost update would leave a session with no recovery worktree, so a later
+    // deletion of its cwd could not be recovered.
+    writeRecoveryWorktree(stateDir, "session-a", "/repo-a");
+    writeRecoveryWorktree(stateDir, "session-b", "/repo-b");
+
+    expect(stateFile("session-a")).toEqual({ worktree: "/repo-a" });
+    expect(stateFile("session-b")).toEqual({ worktree: "/repo-b" });
+  });
+
+  it("returns nothing when no recovery state has been written", () => {
+    expect(readRecoveryWorktree(path.join(tempDir, "empty-state"), "session-a")).toBeNull();
+  });
+
+  it("keeps a session id with path separators inside the state directory", () => {
+    const stateDir = path.join(tempDir, "agent-state");
+    const sessionId = "../../escaped";
+
+    writeRecoveryWorktree(stateDir, sessionId, "/repo/main");
+
+    expect(readRecoveryWorktree(stateDir, sessionId)).toBe("/repo/main");
+    expect(fs.readdirSync(path.join(stateDir, "worktrunk-recovery"))).toHaveLength(1);
+    expect(fs.existsSync(path.join(tempDir, "escaped.json"))).toBe(false);
+  });
+
+  it("returns nothing when the recovery state file is malformed", () => {
+    const stateDir = path.join(tempDir, "broken-state");
+    const file = path.join(stateDir, "worktrunk-recovery", "session-a.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "{ not json");
+
+    expect(readRecoveryWorktree(stateDir, "session-a")).toBeNull();
+  });
+
+  it("returns nothing when the recovery state lacks a worktree path", () => {
+    const stateDir = path.join(tempDir, "partial-state");
+    const file = path.join(stateDir, "worktrunk-recovery", "session-a.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ other: 1 }));
+
+    expect(readRecoveryWorktree(stateDir, "session-a")).toBeNull();
+  });
+});
+
+describe("session_start recovery recording", () => {
+  it("records the repository's main checkout", async () => {
+    const { sessionStartHandlers } = registeredExtension();
+
+    await dispatchSessionStart(
+      sessionStartHandlers[0]!,
+      "startup",
+      "/repo",
+      stubSessionManager("session-a"),
+    );
+
+    expect(readRecoveryWorktree(tempDir, "session-a")).toBe("/repo");
+  });
+
+  it("records the main checkout even when the session starts in a linked worktree", async () => {
+    const { sessionStartHandlers } = registeredExtension();
+
+    await dispatchSessionStart(
+      sessionStartHandlers[0]!,
+      "resume",
+      "/repo.feature-api",
+      stubSessionManager("session-a"),
+    );
+
+    expect(readRecoveryWorktree(tempDir, "session-a")).toBe("/repo");
+  });
+
+  it("does not overwrite another session's recorded worktree", async () => {
+    const seam = fakePi();
+    registerWorktrunk(
+      seam.pi,
+      async (_args, cwd) => ({
+        exitCode: 0,
+        stdout: mainWorktreeList(cwd),
+        stderr: "",
+      }),
+      { stateDir: tempDir },
+    );
+
+    await dispatchSessionStart(
+      seam.sessionStartHandlers[0]!,
+      "startup",
+      "/repo-a",
+      stubSessionManager("session-a"),
+    );
+    await dispatchSessionStart(
+      seam.sessionStartHandlers[0]!,
+      "startup",
+      "/repo-b",
+      stubSessionManager("session-b"),
+    );
+
+    expect(readRecoveryWorktree(tempDir, "session-a")).toBe("/repo-a");
+    expect(readRecoveryWorktree(tempDir, "session-b")).toBe("/repo-b");
+  });
+
+  it("leaves the previous recovery worktree untouched when wt list fails", async () => {
+    writeRecoveryWorktree(tempDir, "session-a", "/repo/previous-main");
+    const seam = fakePi();
+    registerWorktrunk(
+      seam.pi,
+      async () => ({ exitCode: null, stdout: "", stderr: "spawn wt ENOENT" }),
+      { stateDir: tempDir },
+    );
+
+    await dispatchSessionStart(
+      seam.sessionStartHandlers[0]!,
+      "startup",
+      "/repo",
+      stubSessionManager("session-a"),
+    );
+
+    expect(readRecoveryWorktree(tempDir, "session-a")).toBe("/repo/previous-main");
+  });
+
+  it("does not notify when recovery recording fails", async () => {
+    const seam = fakePi();
+    registerWorktrunk(
+      seam.pi,
+      async () => ({ exitCode: 1, stdout: "", stderr: "fatal: not a git repository" }),
+      { stateDir: tempDir },
+    );
+
+    const notifications = await dispatchSessionStart(
+      seam.sessionStartHandlers[0]!,
+      "startup",
+      "/repo",
+      stubSessionManager("session-a"),
+    );
+
+    expect(notifications).toEqual([]);
+  });
+});
+
+describe("runWorktreePicker recovery", () => {
+  const clean = {
+    staged: false,
+    modified: false,
+    untracked: false,
+    renamed: false,
+    deleted: false,
+    conflicted: false,
+  };
+
+  function switchOutput(targetPath: string, branch: string): WtResult {
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({ action: "existing", branch, path: targetPath }),
+      stderr: "",
+    };
+  }
+
+  function listOutput(recovery: string): string {
+    return JSON.stringify({
+      schema: 2,
+      items: [
+        {
+          branch: "main",
+          worktree: { path: recovery, main: true, current: true, changes: clean },
+        },
+        { branch: "feature", worktree: { path: "/repo.feature", changes: clean } },
+      ],
+    });
+  }
+
+  it("runs wt with -C against the recovery worktree and completes relocation when the session cwd is gone", async () => {
+    const recovery = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "recovery-")));
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+    const deadCwd = path.join(tempDir, "deleted");
+    const { executor, calls } = commandExecutor(switchOutput(target, "main"));
+    const { ui, notifications } = captureUi(
+      (choices) => choices.find((worktree) => worktree.branch === "main") ?? null,
+      { cwd: deadCwd },
+    );
+    const switchExecutor = fakeSwitchExecutor();
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui, {
+      cwdExists: false,
+      recoveryWorktree: recovery,
+    });
+
+    expect(calls).toEqual([
+      { args: ["-C", recovery, "list", "--format=json"], cwd: recovery },
+      { args: ["-C", recovery, "switch", "main", "--no-cd", "--format=json"], cwd: recovery },
+    ]);
+    expect(notifications).toEqual([]);
+    expect(switchExecutor.preparedPaths).toEqual([target]);
+    expect(switchExecutor.preparedRecords[0]).toMatchObject({
+      branch: "main",
+      sourcePath: deadCwd,
+      targetPath: target,
+    });
+    expect(switchExecutor.switches).toHaveLength(1);
+  });
+
+  it("still relocates when the recovery-relative current worktree is selected", async () => {
+    const recovery = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "recovery-")));
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+    const deadCwd = path.join(tempDir, "deleted");
+    const { executor, calls } = commandExecutor(switchOutput(target, "main"), listOutput(recovery));
+    const { ui, notifications } = captureUi(
+      (choices) => choices.find((worktree) => worktree.current) ?? null,
+      { cwd: deadCwd },
+    );
+    const switchExecutor = fakeSwitchExecutor();
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui, {
+      cwdExists: false,
+      recoveryWorktree: recovery,
+    });
+
+    expect(notifications).toEqual([]);
+    expect(calls.at(-1)).toEqual({
+      args: ["-C", recovery, "switch", "main", "--no-cd", "--format=json"],
+      cwd: recovery,
+    });
+    expect(switchExecutor.preparedPaths).toEqual([target]);
+  });
+
+  it("does not confirm dirty changes in the recovery anchor", async () => {
+    const recovery = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "recovery-")));
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "target-")));
+    const deadCwd = path.join(tempDir, "deleted");
+    const list = JSON.stringify({
+      schema: 2,
+      items: [
+        {
+          branch: "main",
+          worktree: {
+            path: recovery,
+            main: true,
+            current: true,
+            changes: { ...clean, modified: true },
+          },
+        },
+        { branch: "feature", worktree: { path: "/repo.feature", changes: clean } },
+      ],
+    });
+    const { executor } = commandExecutor(switchOutput(target, "feature"), list);
+    const { ui, dirtyConfirms } = captureUi(
+      (choices) => choices.find((worktree) => worktree.branch === "feature") ?? null,
+      { cwd: deadCwd },
+    );
+    const switchExecutor = fakeSwitchExecutor();
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui, {
+      cwdExists: false,
+      recoveryWorktree: recovery,
+    });
+
+    expect(dirtyConfirms).toEqual([]);
+    expect(switchExecutor.switches).toHaveLength(1);
+  });
+
+  it("notifies cleanly when the session cwd is gone and no recovery worktree is recorded", async () => {
+    const deadCwd = path.join(tempDir, "deleted");
+    const { executor, calls } = scriptedExecutor({
+      exitCode: 0,
+      stdout: SCHEMA_2_LIST,
+      stderr: "",
+    });
+    const { ui, notifications, selections } = captureUi(() => null, { cwd: deadCwd });
+    const switchExecutor = fakeSwitchExecutor();
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui, {
+      cwdExists: false,
+      recoveryWorktree: null,
+    });
+
+    expect(calls).toEqual([]);
+    expect(selections).toEqual([]);
+    expect(switchExecutor.switches).toEqual([]);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.type).toBe("error");
+    expect(notifications[0]?.message).toContain(deadCwd);
+    expect(notifications[0]?.message).toMatch(/recovery worktree/i);
+  });
+
+  it("notifies cleanly when the recorded recovery worktree itself is gone", async () => {
+    const deadCwd = path.join(tempDir, "deleted");
+    const goneRecovery = path.join(tempDir, "gone-recovery");
+    const { executor, calls } = scriptedExecutor({
+      exitCode: 0,
+      stdout: SCHEMA_2_LIST,
+      stderr: "",
+    });
+    const { ui, notifications } = captureUi(() => null, { cwd: deadCwd });
+    const switchExecutor = fakeSwitchExecutor();
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui, {
+      cwdExists: false,
+      recoveryWorktree: goneRecovery,
+    });
+
+    expect(calls).toEqual([]);
+    expect(switchExecutor.switches).toEqual([]);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.type).toBe("error");
+    expect(notifications[0]?.message).toContain(goneRecovery);
+  });
+});
+
+describe("/wt recovery fallback", () => {
+  it("lists from the recorded recovery worktree when the session cwd is gone", async () => {
+    const recovery = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "recovery-")));
+    const deadCwd = path.join(tempDir, "deleted");
+    writeRecoveryWorktree(tempDir, "session-a", recovery);
+    const { pi, commandHandlers } = fakePi();
+    const calls: Array<{ args: readonly string[]; cwd: string }> = [];
+    registerWorktrunk(
+      pi,
+      async (args, cwd) => {
+        calls.push({ args, cwd });
+        return { exitCode: 0, stdout: SCHEMA_2_LIST, stderr: "" };
+      },
+      { stateDir: tempDir },
+    );
+    const notifications: Notification[] = [];
+    const ctx = {
+      mode: "tui",
+      cwd: deadCwd,
+      sessionManager: stubSessionManager("session-a"),
+      ui: {
+        custom: vi.fn().mockResolvedValue(null),
+        notify: (message: string, type: Notification["type"]) => {
+          notifications.push({ message, type });
+        },
+      },
+    } as unknown as ExtensionCommandContext;
+
+    await commandHandlers.get("wt")!("", ctx);
+
+    expect(calls).toEqual([{ args: ["-C", recovery, "list", "--format=json"], cwd: recovery }]);
+    expect(notifications).toEqual([]);
+  });
+
+  it("notifies cleanly when the session cwd is gone and no recovery worktree is recorded", async () => {
+    const deadCwd = path.join(tempDir, "deleted");
+    const { pi, commandHandlers } = fakePi();
+    const calls: Array<{ args: readonly string[]; cwd: string }> = [];
+    registerWorktrunk(
+      pi,
+      async (args, cwd) => {
+        calls.push({ args, cwd });
+        return { exitCode: 0, stdout: SCHEMA_2_LIST, stderr: "" };
+      },
+      { stateDir: tempDir },
+    );
+    const notifications: Notification[] = [];
+    const ctx = {
+      mode: "tui",
+      cwd: deadCwd,
+      sessionManager: stubSessionManager("session-a"),
+      ui: {
+        custom: vi.fn(),
+        notify: (message: string, type: Notification["type"]) => {
+          notifications.push({ message, type });
+        },
+      },
+    } as unknown as ExtensionCommandContext;
+
+    await commandHandlers.get("wt")!("", ctx);
+
+    expect(calls).toEqual([]);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.type).toBe("error");
+    expect(notifications[0]?.message).toContain(deadCwd);
+  });
+
+  it("does not fall back to another session's recovery worktree", async () => {
+    const otherRepoRecovery = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "other-repo-")));
+    const deadCwd = path.join(tempDir, "deleted");
+    writeRecoveryWorktree(tempDir, "session-b", otherRepoRecovery);
+    const { pi, commandHandlers } = fakePi();
+    const calls: Array<{ args: readonly string[]; cwd: string }> = [];
+    registerWorktrunk(
+      pi,
+      async (args, cwd) => {
+        calls.push({ args, cwd });
+        return { exitCode: 0, stdout: SCHEMA_2_LIST, stderr: "" };
+      },
+      { stateDir: tempDir },
+    );
+    const notifications: Notification[] = [];
+    const ctx = {
+      mode: "tui",
+      cwd: deadCwd,
+      sessionManager: stubSessionManager("session-a"),
+      ui: {
+        custom: vi.fn(),
+        notify: (message: string, type: Notification["type"]) => {
+          notifications.push({ message, type });
+        },
+      },
+    } as unknown as ExtensionCommandContext;
+
+    await commandHandlers.get("wt")!("", ctx);
+
+    expect(calls).toEqual([]);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.type).toBe("error");
+    expect(notifications[0]?.message).toContain(deadCwd);
+    expect(notifications[0]?.message).toMatch(/no recovery worktree/i);
   });
 });

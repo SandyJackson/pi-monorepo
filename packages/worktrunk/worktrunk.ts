@@ -1,6 +1,15 @@
 import { spawn } from "node:child_process";
-import { realpathSync, statSync, writeFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import type {
   CustomEntry,
   EntryRenderOptions,
@@ -350,6 +359,70 @@ function failureDetail(result: WtResult): string {
   return parts.length > 0 ? parts.join("\n") : "no output";
 }
 
+/** Directory holding one recovery state file per session under the agent dir. */
+const RECOVERY_STATE_DIR = "worktrunk-recovery";
+
+/** Path of the state file recording one session's main checkout. Recovery is
+ * one file per session: a shared file needs a coordinated read-modify-write,
+ * and a concurrent session start could drop another session's entry, stranding
+ * it when its worktree is deleted. The id is encoded because a session loaded
+ * from a crafted file can carry path separators. */
+function recoveryStatePath(stateDir: string, sessionId: string): string {
+  return join(stateDir, RECOVERY_STATE_DIR, `${encodeURIComponent(sessionId)}.json`);
+}
+
+/**
+ * Read the recovery worktree recorded for one session, or null when the state
+ * is missing, malformed, or has no worktree. A missing recovery never blocks
+ * startup.
+ */
+export function readRecoveryWorktree(stateDir: string, sessionId: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(recoveryStatePath(stateDir, sessionId), "utf8"));
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || typeof parsed.worktree !== "string" || parsed.worktree.length === 0) {
+    return null;
+  }
+  return parsed.worktree;
+}
+
+/** Persist one session's main checkout so its deleted worktree can be recovered
+ * from. Each session owns its file, so concurrent session starts cannot discard
+ * each other's entry; the unique temporary and rename keep readers from seeing
+ * a partial write. */
+export function writeRecoveryWorktree(stateDir: string, sessionId: string, worktree: string): void {
+  const file = recoveryStatePath(stateDir, sessionId);
+  mkdirSync(dirname(file), { recursive: true });
+  const temp = `${file}.${randomUUID()}.tmp`;
+  writeFileSync(temp, JSON.stringify({ worktree }), { mode: 0o600 });
+  renameSync(temp, file);
+}
+
+/**
+ * Record the repository's main checkout for recovery. Best effort: a missing
+ * `wt`, a non-repository cwd, or malformed output leaves the saved state alone
+ * and never interrupts session startup.
+ */
+export async function recordRecoveryWorktree(
+  executor: WtExecutor,
+  stateDir: string,
+  sessionId: string,
+  cwd: string,
+): Promise<void> {
+  const listed = await listWorktrees(executor, cwd);
+  if (!listed.ok) return;
+  const main = listed.worktrees.find((worktree) => worktree.main);
+  if (!main) return;
+  try {
+    writeRecoveryWorktree(stateDir, sessionId, main.path);
+  } catch {
+    // Recovery is convenience state; a write failure must not break startup.
+  }
+}
+
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -563,13 +636,63 @@ function canonicalWorktreePath(reported: string): string {
   return resolved;
 }
 
+/** Where `/wt` runs Worktrunk for one session: the live session cwd, or the
+ * recorded main checkout when the session cwd has been deleted elsewhere. */
+interface WtContext {
+  cwd: string;
+  recovery: boolean;
+}
+
+/** Filesystem facts the picker needs to choose where Worktrunk runs. The
+ * caller supplies them from the real session cwd; the picker itself is
+ * filesystem-free apart from validating the recovery worktree. */
+export interface WtSwitchContext {
+  /** Whether the session cwd still exists on disk. */
+  cwdExists: boolean;
+  /** Main checkout recorded at session start, used when the cwd is gone. */
+  recoveryWorktree: string | null;
+}
+
+const LIVE_SWITCH_CONTEXT: WtSwitchContext = { cwdExists: true, recoveryWorktree: null };
+
+/** Resolve the directory Worktrunk runs from; null when neither the session cwd
+ * nor a usable recovery worktree exists. */
+function resolveWtContext(cwd: string, context: WtSwitchContext): WtContext | null {
+  if (context.cwdExists) return { cwd, recovery: false };
+  if (context.recoveryWorktree && existsSync(context.recoveryWorktree)) {
+    return { cwd: context.recoveryWorktree, recovery: true };
+  }
+  return null;
+}
+
+/** Bind the executor to the resolved context. Recovery runs every command from
+ * the recovery worktree with `-C`, because the session cwd is gone. */
+function bindWtContext(executor: WtExecutor, context: WtContext): WtExecutor {
+  return (args) =>
+    executor(context.recovery ? ["-C", context.cwd, ...args] : [...args], context.cwd);
+}
+
 /** `/wt`: list worktrees, let the user pick one, and relocate into it. */
 export async function runWorktreePicker(
   executor: WtExecutor,
   switchExecutor: SwitchExecutor,
   ui: WorktrunkUi,
+  switchContext: WtSwitchContext = LIVE_SWITCH_CONTEXT,
 ): Promise<void> {
-  const listed = await listWorktrees(executor, ui.cwd);
+  const context = resolveWtContext(ui.cwd, switchContext);
+  if (!context) {
+    const recoveryDetail = switchContext.recoveryWorktree
+      ? `the recorded recovery worktree ${switchContext.recoveryWorktree} is gone`
+      : "no recovery worktree is recorded";
+    ui.notify(
+      `Cannot switch: the session worktree ${ui.cwd} no longer exists and ${recoveryDetail}.`,
+      "error",
+    );
+    return;
+  }
+  const wt = bindWtContext(executor, context);
+
+  const listed = await listWorktrees(wt, context.cwd);
   if (!listed.ok) {
     ui.notify(listed.message, "error");
     return;
@@ -586,17 +709,19 @@ export async function runWorktreePicker(
     return;
   }
 
-  if (choice.kind === "worktree" && choice.worktree.current) {
+  // Worktrunk marks the recovery worktree current because it ran with `-C`;
+  // the session is not actually there, so selecting it must still relocate.
+  if (!context.recovery && choice.kind === "worktree" && choice.worktree.current) {
     ui.notify(`Already in ${branchName(choice.worktree)}.`, "info");
     return;
   }
 
-  if (!(await confirmSwitchGates(executor, switchExecutor, ui))) {
+  if (!(await confirmSwitchGates(wt, switchExecutor, ui, context))) {
     return;
   }
 
   const request = switchRequest(choice);
-  await relocateToWorktree(executor, switchExecutor, ui, request.branch, request.args);
+  await relocateToWorktree(wt, switchExecutor, ui, request.branch, request.args);
 }
 
 /** The branch to report and the argv `wt switch` receives for one picker choice. */
@@ -641,9 +766,10 @@ async function listWorktrees(executor: WtExecutor, cwd: string): Promise<ListWor
 /** Read dirty state only after the run stops, including after an approved abort.
  * Cancelling prevents switching but does not undo an already approved abort. */
 async function confirmSwitchGates(
-  executor: WtExecutor,
+  wt: WtExecutor,
   switchExecutor: SwitchExecutor,
   ui: WorktrunkUi,
+  context: WtContext,
 ): Promise<boolean> {
   let busyAction: BusyAction | null = null;
   if (switchExecutor.isBusy()) {
@@ -656,7 +782,11 @@ async function confirmSwitchGates(
   }
   await switchExecutor.waitForIdle();
 
-  const listed = await listWorktrees(executor, ui.cwd);
+  // The session did not occupy the recovery anchor, so there is no source
+  // worktree whose uncommitted changes could be left behind.
+  if (context.recovery) return true;
+
+  const listed = await listWorktrees(wt, context.cwd);
   if (!listed.ok) {
     ui.notify(listed.message, "error");
     return false;
