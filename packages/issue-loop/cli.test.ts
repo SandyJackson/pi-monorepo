@@ -422,9 +422,11 @@ it("rejects an empty queue rather than claiming the parent is complete", () => {
 }, 30_000);
 
 it("stops a timed-out check instead of launching repair workers", () => {
-  const f = fixture();
   const check = `${JSON.stringify(process.execPath)} -e "setInterval(() => {}, 1000)"`;
-  const result = f.run(
+  // The CLI floors --timeout at 300s. Block before the check with a failing
+  // worker, then lower the snapshotted budget so the timeout path runs fast.
+  const f = fixture("fail");
+  const first = f.run(
     "start",
     "--repo",
     f.repo,
@@ -433,13 +435,20 @@ it("stops a timed-out check instead of launching repair workers", () => {
     "--check",
     check,
     "--timeout",
-    "1",
+    "300",
   );
+  expect(first.status).toBe(1);
+  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+  const statePath = join(runDir, "state.json");
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  state.timeoutMs = 1000;
+  writeFileSync(statePath, JSON.stringify(state));
+  f.env.FIXTURE_MODE = "pass";
+  const result = f.run("resume", runDir);
   expect(result.status).toBe(1);
-  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(state.sessions).toHaveLength(1);
-  expect(state.lastError).toContain("Timed out");
+  const blocked = JSON.parse(readFileSync(statePath, "utf8"));
+  expect(blocked.sessions).toHaveLength(1);
+  expect(blocked.lastError).toContain("Timed out");
 }, 30_000);
 
 it("rechecks manual edits made after a publication failure", () => {
