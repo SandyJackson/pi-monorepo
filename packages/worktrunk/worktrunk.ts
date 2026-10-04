@@ -203,11 +203,16 @@ export type WorktrunkNotifyType = "info" | "warning" | "error";
 /** What to do about an agent that is still streaming when `/wt` is invoked. */
 export type BusyAction = "wait" | "abort";
 
+/** A picker outcome: switch to an existing worktree, or create a new branch. */
+export type PickerChoice =
+  | { kind: "worktree"; worktree: Worktree }
+  | { kind: "create"; branch: string };
+
 /** UI surface `/wt` needs; `index.ts` supplies the components, tests inject a fake. */
 export interface WorktrunkUi {
   cwd: string;
   notify(message: string, type: WorktrunkNotifyType): void;
-  selectWorktree(worktrees: readonly Worktree[]): Promise<Worktree | null>;
+  selectWorktree(worktrees: readonly Worktree[]): Promise<PickerChoice | null>;
   /** Run one step under a loader that offers no cancel affordance. */
   withLoader<T>(label: string, run: () => Promise<T>): Promise<T>;
   /** Ask what to do about a running agent; null when the dialog is dismissed. */
@@ -581,9 +586,8 @@ export async function runWorktreePicker(
     return;
   }
 
-  const branch = branchName(choice);
-  if (choice.current) {
-    ui.notify(`Already in ${branch}.`, "info");
+  if (choice.kind === "worktree" && choice.worktree.current) {
+    ui.notify(`Already in ${branchName(choice.worktree)}.`, "info");
     return;
   }
 
@@ -591,7 +595,22 @@ export async function runWorktreePicker(
     return;
   }
 
-  await relocateToWorktree(executor, switchExecutor, ui, branch, choice.branch ?? choice.path);
+  const request = switchRequest(choice);
+  await relocateToWorktree(executor, switchExecutor, ui, request.branch, request.args);
+}
+
+/** The branch to report and the argv `wt switch` receives for one picker choice. */
+function switchRequest(choice: PickerChoice): { branch: string; args: string[] } {
+  if (choice.kind === "create") {
+    return {
+      branch: choice.branch,
+      args: ["--create", choice.branch, "--no-cd", "--format=json"],
+    };
+  }
+  return {
+    branch: branchName(choice.worktree),
+    args: [choice.worktree.branch ?? choice.worktree.path, "--no-cd", "--format=json"],
+  };
 }
 
 type ListWorktreesResult = { ok: true; worktrees: Worktree[] } | { ok: false; message: string };
@@ -673,7 +692,7 @@ async function relocateToWorktree(
   switchExecutor: SwitchExecutor,
   ui: WorktrunkUi,
   branch: string,
-  target: string,
+  switchArgs: readonly string[],
 ): Promise<void> {
   if (cancelIfBusy(switchExecutor, ui)) return;
 
@@ -681,7 +700,7 @@ async function relocateToWorktree(
   try {
     result = await ui.withLoader(`Switching to ${branch}…`, async () => {
       if (cancelIfBusy(switchExecutor, ui)) return null;
-      return executor(["switch", target, "--no-cd", "--format=json"], ui.cwd);
+      return executor(["switch", ...switchArgs], ui.cwd);
     });
   } catch (error) {
     ui.notify(`wt switch failed: ${errorMessage(error)}`, "error");

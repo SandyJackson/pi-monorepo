@@ -14,6 +14,7 @@ import {
   type BusyAction,
   buildWorktreeRows,
   findUndeliveredRelocation,
+  type PickerChoice,
   type PickerColor,
   parseWorktreeList,
   parseWorktreeSwitch,
@@ -128,7 +129,10 @@ function scriptedExecutor(result: WtResult): {
 }
 
 /** Same as `scriptedExecutor`, but answers `wt list` and `wt switch` separately. */
-function commandExecutor(switchResult: WtResult): {
+function commandExecutor(
+  switchResult: WtResult,
+  list: string = SCHEMA_2_LIST,
+): {
   executor: WtExecutor;
   calls: Array<{ args: readonly string[]; cwd: string }>;
 } {
@@ -137,7 +141,7 @@ function commandExecutor(switchResult: WtResult): {
     calls,
     executor: async (args, cwd) => {
       calls.push({ args, cwd });
-      if (args[0] === "list") return { exitCode: 0, stdout: SCHEMA_2_LIST, stderr: "" };
+      if (args[0] === "list") return { exitCode: 0, stdout: list, stderr: "" };
       return switchResult;
     },
   };
@@ -232,7 +236,7 @@ async function dispatchSessionStart(
 }
 
 function captureUi(
-  choose: (worktrees: Worktree[]) => Worktree | null,
+  choose: (worktrees: Worktree[]) => Worktree | PickerChoice | null,
   options: {
     cwd?: string;
     busyAction?: BusyAction | null;
@@ -252,7 +256,9 @@ function captureUi(
     notify: (message, type) => notifications.push({ message, type }),
     selectWorktree: async (worktrees) => {
       selections.push([...worktrees]);
-      return choose([...worktrees]);
+      const chosen = choose([...worktrees]);
+      if (chosen && !("kind" in chosen)) return { kind: "worktree", worktree: chosen };
+      return chosen;
     },
     withLoader: async (label, run) => {
       loaders.push(label);
@@ -276,6 +282,7 @@ function captureUi(
 interface FakeSwitch {
   executor: SwitchExecutor;
   preparedPaths: string[];
+  preparedRecords: RelocationRecord[];
   switches: SwitchRecord[];
   events: string[];
 }
@@ -289,11 +296,13 @@ function fakeSwitchExecutor(overrides?: {
   events?: string[];
 }): FakeSwitch {
   const preparedPaths: string[] = [];
+  const preparedRecords: RelocationRecord[] = [];
   const switches: SwitchRecord[] = [];
   const events = overrides?.events ?? [];
   let busy = overrides?.busy ?? false;
   return {
     preparedPaths,
+    preparedRecords,
     switches,
     events,
     executor: {
@@ -308,6 +317,7 @@ function fakeSwitchExecutor(overrides?: {
       prepare: (targetPath, record) => {
         events.push("prepare");
         preparedPaths.push(targetPath);
+        preparedRecords.push(record);
         if (overrides?.prepareFn) return overrides.prepareFn(targetPath, record);
         if (overrides?.prepareError) throw overrides.prepareError;
         return overrides?.prepared ?? path.join(sessionDir, "prepared.jsonl");
@@ -1310,6 +1320,109 @@ describe("runWorktreePicker relocation", () => {
     expect(notifications).toHaveLength(1);
     expect(notifications[0]?.type).toBe("error");
     expect(notifications[0]?.message).toContain("spawn failed");
+  });
+});
+
+describe("runWorktreePicker creation", () => {
+  function createOutput(targetPath: string, branch: string): WtResult {
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({ action: "created", branch, path: targetPath }),
+      stderr: "",
+    };
+  }
+
+  /** A clean current worktree plus one sibling. */
+  function cleanList(): string {
+    return JSON.stringify({
+      schema: 2,
+      items: [
+        {
+          branch: "main",
+          worktree: { path: "/repo", main: true, current: true, changes: CLEAN_CHANGES },
+        },
+        { branch: "feature-api", worktree: { path: "/repo.feature-api", changes: null } },
+      ],
+    });
+  }
+
+  function createExecutor(switchResult: WtResult, list?: string) {
+    return commandExecutor(switchResult, list ?? cleanList());
+  }
+
+  it("creates a branch from the picker through the relocation path", async () => {
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "created-")));
+    const { executor, calls } = createExecutor(createOutput(target, "new-feature"));
+    const { ui, loaders } = captureUi(() => ({ kind: "create", branch: "new-feature" }));
+    const switchExecutor = fakeSwitchExecutor();
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+    expect(calls).toEqual([
+      { args: ["list", "--format=json"], cwd: "/repo" },
+      { args: ["list", "--format=json"], cwd: "/repo" },
+      { args: ["switch", "--create", "new-feature", "--no-cd", "--format=json"], cwd: "/repo" },
+    ]);
+    expect(loaders).toHaveLength(1);
+    expect(loaders[0]).toMatch(/new-feature/);
+    expect(switchExecutor.preparedPaths).toEqual([target]);
+    expect(switchExecutor.preparedRecords).toEqual([
+      {
+        branch: "new-feature",
+        sourcePath: "/repo",
+        targetPath: target,
+        note: expect.stringContaining(target),
+      },
+    ]);
+    expect(switchExecutor.switches).toHaveLength(1);
+  });
+
+  it("confirms dirty changes in the originating worktree before creating", async () => {
+    const target = fs.realpathSync(fs.mkdtempSync(path.join(tempDir, "created-")));
+    const dirtyList = JSON.stringify({
+      schema: 2,
+      items: [
+        {
+          branch: "main",
+          worktree: { path: "/repo", main: true, current: true, changes: { modified: true } },
+        },
+      ],
+    });
+    const { executor } = createExecutor(createOutput(target, "new-feature"), dirtyList);
+    const { ui, dirtyConfirms } = captureUi(() => ({ kind: "create", branch: "new-feature" }));
+    const switchExecutor = fakeSwitchExecutor();
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+    expect(dirtyConfirms).toEqual(["main"]);
+    expect(switchExecutor.switches).toHaveLength(1);
+  });
+
+  it("reports a failed creation verbatim and leaves the session untouched", async () => {
+    const { executor, calls } = createExecutor({
+      exitCode: 1,
+      stdout: "create stdout",
+      stderr: "branch already exists",
+    });
+    const { ui, notifications, loaders } = captureUi(() => ({
+      kind: "create",
+      branch: "new-feature",
+    }));
+    const switchExecutor = fakeSwitchExecutor();
+
+    await runWorktreePicker(executor, switchExecutor.executor, ui);
+
+    expect(loaders).toHaveLength(1);
+    expect(calls.at(-1)).toEqual({
+      args: ["switch", "--create", "new-feature", "--no-cd", "--format=json"],
+      cwd: "/repo",
+    });
+    expect(switchExecutor.preparedPaths).toEqual([]);
+    expect(switchExecutor.switches).toEqual([]);
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.type).toBe("error");
+    expect(notifications[0]?.message).toContain("branch already exists");
+    expect(notifications[0]?.message).toContain("create stdout");
   });
 });
 

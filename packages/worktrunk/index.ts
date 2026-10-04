@@ -1,12 +1,13 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { BorderedLoader, DynamicBorder } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, Text } from "@earendil-works/pi-tui";
+import { Container, Input, Key, matchesKey, SelectList, Text } from "@earendil-works/pi-tui";
 import {
   type BusyAction,
   buildWorktreeRows,
   createWtExecutor,
   errorMessage,
   findUndeliveredRelocation,
+  type PickerChoice,
   prepareTargetSession,
   RELOCATION_CUSTOM_TYPE,
   type RelocatedSession,
@@ -18,17 +19,13 @@ import {
   type WtExecutor,
 } from "./worktrunk.ts";
 
-/** Open the worktree picker and resolve to the chosen worktree, or null on cancel. */
+/** Open the worktree picker. Enter switches to a worktree; ctrl+n opens a branch-name input for a creation switch. */
 async function pickWorktree(
   ctx: ExtensionCommandContext,
   worktrees: readonly Worktree[],
-): Promise<Worktree | null> {
-  return ctx.ui.custom<Worktree | null>((tui, theme, _keybindings, done) => {
+): Promise<PickerChoice | null> {
+  return ctx.ui.custom<PickerChoice | null>((tui, theme, _keybindings, done) => {
     const byPath = new Map(worktrees.map((worktree) => [worktree.path, worktree]));
-    const container = new Container();
-    container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
-    container.addChild(new Text(theme.fg("accent", theme.bold("Worktrunk worktrees")), 1, 0));
-
     const rows = buildWorktreeRows(worktrees, theme);
     const selectList = new SelectList(rows, Math.min(rows.length, 10), {
       selectedPrefix: (text) => theme.fg("accent", text),
@@ -37,17 +34,66 @@ async function pickWorktree(
       scrollInfo: (text) => theme.fg("dim", text),
       noMatch: (text) => theme.fg("warning", text),
     });
-    selectList.onSelect = (item) => done(byPath.get(item.value) ?? null);
+    selectList.onSelect = (item) => {
+      const worktree = byPath.get(item.value);
+      if (worktree) done({ kind: "worktree", worktree });
+    };
     selectList.onCancel = () => done(null);
-    container.addChild(selectList);
-    container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel"), 1, 0));
-    container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 
+    const input = new Input();
+    let creating = false;
+    input.onSubmit = (value) => {
+      const branch = value.trim();
+      if (branch) done({ kind: "create", branch });
+    };
+    input.onEscape = () => {
+      creating = false;
+      input.setValue("");
+      tui.requestRender();
+    };
+
+    const border = (text: string) => theme.fg("accent", text);
+    function build(): Container {
+      const container = new Container();
+      container.addChild(new DynamicBorder(border));
+      container.addChild(new Text(theme.fg("accent", theme.bold("Worktrunk worktrees")), 1, 0));
+      if (creating) {
+        container.addChild(new Text(theme.fg("muted", "New branch name:"), 1, 0));
+        container.addChild(input);
+        container.addChild(new Text(theme.fg("dim", "enter create • esc back"), 1, 0));
+      } else {
+        container.addChild(selectList);
+        container.addChild(
+          new Text(
+            theme.fg("dim", "↑↓ navigate • enter select • ctrl+n new branch • esc cancel"),
+            1,
+            0,
+          ),
+        );
+      }
+      container.addChild(new DynamicBorder(border));
+      return container;
+    }
+
+    let focused = false;
     return {
-      render: (width) => container.render(width),
-      invalidate: () => container.invalidate(),
-      handleInput: (data) => {
-        selectList.handleInput(data);
+      get focused() {
+        return focused;
+      },
+      set focused(value: boolean) {
+        focused = value;
+        input.focused = value;
+      },
+      render: (width: number) => build().render(width),
+      invalidate: () => {},
+      handleInput: (data: string) => {
+        if (creating) {
+          input.handleInput(data);
+        } else if (matchesKey(data, Key.ctrl("n"))) {
+          creating = true;
+        } else {
+          selectList.handleInput(data);
+        }
         tui.requestRender();
       },
     };
