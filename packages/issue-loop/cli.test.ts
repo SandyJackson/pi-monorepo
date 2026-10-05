@@ -6,7 +6,13 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, expect, it, onTestFinished } from "vitest";
 import { gh, githubHostFromOrigin } from "./github.ts";
-import { loadLoopSettings } from "./settings.ts";
+import {
+  DEFAULT_DEADLINES,
+  DEFAULT_IMPLEMENT_TOOLS,
+  DEFAULT_REPAIR_ROUNDS,
+  DEFAULT_WATCHDOG,
+  loadLoopSettings,
+} from "./settings.ts";
 
 const roots: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -122,46 +128,101 @@ const fs = require('node:fs');
 const path = require('node:path');
 const args = process.argv.slice(2);
 const value = flag => args[args.indexOf(flag)+1];
-const name = value('--name');
+if (args.includes('--version')) { console.log(process.env.FIXTURE_PI_VERSION || '0.99.2'); process.exit(0); }
+const name = value('--name') || '';
 const session = value('--session');
-const prompt = fs.readFileSync(0, 'utf8');
-fs.writeFileSync(session, JSON.stringify({type:'session_info', name})+'\\n');
-fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'workers.jsonl'), JSON.stringify({name, session, args, prompt, cwd:process.cwd()})+'\\n');
-if (name.includes('implement')) {
- if (process.env.FIXTURE_MODE === 'signal-exit') process.kill(process.pid, 'SIGTERM');
- if (process.env.FIXTURE_MODE === 'replace-lock') {
+const out = record => process.stdout.write(JSON.stringify(record)+'\\n');
+const isParentReview = () => name.includes('parent review');
+function materialSeverity(body) {
+ const lower = String(body || '').toLowerCase();
+ if (lower.includes('[critical]')) return 'critical';
+ if (lower.includes('[major]')) return 'major';
+ return 'minor';
+}
+function reviewOutcome() {
+ const mode = process.env.FIXTURE_MODE;
+ if (mode === 'malformed') return 'PASS, probably.';
+ if (mode === 'legacy-review') return JSON.stringify({verdict:'pass', findings:[]});
+ if (mode === 'review-incomplete') return JSON.stringify({outcome:'incomplete', summary:'Not finished reviewing.', findings:[], remainingWork:'Need more evidence.'});
+ if (mode === 'reject' || (mode === 'parent-reject' && isParentReview()))
+  return JSON.stringify({outcome:'changes_requested', summary:'Missing acceptance criterion', findings:[{axis:'spec',severity:'major',location:'feature.txt',description:'Missing acceptance criterion'}]});
+ if (mode === 'blocked-review')
+  return JSON.stringify({outcome:'blocked', summary:'Cannot assess required behavior', findings:[], blockers:'Missing required environment'});
+ if (mode === 'pass-body') {
+  const body = process.env.FIXTURE_REVIEW_BODY || '';
+  const severity = materialSeverity(body);
+  return JSON.stringify({outcome:'pass', summary:'Looks good.', findings: body ? [{axis:'spec',severity,location:'review',description:body}] : []});
+ }
+ if (mode === 'pass-notes' || mode === 'comment-create-fail') {
+  const note = isParentReview() ? (process.env.FIXTURE_REVIEW_BODY || '[Standards][Minor] Parent cleanup') : '[Spec][Minor] Ticket cleanup';
+  return JSON.stringify({outcome:'pass', summary:'Review passed.', findings:[{axis:'spec',severity:'minor',location:'review',description:note}]});
+ }
+ return JSON.stringify({outcome:'pass', summary:'Review passed.', findings:[]});
+}
+function implementOutcome() {
+ const mode = process.env.FIXTURE_MODE;
+ if (mode === 'editing-pass') return JSON.stringify({outcome:'pass', summary:'Done.'});
+ if (mode === 'editing-incomplete') return JSON.stringify({outcome:'incomplete', summary:'Still working.', remainingWork:'Finish the parser.'});
+ if (mode === 'editing-blocked') return JSON.stringify({outcome:'blocked', summary:'Stuck.', blockers:'Missing credentials.'});
+ return JSON.stringify({outcome:'complete', summary:'Implemented the requested ticket.'});
+}
+function handle(command) {
+ const prompt = command.message;
+ fs.writeFileSync(session, JSON.stringify({type:'session_info', name})+'\\n');
+ fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'workers.jsonl'), JSON.stringify({name, session, args, prompt, cwd:process.cwd()})+'\\n');
+ const isImplement = name.includes('implement');
+ const mode = process.env.FIXTURE_MODE;
+ if (isImplement) {
+  if (mode === 'signal-exit') process.kill(process.pid, 'SIGTERM');
+  if (mode === 'replace-lock') {
    const lock = path.join(path.dirname(path.dirname(session)), 'run.lock');
    fs.unlinkSync(lock);
    fs.writeFileSync(lock, 'new-owner\\n');
- }
- if (process.env.FIXTURE_MODE === 'missing-lock' || process.env.FIXTURE_MODE === 'directory-lock') {
+  }
+  if (mode === 'missing-lock' || mode === 'directory-lock') {
    const lock = path.join(path.dirname(path.dirname(session)), 'run.lock');
    fs.unlinkSync(lock);
-   if (process.env.FIXTURE_MODE === 'directory-lock') fs.mkdirSync(lock);
+   if (mode === 'directory-lock') fs.mkdirSync(lock);
    console.error('Provider unavailable'); process.exit(1);
- }
- if (process.env.FIXTURE_MODE === 'unicode-error') {
+  }
+  if (mode === 'unicode-error') {
    const output = Buffer.from('Provider says café');
    const split = output.indexOf(Buffer.from('é'));
    process.stderr.write(output.subarray(0, split + 1));
-   setTimeout(() => { process.stderr.write(output.subarray(split + 1)); process.exitCode = 1; }, 50);
- } else if (process.env.FIXTURE_MODE === 'stubborn') {
+   setTimeout(() => { process.stderr.write(output.subarray(split + 1), () => process.exit(1)); }, 50);
+   return;
+  }
+  if (mode === 'stubborn') {
    process.on('SIGTERM', () => {});
    fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'stubborn.pid'), String(process.pid));
    setInterval(() => {}, 1000);
- } else if (process.env.FIXTURE_MODE === 'commit-fail') {
+   return;
+  }
+  if (mode === 'commit-fail') {
    require('node:child_process').execFileSync('git', ['commit', '--allow-empty', '-m', 'Unauthorized worker commit']);
    process.exit(1);
- } else if (process.env.FIXTURE_MODE === 'fail') {console.error('Provider unavailable'); process.exit(1);}
- fs.writeFileSync('feature.txt', 'implemented\\n');
- console.log('Implemented the requested ticket.');
-} else if (process.env.FIXTURE_MODE === 'malformed') console.log('PASS, probably.');
-else if (process.env.FIXTURE_MODE === 'legacy-review') console.log(JSON.stringify({verdict:'pass', findings:[]}));
-else if (process.env.FIXTURE_MODE === 'reject' || (process.env.FIXTURE_MODE === 'parent-reject' && name.includes('parent review'))) console.log(JSON.stringify({verdict:'changes_requested', body:'Missing acceptance criterion'}));
-else if (process.env.FIXTURE_MODE === 'blocked-review') console.log(JSON.stringify({verdict:'blocked', body:'Cannot assess required behavior'}));
-else if (process.env.FIXTURE_MODE === 'pass-body') console.log(JSON.stringify({verdict:'pass', body:process.env.FIXTURE_REVIEW_BODY}));
-else if (['pass-notes', 'comment-create-fail'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({verdict:'pass', body: name.includes('parent review') ? process.env.FIXTURE_REVIEW_BODY || '[Standards][Minor] Parent cleanup' : '[Spec][Minor] Ticket cleanup'}));
-else console.log(JSON.stringify({verdict:'pass', body:''}));
+  }
+  if (mode === 'fail') { console.error('Provider unavailable'); process.exit(1); }
+  fs.writeFileSync('feature.txt', 'implemented\\n');
+ }
+ const text = isImplement ? implementOutcome() : reviewOutcome();
+ out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+ out({type:'agent_start'});
+ out({type:'message_start', message:{role:'assistant', content:[]}});
+ out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+ out({type:'agent_end', messages:[], willRetry:false});
+ out({type:'agent_settled'});
+}
+let buffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => {
+ buffer += chunk;
+ for (let i = buffer.indexOf('\\n'); i !== -1; i = buffer.indexOf('\\n')) {
+  const line = buffer.slice(0, i); buffer = buffer.slice(i + 1);
+  if (line.trim()) handle(JSON.parse(line));
+ }
+});
+process.stdin.on('end', () => { process.exitCode = 0; });
 `,
     { mode: 0o755 },
   );
@@ -219,9 +280,20 @@ cliTest(
     expect(reviews.length).toBeGreaterThanOrEqual(3);
     expect(reviews.every((worker) => worker.args.includes("read,grep,find,ls"))).toBe(true);
     expect(workers.every((worker) => worker.args.includes("--no-skills"))).toBe(true);
+    // RPC mode with ambient extensions disabled for every worker.
+    expect(
+      workers.every(
+        (worker) =>
+          worker.args.includes("--mode") &&
+          worker.args[worker.args.indexOf("--mode") + 1] === "rpc" &&
+          worker.args.includes("--no-extensions"),
+      ),
+    ).toBe(true);
+    expect(reviews.every((worker) => worker.prompt.includes('"findings"'))).toBe(true);
     // Blessed defaults: implementers get the curated trio, reviewers get none.
     const implementers = workers.filter((worker) => worker.name.includes("implement"));
     expect(implementers.length).toBeGreaterThan(0);
+    expect(implementers.every((worker) => worker.prompt.includes('"outcome"'))).toBe(true);
     expect(
       implementers.every(
         (worker) =>
@@ -253,13 +325,14 @@ cliTest(
     expect(state.tickets.every((ticket: { repairs: number }) => ticket.repairs === 0)).toBe(true);
     expect(
       state.tickets.every(
-        (ticket: { review: { verdict: string; body: string } }) =>
-          ticket.review.verdict === "pass" && ticket.review.body === "[Spec][Minor] Ticket cleanup",
+        (ticket: { review: { outcome: string; findings: { description: string }[] } }) =>
+          ticket.review.outcome === "pass" &&
+          ticket.review.findings[0]?.description === "[Spec][Minor] Ticket cleanup",
       ),
     ).toBe(true);
     expect(state.review).toMatchObject({
-      verdict: "pass",
-      body: "[Standards][Minor] Parent cleanup",
+      outcome: "pass",
+      findings: [{ description: "[Standards][Minor] Parent cleanup" }],
     });
     const summary = readFileSync(join(runDir, "summary.md"), "utf8");
     expect(summary).toContain("Review observations");
@@ -275,6 +348,11 @@ cliTest(
     for (const ticket of state.tickets) {
       expect(ticket.review.head).toMatch(/^[a-f0-9]{40}$/);
       expect(ticket.review.tree).toBe(f.git("rev-parse", `${ticket.commit}^{tree}`));
+      // Controller-assigned finding identity and artifact reference.
+      expect(ticket.review.findings[0]).toMatchObject({
+        id: 1,
+        artifact: { head: ticket.review.head, tree: ticket.review.tree },
+      });
     }
     const pr = readFileSync(join(runDir, "pr.md"), "utf8");
     expect(pr).not.toContain("[Spec][Minor] Ticket cleanup");
@@ -297,8 +375,8 @@ cliTest(
     const runDir = result.stdout.match(/Run directory: (.+)/)![1];
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
     expect(state.tickets[0].review).toMatchObject({
-      verdict: "blocked",
-      body: "Cannot assess required behavior",
+      outcome: "blocked",
+      summary: "Cannot assess required behavior",
     });
     expect(state.tickets[0].repairs).toBe(0);
   },
@@ -399,6 +477,14 @@ cliTest(
         skills: ["tdd", "diagnosing-bugs", "deslop"],
         promptBody: "CUSTOM IMPLEMENT GUIDANCE.",
       },
+      repair: {
+        agentName: "loop-repair",
+        model: undefined,
+        thinking: undefined,
+        tools: DEFAULT_IMPLEMENT_TOOLS,
+        skills: ["tdd", "diagnosing-bugs", "deslop"],
+        promptBody: expect.stringContaining("Repair the findings"),
+      },
       review: {
         agentName: "review",
         model: "test-provider/review-model",
@@ -407,6 +493,9 @@ cliTest(
         skills: [],
         promptBody: "CUSTOM REVIEW GUIDANCE.",
       },
+      repairRounds: DEFAULT_REPAIR_ROUNDS,
+      watchdog: DEFAULT_WATCHDOG,
+      deadlines: DEFAULT_DEADLINES,
       appendSystemPrompt: "SHARED STYLE NOTE.",
     });
     const workers = readWorkers(f.root);
@@ -437,7 +526,7 @@ cliTest(
     expect(review!.args).toContain("--no-skills");
     expect(review!.args).not.toContain("--skill");
     expect(review!.prompt).toContain("CUSTOM REVIEW GUIDANCE.");
-    expect(review!.prompt).toContain('"verdict"');
+    expect(review!.prompt).toContain('"findings"');
     expect(readFileSync(join(runDir!, "append-system-prompt.md"), "utf8")).toBe(
       "SHARED STYLE NOTE.\n",
     );
@@ -513,7 +602,7 @@ cliTest(
     const runDir = result.stdout.match(/Run directory: (.+)/)![1];
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
     expect(state.tickets[0].status).toBe("blocked");
-    expect(state.lastError).toContain("invalid verdict");
+    expect(state.lastError).toContain("Invalid review outcome");
     expect(state.pr).toBeUndefined();
   },
   30_000,
@@ -533,7 +622,7 @@ cliTest.each([
     expect(result.status).toBe(1);
     const runDir = result.stdout.match(/Run directory: (.+)/)![1];
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-    expect(state.lastError).toContain("invalid verdict");
+    expect(state.lastError).toContain("Invalid review outcome");
     expect(state.tickets[0].status).toBe("blocked");
     expect(state.tickets[0].review).toBeUndefined();
     expect(state.tickets[0].commit).toBeUndefined();
@@ -559,7 +648,7 @@ cliTest(
     const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
     expect(comments).toHaveLength(1);
     expect(comments[0].body).toContain(f.env.FIXTURE_REVIEW_BODY);
-    expect(comments[0].body).toContain(`\n\`\`\`\`\`\n${f.env.FIXTURE_REVIEW_BODY}\n\`\`\`\`\``);
+    expect(comments[0].body).toContain("`````");
   },
   30_000,
 );
@@ -572,14 +661,68 @@ cliTest(
     expect(result.status).toBe(1);
     const runDir = result.stdout.match(/Run directory: (.+)/)![1];
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-    expect(state.lastError).toContain("invalid verdict");
+    expect(state.lastError).toContain("Invalid review outcome");
     expect(state.tickets[0].review).toBeUndefined();
   },
   30_000,
 );
 
 cliTest(
-  "stops after two repair attempts and keeps the review findings for handoff",
+  "preflights the installed Pi version before launching workers",
+  async () => {
+    const f = fixture();
+    f.env.FIXTURE_PI_VERSION = "0.98.5";
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("older than the supported baseline 0.99.1");
+    expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
+    expect(existsSync(join(f.root, "pr.json"))).toBe(false);
+  },
+  30_000,
+);
+
+cliTest.each([
+  ["editing-pass", "Invalid editing outcome"],
+  ["editing-incomplete", "Implementation incomplete"],
+  ["editing-blocked", "Implementation blocked"],
+])(
+  "does not approve invalid editing outcome %s",
+  async (mode, error) => {
+    const f = fixture(mode);
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain(error);
+    expect(state.tickets[0].status).toBe("blocked");
+    expect(state.tickets[0].commit).toBeUndefined();
+    expect(state.phase).not.toBe("publish");
+    expect(existsSync(join(f.root, "pr.json"))).toBe(false);
+  },
+  30_000,
+);
+
+cliTest(
+  "stops on an incomplete review outcome without accepting work",
+  async () => {
+    const f = fixture("review-incomplete");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain("Review incomplete");
+    expect(state.tickets[0].review).toMatchObject({
+      outcome: "incomplete",
+      remainingWork: "Need more evidence.",
+    });
+    expect(state.tickets[0].status).toBe("blocked");
+    expect(state.tickets[0].commit).toBeUndefined();
+  },
+  30_000,
+);
+
+cliTest(
+  "stops after the configured repair rounds and keeps the review findings for handoff",
   async () => {
     const f = fixture("reject");
     const result = await f.start();
@@ -588,16 +731,16 @@ cliTest(
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
     expect(
       state.sessions.filter((session: { name: string }) => session.name.includes("implement")),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(state.tickets[0].status).toBe("blocked");
     expect(state.tickets[1].status).toBe("pending");
     expect(state.tickets[0].review).toMatchObject({
-      verdict: "changes_requested",
-      body: "Missing acceptance criterion",
+      outcome: "changes_requested",
+      summary: "Missing acceptance criterion",
     });
     const summary = readFileSync(join(runDir, "summary.md"), "utf8");
     expect(summary).toContain("Missing acceptance criterion");
-    expect(summary).toContain("| blocked | 2/2 |");
+    expect(summary).toContain("| blocked | 3/3 |");
   },
   30_000,
 );
@@ -732,7 +875,7 @@ cliTest(
     expect(state.sessions).toHaveLength(1);
     writeFileSync(join(state.worktree, "feature.txt"), "Manually fixed\n");
     // Exercise real timeout handling on resume without the CLI's five-minute minimum.
-    state.timeoutMs = 500;
+    state.settings.deadlines.checkMs = 500;
     state.check = `${JSON.stringify(process.execPath)} -e "require('node:fs').writeFileSync('check-started', 'yes'); setInterval(() => {}, 1000)"`;
     writeFileSync(statePath, JSON.stringify(state));
     const result = await f.run("resume", runDir!);
@@ -963,7 +1106,7 @@ cliTest(
   30_000,
 );
 
-cliTest.each([1, 2, 3])(
+cliTest.each([1, 2, 3, 4])(
   "refuses incompatible version-%s snapshots before launching workers",
   async (version) => {
     const f = fixture("fail");

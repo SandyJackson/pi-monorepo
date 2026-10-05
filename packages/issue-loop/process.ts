@@ -100,7 +100,7 @@ export function command(program: string, args: string[], options: CommandOptions
 export const git = (cwd: string, ...args: string[]) => command("git", args, { cwd });
 
 /** Last `max` chars without splitting a surrogate pair at the cut. */
-function tailText(text: string, max: number): string {
+export function tailText(text: string, max: number): string {
   const tail = text.slice(-max);
   return /^[\uDC00-\uDFFF]/.test(tail) ? tail.slice(1) : tail;
 }

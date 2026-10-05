@@ -70,5 +70,9 @@ the outer loop and must be green when you finish.
 
 ## Finish
 
-End with a concise summary: what changed, which skills you used, any
-deviation from the requirements, and what blocks further work, if anything.
+End with the structured outcome the controller asks for: `complete` when the
+ticket is implemented and ready for checks, `incomplete` with the remaining
+work when useful work is left, or `blocked` with the blocker when you cannot
+proceed. Never claim a review verdict from an editing phase. Include a concise
+summary of what changed, which skills you used, any deviation from the
+requirements, and what blocks further work, if anything.

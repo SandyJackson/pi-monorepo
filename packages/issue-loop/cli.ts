@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { gh, githubHostFromOrigin, snapshot } from "./github.ts";
-import { git, originUrl } from "./process.ts";
+import { command, git, originUrl } from "./process.ts";
 import { execute } from "./runner.ts";
 import {
   defaultLoopSettings,
@@ -18,21 +18,60 @@ const usage = `Usage:
   node packages/issue-loop/run.mjs start --repo PATH --issue NUMBER --check COMMAND [--setup COMMAND] [--timeout SECONDS] [--settings PATH]
   node packages/issue-loop/run.mjs resume RUN_DIRECTORY
 
-Requires Node 22.18+ or 24+, Git, authenticated gh and Pi. macOS/Linux only.
+Requires Node 22.18+ or 24+, Git, authenticated gh and Pi 0.99.1 or newer. macOS/Linux only.
 Starts from origin's default branch. Uses direct open GitHub child issues and native dependencies.
 --setup runs once in the new worktree; --check runs after every change and before final publication.
---timeout limits each worker/setup/check invocation (default 3600 seconds).
+--timeout overrides the setup and check command deadlines (300 to 7200 seconds; default 3600).
+Worker supervision uses the watchdog policy in the settings snapshot.
 --settings points at an optional JSON file customizing worker models, tool allowlists,
-role guidance, per-role loop skills, and a shared system-prompt addition
-(see Customizing workers below). Workers always start with --no-skills; only
-curated loop skills named in the settings file are loaded.
+role guidance, per-role loop skills, repair rounds, watchdog policy, controller
+command deadlines, and a shared system-prompt addition
+(see Customizing workers below). Workers always start with --no-skills and --no-extensions;
+only curated loop skills named in the settings file are loaded.
 
 This command trusts the project's Pi resources and runs setup/check commands with your privileges.
 It commits accepted work, pushes only its feature branch and opens one PR. It never merges.
-Issues stay open until a human merges the final PR. Workers retain your Pi extensions and use explicit names.
+Issues stay open until a human merges the final PR. Workers use explicit names and load no ambient extensions.
 Resume preserves manual fixes and checks/reviews the blocked ticket before implementing more changes.
 State, summary and sessions are kept in ../.pi-issue-loops/<run>/ beside the source repository.
 `;
+
+const MIN_PI_VERSION = [0, 99, 1] as const;
+
+function parsePiVersion(output: string): [number, number, number] | undefined {
+  const match = output.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function versionAtLeast(version: readonly number[], baseline: readonly number[]): boolean {
+  for (let index = 0; index < baseline.length; index++) {
+    if (version[index] > baseline[index]) return true;
+    if (version[index] < baseline[index]) return false;
+  }
+  return true;
+}
+
+/** Preflight the installed Pi runtime before any worker launches. */
+async function assertSupportedPi(): Promise<void> {
+  let output: string;
+  try {
+    output = await command("pi", ["--version"], { cwd: process.cwd(), timeoutMs: 30_000 });
+  } catch (error) {
+    throw new Error(
+      `Cannot run the installed Pi executable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const version = parsePiVersion(output);
+  if (!version)
+    throw new Error(
+      `Cannot determine the installed Pi version from ${JSON.stringify(output.trim())}; Pi 0.99.1 or newer is required`,
+    );
+  if (!versionAtLeast(version, MIN_PI_VERSION))
+    throw new Error(
+      `Installed Pi ${version.join(".")} is older than the supported baseline 0.99.1; upgrade Pi and retry`,
+    );
+}
 
 async function main(): Promise<void> {
   const [action, ...args] = process.argv.slice(2);
@@ -42,6 +81,7 @@ async function main(): Promise<void> {
   }
   if (process.platform === "win32")
     throw new Error("This first version supports macOS and Linux only");
+  await assertSupportedPi();
   if (action === "resume") {
     if (args.length !== 1 || args[0].startsWith("-")) throw new Error(usage);
     const state = load(resolve(args[0]));
@@ -57,19 +97,28 @@ async function main(): Promise<void> {
       issue: { type: "string" },
       check: { type: "string" },
       setup: { type: "string" },
-      timeout: { type: "string", default: "3600" },
+      timeout: { type: "string" },
       settings: { type: "string" },
     },
   });
   if (!values.repo || !values.issue || !/^[1-9]\d*$/.test(values.issue) || !values.check?.trim())
     throw new Error(usage);
-  const timeout = Number(values.timeout);
-  if (!Number.isInteger(timeout) || timeout < 300 || timeout > 7200)
-    throw new Error("--timeout must be 300 to 7200 seconds");
+  const timeout = values.timeout;
+  let timeoutMs: number | undefined;
+  if (timeout !== undefined) {
+    const seconds = Number(timeout);
+    if (!Number.isInteger(seconds) || seconds < 300 || seconds > 7200)
+      throw new Error("--timeout must be 300 to 7200 seconds");
+    timeoutMs = seconds * 1000;
+  }
   // Fail fast on bad settings before creating the run; resume reuses the snapshot.
   const settings = values.settings
     ? loadLoopSettings(resolve(values.settings))
     : defaultLoopSettings();
+  if (timeoutMs !== undefined) {
+    settings.deadlines.setupMs = timeoutMs;
+    settings.deadlines.checkMs = timeoutMs;
+  }
   // Fail fast on unknown skills before creating the run; the copy lands in the
   // run dir below so resume reuses the snapshot.
   const repo = await git(resolve(values.repo), "rev-parse", "--show-toplevel");
@@ -110,7 +159,6 @@ async function main(): Promise<void> {
     head: baseSha,
     check: values.check,
     setup: values.setup,
-    timeoutMs: timeout * 1000,
     settings,
     parent,
     tickets,

@@ -1,9 +1,9 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { LoopSettings } from "./settings.ts";
+import type { FindingAxis } from "./worker.ts";
 
-export const RUN_STATE_VERSION = 4;
-export const MAX_REPAIRS = 2;
+export const RUN_STATE_VERSION = 5;
 
 export interface Issue {
   number: number;
@@ -13,9 +13,30 @@ export interface Issue {
   state: "open" | "closed";
 }
 
+/** Exact reviewed artifact: tree preserves mutations that leave HEAD unchanged. */
+export interface ArtifactIdentity {
+  head: string;
+  tree: string;
+}
+
+export type Severity = "critical" | "major" | "minor";
+
+/** Controller-assigned, artifact-linked review finding. */
+export interface Finding {
+  id: number;
+  axis: FindingAxis;
+  severity: Severity;
+  location: string;
+  description: string;
+  artifact: ArtifactIdentity;
+}
+
 export interface Review {
-  verdict: "pass" | "changes_requested" | "blocked";
-  body: string;
+  outcome: "pass" | "changes_requested" | "incomplete" | "blocked";
+  summary: string;
+  findings: Finding[];
+  remainingWork?: string;
+  blockers?: string;
   head: string;
   tree: string;
 }
@@ -24,6 +45,8 @@ export interface Ticket extends Issue {
   blockers: Issue[];
   repairs: number;
   status: "pending" | "running" | "blocked" | "accepted";
+  /** Worker phase that most recently ran for this ticket. */
+  phase?: "editing" | "review";
   baseline?: string;
   commit?: string;
   feedback?: string;
@@ -50,7 +73,6 @@ export interface RunState {
   head: string;
   check: string;
   setup?: string;
-  timeoutMs: number;
   /** Resolved `--settings` snapshot. `resume` reuses it even if the source files change. */
   settings: LoopSettings;
   parent: Issue;
@@ -75,22 +97,28 @@ function atomicWrite(path: string, text: string): void {
   renameSync(`${path}.tmp`, path);
 }
 
+function findingLines(review: Review): string[] {
+  return review.findings.map(
+    (finding) =>
+      `- [${finding.axis}][${finding.severity}] ${finding.location}: ${finding.description}`,
+  );
+}
+
 export function reviewObservations(state: RunState): string[] {
   const observations: string[] = [];
   const append = (title: string, review: Review | undefined) => {
-    if (review?.verdict !== "pass" || !review.body.trim()) return;
+    if (review?.outcome !== "pass" || review.findings.length === 0) return;
+    const body = [review.summary, ...findingLines(review)].filter(Boolean).join("\n");
+    if (!body.trim()) return;
     const fence = "`".repeat(
-      (review.body.match(/`+/g) ?? []).reduce(
-        (length, ticks) => Math.max(length, ticks.length + 1),
-        3,
-      ),
+      (body.match(/`+/g) ?? []).reduce((length, ticks) => Math.max(length, ticks.length + 1), 3),
     );
     observations.push(
       `### ${title}`,
       `Reviewed HEAD: \`${review.head}\`; content tree: \`${review.tree}\`.`,
       "",
       fence,
-      review.body,
+      body,
       fence,
       "",
     );
@@ -113,7 +141,7 @@ export function save(state: RunState): void {
   atomicWrite(join(state.runDir, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
   const rows = state.tickets.map(
     (ticket) =>
-      `| #${ticket.number} ${ticket.title.replaceAll("|", "\\|").replaceAll("\n", " ")} | ${ticket.status} | ${ticket.repairs}/${MAX_REPAIRS} | ${ticket.commit ?? ""} |`,
+      `| #${ticket.number} ${ticket.title.replaceAll("|", "\\|").replaceAll("\n", " ")} | ${ticket.status} | ${ticket.repairs}/${state.settings.repairRounds} | ${ticket.commit ?? ""} |`,
   );
   const active = state.tickets.find((ticket) => ticket.number === state.currentTicket);
   const cli = resolve(import.meta.dirname, "run.mjs");
@@ -149,13 +177,17 @@ export function load(runDir: string): RunState {
   const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")) as RunState;
   if (state.version !== RUN_STATE_VERSION) {
     throw new Error(
-      "Unsupported run state version; older snapshots may include issue comments or use an incompatible reviewer contract. Preserve any work and start a new run from reviewed issue bodies. Do not change the version by hand.",
+      "Unsupported run state version; older snapshots may include issue comments or an incompatible worker contract. Preserve any work and start a new run from reviewed issue bodies. Do not change the version by hand.",
     );
   }
   if (
     state.runDir !== resolve(runDir) ||
     !Array.isArray(state.tickets) ||
     !Array.isArray(state.sessions) ||
+    !state.settings?.repair ||
+    !state.settings.watchdog ||
+    !state.settings.deadlines ||
+    !Number.isInteger(state.settings.repairRounds) ||
     !["setup", "tickets", "final", "publish", "done"].includes(state.phase) ||
     !["running", "blocked", "done"].includes(state.status)
   ) {

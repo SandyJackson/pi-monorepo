@@ -5,13 +5,15 @@ A small local controller for one parent GitHub issue. It implements direct child
 ## Requirements
 
 - macOS or Linux; Node 22.18+ or Node 24+.
-- `git`, authenticated `gh`, and authenticated `pi` on PATH. Pi must support `-p`, `--name`, `--session`, `--approve`, and tool allowlists. Developed against Pi 0.86.1.
+- `git`, authenticated `gh`, and authenticated `pi` on PATH. Pi must be 0.99.1 or newer and support RPC mode (`--mode rpc`), `--name`, `--session`, `--approve`, `--no-extensions`, and tool allowlists. The controller preflights the installed version before launching any worker.
 - A GitHub.com repository with `origin` pointing at the repo holding the parent issue. Fetch and push URLs must match. GitHub identity comes from `origin`, not `GH_REPO`.
 - Open, implementation-ready child issues linked through GitHub's native sub-issue feature. Native blocked-by dependencies are respected. Task-list links are ignored.
 - Requirements live in the parent and ticket bodies. Comments are never fetched or forwarded, so copy approved decisions into the relevant body before starting.
 - A check command that terminates and exits nonzero on failure. No watch mode.
 
-Both roles use your configured Pi model unless `--settings` overrides it. The new worktree loads Pi resources with `--approve`, which trusts project-local resources without bypassing your command permission extension. Authenticate Pi first so workers never face an interactive login.
+Both roles use your configured Pi model unless `--settings` overrides it. The new worktree loads Pi resources with `--approve`, which trusts project-local resources without bypassing your command permission extension. Ambient extensions are disabled for every worker (`--no-extensions`); only the curated loop skills you select are loaded. Authenticate Pi first so workers never face an interactive login.
+
+Workers run through Pi's supervised RPC mode, so the controller correlates commands, waits for the settled run, and reads the authoritative final message rather than inferring completion from free text. Pi's own provider retries stay enabled and do not consume the controller's repair rounds.
 
 ## Start
 
@@ -36,7 +38,7 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
 
 `--setup` is optional. A fresh worktree has no untracked dependencies such as `node_modules`, so provide setup when you need it. It runs before the first ticket and again on resume after a failed setup, so keep it repeatable.
 
-`--timeout SECONDS` caps each worker, setup, and check invocation. Default 3600, accepts 1-7200. Git/GitHub operations get 60 seconds. Ctrl-C stops the active process group, preserves work, and records a blocked run. A second interrupt escalates to SIGKILL.
+`--timeout SECONDS` overrides the controller-owned setup and check command deadlines (default 3600, accepts 300-7200). Worker supervision uses the watchdog policy in the settings snapshot instead; its default hard ceiling is two hours, with a ten-minute silence threshold and a thirty-minute per-tool cap. Git/GitHub operations get 60 seconds. Ctrl-C stops the active process group, preserves work, and records a blocked run. A second interrupt escalates to SIGKILL.
 
 ## Customizing workers
 
@@ -45,23 +47,39 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
 ```json
 {
   "implementAgent": "./agents/loop-implement.md",
-  "reviewAgent": "./agents/loop-review.md",
+  "repairAgent": "./agents/loop-repair.md",
+  "reviewAgent": "./agents/loop-reviewer.md",
   "implementSkills": ["tdd"],
+  "repairSkills": ["tdd", "diagnosing-bugs", "deslop"],
   "reviewSkills": [],
+  "repairRounds": 3,
+  "watchdog": {
+    "silenceMs": 600000,
+    "toolMs": 1800000,
+    "softCheckpointMs": 3600000,
+    "checkpointGraceMs": 300000,
+    "hardCeilingMs": 7200000,
+    "abortGraceMs": 10000,
+    "sigkillEscalationMs": 2000
+  },
+  "deadlines": { "setupMs": 3600000, "checkMs": 3600000, "gitMs": 60000 },
   "appendSystemPrompt": "Prefer small, focused changes."
 }
 ```
 
-Agent files use the agent markdown format: frontmatter with `model`, `thinking`, and `tools`, plus a prompt body that replaces the default role guidance only. `thinking` accepts one of Pi's levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); omitting it keeps Pi's default, while `off` disables thinking. Paths resolve relative to the settings file. The runner still supplies issue context, constraints, patch/check context, and the reviewer's required JSON verdict format.
+Every field is optional. `repairRounds` (default 3) bounds child code-repair rounds. `watchdog` and `deadlines` override individual millisecond values. The current slice persists these policies and enforces the hard ceiling; checkpoint and controller-recovery behaviour arrives in later slices.
 
-Without `--settings`, both roles use the blessed files in `agents/` (`loop-implement.md`, `loop-reviewer.md`) and the implementer gets the curated trio `tdd`, `diagnosing-bugs`, `deslop`. A settings file replaces one or both role files — the blessed files double as the template for user-authored replacements. Omitting `implementSkills` keeps the trio and omitting `reviewSkills` keeps empty; an explicit list (including `[]`) replaces the default.
+Agent files use the agent markdown format: frontmatter with `model`, `thinking`, and `tools`, plus a prompt body that replaces the default role guidance only. `thinking` accepts one of Pi's levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); omitting it keeps Pi's default, while `off` disables thinking. Paths resolve relative to the settings file. The runner still supplies issue context, constraints, patch/check context, and the reviewer's required structured outcome format.
+
+Without `--settings`, the roles use the blessed files in `agents/` (`loop-implement.md`, `loop-repair.md`, `loop-reviewer.md`); implement and repair get the curated trio `tdd`, `diagnosing-bugs`, `deslop`, and review gets none. A settings file replaces one or more role files — the blessed files double as the template for user-authored replacements. Omitting `implementSkills`/`repairSkills` keeps the trio and omitting `reviewSkills` keeps empty; an explicit list (including `[]`) replaces the default.
 
 Workers always start with `--no-skills`: they never inherit ambient workspace or user skills. `implementSkills` / `reviewSkills` name curated loop skills by short name (closed set, from `packages/issue-loop/loop-skills/`; currently `tdd`, `deslop`, `diagnosing-bugs`). The reviewer default stays empty. At `start` the controller copies the selected skills into `<run>/skills/` and workers load them via `--skill`; `resume` reuses the copy.
 
 Blessed role files ship with the package and can be referenced from your settings file (paths resolve relative to it):
 
 - `agents/loop-implement.md` — implement worker: reaches for `/skill:tdd`, `/skill:diagnosing-bugs`, and `/skill:deslop` explicitly, with ponytail simplicity tags (`delete/stdlib/native/yagni/shrink`) baked in.
-- `agents/loop-reviewer.md` — review worker: single-pass Standards + Spec review condensed from the code-review skill and code-reviewer agent, ending in the required JSON verdict.
+- `agents/loop-repair.md` — repair worker: keeps the reviewer's diagnosis, edits only what the findings require, and retracts a wrong finding instead of manufacturing a change.
+- `agents/loop-reviewer.md` — review worker: single-pass Standards + Spec review condensed from the code-review skill and code-reviewer agent, ending in the required structured outcome.
 
 ```json
 {
@@ -95,8 +113,8 @@ The original checkout is untouched and its uncommitted work excluded. The featur
 
 1. Snapshot the parent and open direct child bodies, plus native dependencies. Sub-issue order survives API pagination; dependencies pick the next eligible ticket. Closed children stay out.
 2. Implement one eligible ticket in a fresh session, then run the configured checks outside the agent.
-3. Stage the patch, new files included, and start a fresh read-only reviewer with requirements, patch, and check log. The review returns strict JSON with `verdict` and `body`. A passing review can record minor issues without triggering repair; a pass containing a tagged major or critical finding is rejected. Material findings request changes.
-4. Commit accepted work and record its SHA. At most two implementation repairs per ticket, and two more for the final parent review. A ticket whose requirements already hold passes without a new commit; its checkpoint records the existing HEAD.
+3. Stage the patch, new files included, and start a fresh read-only reviewer with requirements, patch, and check log. The reviewer returns a structured outcome: `pass` (no critical or major finding), `changes_requested` (at least one critical or major finding), or `incomplete`/`blocked`. Findings carry axis, severity, location, and description; the controller assigns their identities and reviewed-artifact reference. A pass cannot carry material findings.
+4. Commit accepted work and record its SHA. At most three configurable implementation repairs per ticket, and three for the final parent review. A ticket whose requirements already hold passes without a new commit; its checkpoint records the existing HEAD.
 5. Push only the feature branch and open one PR. Passing ticket and parent review observations appear in the run summary and a marked PR comment, with the reviewed HEAD and content-tree IDs. These are historical observations, not a reconciled outstanding-issues list; later changes may resolve them. Reviewer text never goes into the PR description, where closing keywords could affect issue closure. Publication retries reuse the PR and update the authenticated author's managed observations section. The PR description, other authors' comments, and human text outside the section are preserved. Ambiguous or damaged section markers stop publication for inspection.
 
 The controller never merges. Issues stay open until a human merges the final PR, whose body references the parent and accepted children for closing. Internal dependencies resolve through acceptance on the run's branch, not GitHub closure. External blockers must be closed with their implementation already in the pinned base. The runner never rebases. If tickets remain but none can run, it stops instead of declaring victory.
@@ -117,7 +135,7 @@ Budgets persist, so resuming an exhausted ticket buys no fresh repairs. Fix the 
 
 `state.json` rules. `summary.md` is generated from it, not a plan you can edit. Never hand-edit statuses, reset counters, or move the run directory. GitHub edits do not flow into an existing snapshot.
 
-Version 4 records the reviewed artifact and uses the `verdict`/`body` contract. Version 3 snapshots the incompatible `verdict`/`findings` instructions. Version 2 predates `--settings`. Version 1 mixed comments into requirements without provenance. None of the old versions resume. Preserve any work, reread the issue bodies, and start fresh. Never bump the version field by hand.
+Version 5 records the RPC worker contract, phase outcomes, structured findings, and the settings snapshot (repair role, repair rounds, watchdog policy, and controller deadlines). Version 4 recorded the reviewed artifact with the `verdict`/`body` contract. Version 3 snapshotted the incompatible `verdict`/`findings` instructions. Version 2 predates `--settings`. Version 1 mixed comments into requirements without provenance. None of the old versions resume. Preserve any work, reread the issue bodies, and start fresh. Never bump the version field by hand.
 
 A kill or crash can leave `run.lock` behind. The runner will not guess whether an orphan worker is still writing. Check the recorded controller PID and any Pi/check processes, stop them, inspect the worktree, delete that run's lock, and resume. Normal failures clear the lock themselves.
 
@@ -144,7 +162,7 @@ A session file may be missing if Pi died before its first persisted response. Th
 
 ## Trust and deliberate limits
 
-This command authorizes controller-owned commits, branch pushes, and PR creation outside Pi's bash permission extension. Worker extensions stay enabled, but workers are told not to commit or touch GitHub, and the reviewer gets no bash, edit, or write tools. The implementer can run bash and edit files.
+This command authorizes controller-owned commits, branch pushes, and PR creation outside Pi's bash permission extension. Workers run with ambient extensions and skills disabled and are told not to commit or touch GitHub; the reviewer gets no bash, edit, or write tools. The implementer can run bash and edit files. Only the curated loop skills named in the settings are loaded.
 
 Skipping comments shrinks unsolicited input, but issue bodies remain untrusted. Prompts plus a worktree are not a sandbox. Run only against repos, dependencies, bodies, and extensions you trust. Setup and check commands run with your privileges. Git hooks stay enabled, and anything a hook changes stops acceptance for rechecking.
 
