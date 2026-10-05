@@ -86,6 +86,7 @@ The runner prints its run directory before starting work. It sits beside the sou
   logs/
   review.patch
   pr.md
+  review-observations.md
 ```
 
 The original checkout is untouched and its uncommitted work excluded. The feature branch starts from the remote default branch fetched at launch. Branch, worktree, and run files survive success or failure.
@@ -94,15 +95,15 @@ The original checkout is untouched and its uncommitted work excluded. The featur
 
 1. Snapshot the parent and open direct child bodies, plus native dependencies. Sub-issue order survives API pagination; dependencies pick the next eligible ticket. Closed children stay out.
 2. Implement one eligible ticket in a fresh session, then run the configured checks outside the agent.
-3. Stage the patch, new files included, and start a fresh read-only reviewer with requirements, patch, and check log. The review returns strict JSON with `verdict` and `body`. A passing review can record minor issues without triggering repair; material findings request changes.
+3. Stage the patch, new files included, and start a fresh read-only reviewer with requirements, patch, and check log. The review returns strict JSON with `verdict` and `body`. A passing review can record minor issues without triggering repair; a pass containing a tagged major or critical finding is rejected. Material findings request changes.
 4. Commit accepted work and record its SHA. At most two implementation repairs per ticket, and two more for the final parent review. A ticket whose requirements already hold passes without a new commit; its checkpoint records the existing HEAD.
-5. Push only the feature branch and open one PR. The run summary and new PR body include remaining minor issues from passing ticket and parent reviews. A publication retry looks for the existing PR before creating one.
+5. Push only the feature branch and open one PR. Passing ticket and parent review observations appear in the run summary and a marked PR comment, with the reviewed HEAD and content-tree IDs. These are historical observations, not a reconciled outstanding-issues list; later changes may resolve them. Reviewer text never goes into the PR description, where closing keywords could affect issue closure. Publication retries reuse the PR and update the authenticated author's managed observations section. The PR description, other authors' comments, and human text outside the section are preserved. Ambiguous or damaged section markers stop publication for inspection.
 
 The controller never merges. Issues stay open until a human merges the final PR, whose body references the parent and accepted children for closing. Internal dependencies resolve through acceptance on the run's branch, not GitHub closure. External blockers must be closed with their implementation already in the pinned base. The runner never rebases. If tickets remain but none can run, it stops instead of declaring victory.
 
 ## Resume after a failure or manual fix
 
-Read `summary.md` for statuses, commits, repair counts, the failure, remaining minor review issues, paths, sessions, and the exact resume command.
+Read `summary.md` for statuses, commits, repair counts, the failure, historical review observations, paths, sessions, and the exact resume command.
 
 Fix manually **in the run's worktree**, never in the original checkout. Then:
 
@@ -116,7 +117,7 @@ Budgets persist, so resuming an exhausted ticket buys no fresh repairs. Fix the 
 
 `state.json` rules. `summary.md` is generated from it, not a plan you can edit. Never hand-edit statuses, reset counters, or move the run directory. GitHub edits do not flow into an existing snapshot.
 
-Version 3 adds the worker settings snapshot. Version 2 predates `--settings`. Version 1 mixed comments into requirements without provenance. None of the old versions resume. Preserve any work, reread the issue bodies, and start fresh. Never bump the version field by hand.
+Version 4 records the reviewed artifact and uses the `verdict`/`body` contract. Version 3 snapshots the incompatible `verdict`/`findings` instructions. Version 2 predates `--settings`. Version 1 mixed comments into requirements without provenance. None of the old versions resume. Preserve any work, reread the issue bodies, and start fresh. Never bump the version field by hand.
 
 A kill or crash can leave `run.lock` behind. The runner will not guess whether an orphan worker is still writing. Check the recorded controller PID and any Pi/check processes, stop them, inspect the worktree, delete that run's lock, and resume. Normal failures clear the lock themselves.
 

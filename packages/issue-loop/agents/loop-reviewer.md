@@ -75,7 +75,8 @@ assessment of a material requirement; describe what evidence is needed.
 Return a verdict and a review body. For `changes_requested`, report all
 findings and identify which ones block a `pass` so the next agent can address
 them. For `pass`, put remaining minor findings in the body so a human can consider
-them during PR review; use an empty body when nothing remains. Each finding
+them during PR review; use an empty body when nothing remains. A passing body
+must not contain findings tagged Major or Critical; the controller rejects them. Each finding
 cites a file and line, states the failure mode, and starts with its axis and
 severity: `[Spec][Major]` or `[Standards][Minor]`, for example. For
 `blocked`, explain what prevents a material assessment. The required JSON shape

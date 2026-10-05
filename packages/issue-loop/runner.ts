@@ -11,7 +11,14 @@ import {
 import { join } from "node:path";
 import { getIssue, gh, githubHostFromOrigin } from "./github.ts";
 import { command, git, originUrl } from "./process.ts";
-import { MAX_REPAIRS, type Review, type RunState, save, type Ticket } from "./state.ts";
+import {
+  MAX_REPAIRS,
+  type Review,
+  type RunState,
+  reviewObservations,
+  save,
+  type Ticket,
+} from "./state.ts";
 
 function requirements(state: RunState, ticket?: Ticket): string {
   return [
@@ -157,15 +164,16 @@ async function verify(
   await git(state.worktree, "add", "-A");
   if ((await git(state.worktree, "write-tree")) !== tree)
     throw new Error("Files changed during review. Refusing acceptance; inspect and resume");
-  let review: Review;
+  let result: Pick<Review, "verdict" | "body">;
   try {
-    review = JSON.parse(response);
+    result = JSON.parse(response);
     if (
-      !review ||
-      Object.keys(review).sort().join(",") !== "body,verdict" ||
-      !["pass", "changes_requested", "blocked"].includes(review.verdict) ||
-      typeof review.body !== "string" ||
-      (review.verdict !== "pass" && !review.body.trim())
+      !result ||
+      Object.keys(result).sort().join(",") !== "body,verdict" ||
+      !["pass", "changes_requested", "blocked"].includes(result.verdict) ||
+      typeof result.body !== "string" ||
+      (result.verdict !== "pass" && !result.body.trim()) ||
+      (result.verdict === "pass" && /\[\s*(?:major|critical)\s*\]/i.test(result.body))
     ) {
       throw new Error("Unexpected verdict shape");
     }
@@ -174,6 +182,7 @@ async function verify(
       "Reviewer returned an invalid verdict. Inspect its log and resume; no ticket was accepted",
     );
   }
+  const review: Review = { ...result, head, tree };
   if (ticket) ticket.review = review;
   else state.review = review;
   save(state);
@@ -261,6 +270,68 @@ async function verifyOrigin(state: RunState): Promise<void> {
   }
 }
 
+async function publishReviewObservations(state: RunState, host: string | undefined): Promise<void> {
+  const number = state.pr?.match(/\/pull\/([1-9]\d*)$/)?.[1];
+  if (!number) throw new Error("Invalid PR URL; cannot publish review observations");
+  const endpoint = `repos/${state.githubRepo}/issues/${number}/comments`;
+  const pages: unknown = JSON.parse(
+    await gh(state.repo, host, "api", endpoint, "--paginate", "--slurp"),
+  );
+  if (!Array.isArray(pages) || !pages.every(Array.isArray))
+    throw new Error("Invalid paginated PR comments response");
+  const viewer = JSON.parse(await gh(state.repo, host, "api", "user")) as { login: string };
+  if (typeof viewer?.login !== "string" || !viewer.login)
+    throw new Error("Cannot identify the review observations author");
+  const start = `<!-- issue-loop-review-observations:${state.name}:start -->`;
+  const end = `<!-- issue-loop-review-observations:${state.name}:end -->`;
+  const comments = (
+    pages.flat() as { id: number; body: string; user?: { login: string } }[]
+  ).filter(
+    (comment) =>
+      comment?.user?.login === viewer.login &&
+      typeof comment.body === "string" &&
+      comment.body.includes(start),
+  );
+  if (
+    comments.length > 1 ||
+    (comments.length && (!Number.isSafeInteger(comments[0].id) || comments[0].id <= 0))
+  )
+    throw new Error("Ambiguous or invalid review observations comment; inspect before resuming");
+  const observations = reviewObservations(state);
+  if (!observations.length && !comments.length) return;
+  let content = [
+    start,
+    ...(observations.length
+      ? observations
+      : ["## Review observations", "", "No observations in the latest passing reviews."]),
+    end,
+  ].join("\n");
+  const previous = comments[0]?.body;
+  if (previous !== undefined) {
+    const first = previous.indexOf(start);
+    const last = previous.indexOf(end);
+    if (
+      last < first + start.length ||
+      previous.indexOf(start, first + start.length) !== -1 ||
+      previous.indexOf(end, last + end.length) !== -1
+    )
+      throw new Error("Invalid review observations delimiters; inspect before resuming");
+    content = previous.slice(0, first) + content + previous.slice(last + end.length);
+  }
+  const body = join(state.runDir, "review-observations.md");
+  writeFileSync(body, content, { mode: 0o600 });
+  await gh(
+    state.repo,
+    host,
+    "api",
+    comments.length ? `repos/${state.githubRepo}/issues/comments/${comments[0].id}` : endpoint,
+    "--method",
+    comments.length ? "PATCH" : "POST",
+    "--field",
+    `body=@${body}`,
+  );
+}
+
 async function publish(state: RunState): Promise<void> {
   await verifyOrigin(state);
   await unchangedHead(state, state.head);
@@ -292,16 +363,6 @@ async function publish(state: RunState): Promise<void> {
     throw new Error(
       "The existing PR is already closed or merged; inspect instead of creating another",
     );
-  const minorReviews = [
-    ...state.tickets.flatMap((ticket) =>
-      ticket.review?.verdict === "pass" && ticket.review.body.trim()
-        ? [`- #${ticket.number}: ${ticket.review.body.replaceAll("\n", "\n  ")}`]
-        : [],
-    ),
-    ...(state.review?.verdict === "pass" && state.review.body.trim()
-      ? [`- Parent review: ${state.review.body.replaceAll("\n", "\n  ")}`]
-      : []),
-  ];
   const body = join(state.runDir, "pr.md");
   writeFileSync(
     body,
@@ -311,7 +372,6 @@ async function publish(state: RunState): Promise<void> {
       `Checks: \`${state.check}\``,
       "",
       ...state.tickets.map((ticket) => `- #${ticket.number}: ${ticket.title} (${ticket.commit})`),
-      ...(minorReviews.length ? ["", "Remaining minor review issues:", ...minorReviews] : []),
       "",
       `Closes #${state.parent.number}`,
       ...state.tickets.map((ticket) => `Closes #${ticket.number}`),
@@ -338,6 +398,8 @@ async function publish(state: RunState): Promise<void> {
       "--body-file",
       body,
     ));
+  save(state);
+  await publishReviewObservations(state, host);
   state.phase = "done";
   state.status = "done";
   save(state);
