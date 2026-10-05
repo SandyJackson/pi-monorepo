@@ -1,7 +1,7 @@
 ---
 description: Loop review worker. Independently reviews one ticket's patch against its requirements along two axes, Standards and Spec, without editing anything.
 tools: read, grep, find, ls
-model: openai-codex/gpt-6-sol
+model: openai-codex/gpt-6.1-sol
 thinking: high
 ---
 
