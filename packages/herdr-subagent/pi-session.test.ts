@@ -799,13 +799,12 @@ describe("pi-session resolution", () => {
     expect(inspectSession(sessionPath).answer).toBeNull();
   });
 
-  it("failure to resolve does not throw", () => {
-    expect(() => readAnswer({ path: "/no/such/file.jsonl", entryId: "x" })).not.toThrow();
-    expect(() => inspectSession("/no/such/file.jsonl")).not.toThrow();
-    expect(() => inspectSession("/no/such/file.jsonl")).not.toThrow();
+  it("returns null metadata and answer for an unavailable session", () => {
+    expect(readAnswer({ path: "/no/such/file.jsonl", entryId: "x" })).toBeNull();
+    expect(inspectSession("/no/such/file.jsonl")).toEqual({ pi: null, answer: null });
   });
 
-  it("primitive JSON lines in file do not throw on inspection or resolution", () => {
+  it("resolves an answer despite primitive JSON lines", () => {
     const sessionPath = writeSessionFile(
       "primitives.jsonl",
       'null\n42\n"hi"\n[]\n' +
@@ -824,7 +823,7 @@ describe("pi-session resolution", () => {
           },
         ),
     );
-    expect(() => inspectSession(sessionPath)).not.toThrow();
-    expect(() => readAnswer({ path: sessionPath, entryId: "message-1" })).not.toThrow();
+    expect(inspectSession(sessionPath).answer).toEqual({ path: sessionPath, entryId: "message-1" });
+    expect(readAnswer({ path: sessionPath, entryId: "message-1" })).toBe("hi");
   });
 });

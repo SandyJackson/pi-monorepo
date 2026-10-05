@@ -365,8 +365,11 @@ describe("herdr/delegation — per-delegation tab placement", () => {
       statuses: new Map<string, HerdrAgentStatus[]>([["root-pane", ["working", "idle", "idle"]]]),
     });
     const creates = recordRpc(herdr, "tab.create", (p) => p.label as string);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 
-    await delegate(herdr, [taskRecord(1, "Only")], { rpc: creates.rpc });
+    const delegation = delegate(herdr, [taskRecord(1, "Only")], { rpc: creates.rpc });
+    await vi.advanceTimersByTimeAsync(1600);
+    await delegation;
 
     expect(herdr.calledMethods.slice(0, 4)).toEqual([
       "tab.create",
@@ -581,6 +584,7 @@ describe("herdr/delegation — workspace and launch invariants", () => {
       }),
     });
 
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const delegationA = delegate(herdrA, [taskRecord(1, "Task A")], {
       workspaceId: "shared-workspace",
     });
@@ -594,6 +598,7 @@ describe("herdr/delegation — workspace and launch invariants", () => {
     expect(herdrB.calledMethods).toEqual([]);
 
     releaseTaskStart.resolve();
+    await vi.advanceTimersByTimeAsync(1600);
     await delegationA;
     const resultsB = await delegationB;
     expect(resultsB[0].outcome.status).toBe("completed");

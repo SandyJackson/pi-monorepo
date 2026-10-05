@@ -3,6 +3,7 @@ import { herdrDelegationEnvironment, resolveTabLabel } from "./delegation.ts";
 import { DEFAULT_RPC_TIMEOUT } from "./session.ts";
 
 const liveHerdrAvailable =
+  process.env.RUN_LIVE_HERDR_TESTS === "1" &&
   process.env.HERDR_ENV === "1" &&
   !!process.env.HERDR_SOCKET_PATH &&
   !!process.env.HERDR_WORKSPACE_ID;
@@ -24,7 +25,7 @@ async function createLiveTab(label: string | undefined): Promise<TabCreateResult
 }
 
 // Live Herdr smoke test for per-delegation tab creation (issue #13).
-// Skipped unless pi runs inside Herdr with complete workspace metadata.
+// Opt in with RUN_LIVE_HERDR_TESTS=1 inside Herdr with complete workspace metadata.
 // The focus assertion is manual: run with a visible Herdr workspace and
 // confirm the original pane stays focused while two new tabs appear.
 // Created tabs are closed in afterAll, so repeated runs leave no residue.
@@ -43,7 +44,7 @@ describe.skipIf(!liveHerdrAvailable)("herdr/delegation — live tab.create smoke
     }
   });
 
-  it("creates an unfocused tab with the sub-agents fallback label", async () => {
+  it("returns tab and root pane IDs for the fallback label", async () => {
     expect(resolveTabLabel(undefined)).toBe("sub-agents");
     expect(resolveTabLabel("   ")).toBe("sub-agents");
 
@@ -54,7 +55,7 @@ describe.skipIf(!liveHerdrAvailable)("herdr/delegation — live tab.create smoke
     console.log(`smoke tab (fallback): ${result.tab?.tab_id} label=sub-agents`);
   });
 
-  it("creates an unfocused tab with a custom label", async () => {
+  it("returns tab and root pane IDs for a custom label", async () => {
     const custom = `smoke-${process.pid}`;
     expect(resolveTabLabel(custom)).toBe(custom);
 

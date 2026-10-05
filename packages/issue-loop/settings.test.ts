@@ -84,16 +84,16 @@ describe("loadLoopSettings", () => {
     const settings = loadLoopSettings(settingsPath);
     expect(settings.implement).toEqual({
       agentName: "loop-implement",
-      model: undefined,
-      thinking: undefined,
+      model: "opencode-go/deepseek-v4.1-flash",
+      thinking: "high",
       tools: DEFAULT_IMPLEMENT_TOOLS,
       skills: ["tdd", "diagnosing-bugs", "deslop"],
       promptBody: expect.stringContaining("/skill:tdd"),
     });
     expect(settings.review).toEqual({
       agentName: "loop-reviewer",
-      model: undefined,
-      thinking: undefined,
+      model: "openai-codex/gpt-6-sol",
+      thinking: "high",
       tools: DEFAULT_REVIEW_TOOLS,
       skills: [],
       promptBody: expect.stringContaining("[Spec]"),
@@ -175,7 +175,8 @@ describe("loadLoopSettings", () => {
     });
     const settings = loadLoopSettings(settingsPath);
     expect(settings.implement.agentName).toBe("loop-implement");
-    expect(settings.implement.model).toBeUndefined();
+    expect(settings.implement.model).toBe("opencode-go/deepseek-v4.1-flash");
+    expect(settings.implement.thinking).toBe("high");
     expect(settings.implement.tools).toEqual([
       "read",
       "grep",
@@ -188,6 +189,8 @@ describe("loadLoopSettings", () => {
     expect(settings.implement.skills).toEqual(["tdd", "diagnosing-bugs", "deslop"]);
     expect(settings.implement.promptBody).toContain("/skill:tdd");
     expect(settings.review.agentName).toBe("loop-reviewer");
+    expect(settings.review.model).toBe("openai-codex/gpt-6-sol");
+    expect(settings.review.thinking).toBe("high");
     expect(settings.review.tools).toEqual(["read", "grep", "find", "ls"]);
     expect(settings.review.skills).toEqual([]);
     expect(settings.review.promptBody).toContain("Spec");

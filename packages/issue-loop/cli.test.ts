@@ -1,13 +1,21 @@
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { afterEach, expect, it } from "vitest";
+import { promisify } from "node:util";
+import { afterAll, expect, it, onTestFinished } from "vitest";
 import { gh, githubHostFromOrigin } from "./github.ts";
 import { loadLoopSettings } from "./settings.ts";
 
 const roots: string[] = [];
+const execFileAsync = promisify(execFile);
+
+afterAll(() => {
+  for (const root of roots) rmSync(root, { recursive: true, force: true });
+});
+// Fixture-based CLI tests can overlap; process.env-mutating tests stay sequential.
+const cliTest = it.concurrent;
 const cli = resolve(import.meta.dirname, "run.mjs");
 
 function fixture(mode = "pass") {
@@ -124,8 +132,20 @@ else console.log(JSON.stringify({verdict:'pass', findings:[]}));
 `,
     { mode: 0o755 },
   );
-  const run = (...args: string[]) =>
-    spawnSync(process.execPath, [cli, ...args], { env, encoding: "utf8", timeout: 30_000 });
+  const run = async (...args: string[]) => {
+    try {
+      const result = await execFileAsync(process.execPath, [cli, ...args], {
+        env: { ...env },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      return { status: 0, ...result };
+    } catch (error) {
+      const failure = error as Error & { code?: number; stdout: string; stderr: string };
+      if (typeof failure.code !== "number") throw error;
+      return { status: failure.code, stdout: failure.stdout, stderr: failure.stderr };
+    }
+  };
   const start = () =>
     run(
       "start",
@@ -139,80 +159,86 @@ else console.log(JSON.stringify({verdict:'pass', findings:[]}));
   return { root, repo, env, git, run, start };
 }
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
+cliTest(
+  "accepts dependent tickets on one branch and opens one final PR without closing issues",
+  async () => {
+    const f = fixture();
+    const result = await f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)?.[1];
+    expect(runDir).toBeTruthy();
+    const state = JSON.parse(readFileSync(join(runDir!, "state.json"), "utf8"));
+    expect(state.status).toBe("done");
+    expect(state.tickets.map((ticket: { status: string }) => ticket.status)).toEqual([
+      "accepted",
+      "accepted",
+    ]);
+    expect(f.git("branch", "--show-current")).toBe("main");
+    const summary = readFileSync(join(runDir!, "summary.md"), "utf8");
+    expect(summary).toContain("https://github.com/test/project/pull/99");
+    const workers = readFileSync(join(f.root, "workers.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(workers.every((worker) => worker.name.startsWith(state.name))).toBe(true);
+    expect(new Set(workers.map((worker) => worker.session)).size).toBe(workers.length);
+    const reviews = workers.filter((worker) => worker.name.includes("review"));
+    expect(reviews.length).toBeGreaterThanOrEqual(3);
+    expect(reviews.every((worker) => worker.args.includes("read,grep,find,ls"))).toBe(true);
+    expect(workers.every((worker) => worker.args.includes("--no-skills"))).toBe(true);
+    // Blessed defaults: implementers get the curated trio, reviewers get none.
+    const implementers = workers.filter((worker) => worker.name.includes("implement"));
+    expect(implementers.length).toBeGreaterThan(0);
+    expect(
+      implementers.every(
+        (worker) =>
+          worker.args.includes("--skill") &&
+          worker.args.some((arg: string) => arg.endsWith(join("skills", "tdd"))) &&
+          worker.args.some((arg: string) => arg.endsWith(join("skills", "deslop"))),
+      ),
+    ).toBe(true);
+    expect(reviews.every((worker) => !worker.args.includes("--skill"))).toBe(true);
+    expect(existsSync(join(runDir!, "skills", "tdd", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(runDir!, "skills", "diagnosing-bugs", "SKILL.md"))).toBe(true);
+    const prArgs = JSON.parse(readFileSync(join(f.root, "pr.json"), "utf8"));
+    const baseIndex = prArgs.indexOf("--base");
+    expect(prArgs.slice(baseIndex, baseIndex + 2)).toEqual(["--base", "main"]);
+  },
+  30_000,
+);
 
-it("accepts dependent tickets on one branch and opens one final PR without closing issues", () => {
-  const f = fixture();
-  const result = f.start();
-  expect(result.status, result.stderr).toBe(0);
-  const runDir = result.stdout.match(/Run directory: (.+)/)?.[1];
-  expect(runDir).toBeTruthy();
-  const state = JSON.parse(readFileSync(join(runDir!, "state.json"), "utf8"));
-  expect(state.status).toBe("done");
-  expect(state.tickets.map((ticket: { status: string }) => ticket.status)).toEqual([
-    "accepted",
-    "accepted",
-  ]);
-  expect(f.git("branch", "--show-current")).toBe("main");
-  const summary = readFileSync(join(runDir!, "summary.md"), "utf8");
-  expect(summary).toContain("https://github.com/test/project/pull/99");
-  const workers = readFileSync(join(f.root, "workers.jsonl"), "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(workers.every((worker) => worker.name.startsWith(state.name))).toBe(true);
-  expect(new Set(workers.map((worker) => worker.session)).size).toBe(workers.length);
-  const reviews = workers.filter((worker) => worker.name.includes("review"));
-  expect(reviews.length).toBeGreaterThanOrEqual(3);
-  expect(reviews.every((worker) => worker.args.includes("read,grep,find,ls"))).toBe(true);
-  expect(workers.every((worker) => worker.args.includes("--no-skills"))).toBe(true);
-  // Blessed defaults: implementers get the curated trio, reviewers get none.
-  const implementers = workers.filter((worker) => worker.name.includes("implement"));
-  expect(implementers.length).toBeGreaterThan(0);
-  expect(
-    implementers.every(
-      (worker) =>
-        worker.args.includes("--skill") &&
-        worker.args.some((arg: string) => arg.endsWith(join("skills", "tdd"))) &&
-        worker.args.some((arg: string) => arg.endsWith(join("skills", "deslop"))),
-    ),
-  ).toBe(true);
-  expect(reviews.every((worker) => !worker.args.includes("--skill"))).toBe(true);
-  expect(existsSync(join(runDir!, "skills", "tdd", "SKILL.md"))).toBe(true);
-  expect(existsSync(join(runDir!, "skills", "diagnosing-bugs", "SKILL.md"))).toBe(true);
-  const prArgs = JSON.parse(readFileSync(join(f.root, "pr.json"), "utf8"));
-  expect(prArgs).toContain("--base");
-  expect(prArgs).toContain("main");
-}, 30_000);
-
-it("preserves a first-ticket failure, then reviews manual fixes on resume without repeating implementation", () => {
-  const f = fixture("fail");
-  const first = f.start();
-  expect(first.status).toBe(1);
-  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
-  const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(blocked.status).toBe("blocked");
-  expect(blocked.tickets.map((ticket: { status: string }) => ticket.status)).toEqual([
-    "blocked",
-    "pending",
-  ]);
-  expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("Provider unavailable");
-  expect(blocked.sessions[0].name).toContain("#11 implement · attempt 1");
-  writeFileSync(join(blocked.worktree, "feature.txt"), "Manually fixed\n");
-  f.env.FIXTURE_MODE = "pass";
-  const resumed = f.run("resume", runDir);
-  expect(resumed.status, resumed.stderr).toBe(0);
-  const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(finished.status).toBe("done");
-  expect(finished.name).toBe(blocked.name);
-  expect(
-    finished.sessions.filter((session: { name: string }) => session.name.includes("#11 implement")),
-  ).toHaveLength(1);
-  expect(finished.sessions[1].name).toContain("#11 review · attempt 1");
-  expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("pi --session");
-}, 30_000);
+cliTest(
+  "preserves a first-ticket failure, then reviews manual fixes on resume without repeating implementation",
+  async () => {
+    const f = fixture("fail");
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.tickets.map((ticket: { status: string }) => ticket.status)).toEqual([
+      "blocked",
+      "pending",
+    ]);
+    expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("Provider unavailable");
+    expect(blocked.sessions[0].name).toContain("#11 implement · attempt 1");
+    writeFileSync(join(blocked.worktree, "feature.txt"), "Manually fixed\n");
+    f.env.FIXTURE_MODE = "pass";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.name).toBe(blocked.name);
+    expect(
+      finished.sessions.filter((session: { name: string }) =>
+        session.name.includes("#11 implement"),
+      ),
+    ).toHaveLength(1);
+    expect(finished.sessions[1].name).toContain("#11 review · attempt 1");
+    expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("pi --session");
+  },
+  30_000,
+);
 
 function writeLoopSettings(root: string): string {
   const dir = join(root, "loop-settings");
@@ -247,106 +273,249 @@ function readWorkers(root: string): { name: string; args: string[]; prompt: stri
     .map((line) => JSON.parse(line));
 }
 
-it("applies settings roles to workers and snapshots them with the run", () => {
-  const f = fixture();
-  const settingsPath = writeLoopSettings(f.root);
-  const result = f.run(
-    "start",
-    "--repo",
-    f.repo,
-    "--issue",
-    "10",
-    "--check",
-    `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('feature.txt')"`,
-    "--settings",
-    settingsPath,
-  );
-  expect(result.status, result.stderr).toBe(0);
-  const runDir = result.stdout.match(/Run directory: (.+)/)?.[1];
-  const state = JSON.parse(readFileSync(join(runDir!, "state.json"), "utf8"));
-  expect(state.settings).toEqual({
-    implement: {
-      agentName: "implement",
-      model: "test-provider/implement-model",
-      thinking: "high",
-      tools: ["read", "bash"],
-      skills: ["tdd", "diagnosing-bugs", "deslop"],
-      promptBody: "CUSTOM IMPLEMENT GUIDANCE.",
-    },
-    review: {
-      agentName: "review",
-      model: "test-provider/review-model",
-      thinking: "low",
-      tools: ["read", "grep"],
-      skills: [],
-      promptBody: "CUSTOM REVIEW GUIDANCE.",
-    },
-    appendSystemPrompt: "SHARED STYLE NOTE.",
-  });
-  const workers = readWorkers(f.root);
-  const implement = workers.find((worker) => worker.name.includes("implement"));
-  expect(implement!.args).toContain("--model");
-  expect(implement!.args).toContain("test-provider/implement-model");
-  expect(implement!.args).toContain("--thinking");
-  expect(implement!.args).toContain("high");
-  expect(implement!.args).toContain("--tools");
-  expect(implement!.args).toContain("read,bash");
-  expect(implement!.args).toContain("--no-skills");
-  expect(implement!.args).toContain("--skill");
-  expect(implement!.args.some((arg: string) => arg.endsWith(join("skills", "tdd")))).toBe(true);
-  expect(implement!.args).toContain("--append-system-prompt");
-  expect(implement!.prompt).toContain("CUSTOM IMPLEMENT GUIDANCE.");
-  expect(implement!.prompt).not.toContain("You are the implementation worker");
-  const review = workers.find((worker) => worker.name.includes("review"));
-  expect(review!.args).toContain("test-provider/review-model");
-  expect(review!.args).toContain("--thinking");
-  expect(review!.args).toContain("low");
-  expect(review!.args).toContain("read,grep");
-  expect(review!.args).toContain("--no-skills");
-  expect(review!.args).not.toContain("--skill");
-  expect(review!.prompt).toContain("CUSTOM REVIEW GUIDANCE.");
-  expect(review!.prompt).toContain('"verdict"');
-  expect(readFileSync(join(runDir!, "append-system-prompt.md"), "utf8")).toBe(
-    "SHARED STYLE NOTE.\n",
-  );
-  expect(readFileSync(join(runDir!, "summary.md"), "utf8")).toContain("| #11");
-}, 30_000);
+cliTest(
+  "applies settings roles to workers and snapshots them with the run",
+  async () => {
+    const f = fixture();
+    const settingsPath = writeLoopSettings(f.root);
+    const result = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('feature.txt')"`,
+      "--settings",
+      settingsPath,
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)?.[1];
+    const state = JSON.parse(readFileSync(join(runDir!, "state.json"), "utf8"));
+    expect(state.settings).toEqual({
+      implement: {
+        agentName: "implement",
+        model: "test-provider/implement-model",
+        thinking: "high",
+        tools: ["read", "bash"],
+        skills: ["tdd", "diagnosing-bugs", "deslop"],
+        promptBody: "CUSTOM IMPLEMENT GUIDANCE.",
+      },
+      review: {
+        agentName: "review",
+        model: "test-provider/review-model",
+        thinking: "low",
+        tools: ["read", "grep"],
+        skills: [],
+        promptBody: "CUSTOM REVIEW GUIDANCE.",
+      },
+      appendSystemPrompt: "SHARED STYLE NOTE.",
+    });
+    const workers = readWorkers(f.root);
+    const implement = workers.find((worker) => worker.name.includes("implement"));
+    for (const pair of [
+      ["--model", "test-provider/implement-model"],
+      ["--thinking", "high"],
+      ["--tools", "read,bash"],
+    ]) {
+      const index = implement!.args.indexOf(pair[0]);
+      expect(implement!.args.slice(index, index + 2)).toEqual(pair);
+    }
+    expect(implement!.args).toContain("--no-skills");
+    expect(implement!.args).toContain("--skill");
+    expect(implement!.args.some((arg: string) => arg.endsWith(join("skills", "tdd")))).toBe(true);
+    expect(implement!.args).toContain("--append-system-prompt");
+    expect(implement!.prompt).toContain("CUSTOM IMPLEMENT GUIDANCE.");
+    expect(implement!.prompt).not.toContain("You are the implementation worker");
+    const review = workers.find((worker) => worker.name.includes("review"));
+    for (const pair of [
+      ["--model", "test-provider/review-model"],
+      ["--thinking", "low"],
+      ["--tools", "read,grep"],
+    ]) {
+      const index = review!.args.indexOf(pair[0]);
+      expect(review!.args.slice(index, index + 2)).toEqual(pair);
+    }
+    expect(review!.args).toContain("--no-skills");
+    expect(review!.args).not.toContain("--skill");
+    expect(review!.prompt).toContain("CUSTOM REVIEW GUIDANCE.");
+    expect(review!.prompt).toContain('"verdict"');
+    expect(readFileSync(join(runDir!, "append-system-prompt.md"), "utf8")).toBe(
+      "SHARED STYLE NOTE.\n",
+    );
+    expect(readFileSync(join(runDir!, "summary.md"), "utf8")).toContain("| #11");
+  },
+  30_000,
+);
 
-it("resumes from the settings snapshot after the original files are gone", () => {
-  const f = fixture("fail");
-  const settingsPath = writeLoopSettings(f.root);
-  const first = f.run(
-    "start",
-    "--repo",
-    f.repo,
-    "--issue",
-    "10",
-    "--check",
-    `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('feature.txt')"`,
-    "--settings",
-    settingsPath,
-  );
-  expect(first.status).toBe(1);
-  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
-  const snapshot = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")).settings;
-  rmSync(join(f.root, "loop-settings"), { recursive: true, force: true });
-  f.env.FIXTURE_MODE = "pass";
-  const resumed = f.run("resume", runDir);
-  expect(resumed.status, resumed.stderr).toBe(0);
-  const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(finished.status).toBe("done");
-  expect(finished.settings).toEqual(snapshot);
-  const workers = readWorkers(f.root);
-  expect(workers.some((worker) => worker.args.includes("test-provider/review-model"))).toBe(true);
-}, 60_000);
+cliTest(
+  "resumes from the settings snapshot after the original files are gone",
+  async () => {
+    const f = fixture("fail");
+    const settingsPath = writeLoopSettings(f.root);
+    const first = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('feature.txt')"`,
+      "--settings",
+      settingsPath,
+    );
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const snapshot = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")).settings;
+    rmSync(join(f.root, "loop-settings"), { recursive: true, force: true });
+    f.env.FIXTURE_MODE = "pass";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.settings).toEqual(snapshot);
+    const workers = readWorkers(f.root);
+    expect(workers.some((worker) => worker.args.includes("test-provider/review-model"))).toBe(true);
+  },
+  60_000,
+);
 
-it("fails fast on an unknown loop skill without creating workers", () => {
+cliTest(
+  "fails fast on an unknown loop skill without creating workers",
+  async () => {
+    const f = fixture();
+    const dir = join(f.root, "loop-settings");
+    mkdirSync(dir, { recursive: true });
+    const settingsPath = join(dir, "loop-settings.json");
+    writeFileSync(settingsPath, JSON.stringify({ implementSkills: ["no-such-skill"] }), "utf8");
+    const result = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Unknown loop skill "no-such-skill"');
+    expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
+  },
+  30_000,
+);
+
+cliTest(
+  "stops on malformed review output rather than accepting a stray PASS string",
+  async () => {
+    const f = fixture("malformed");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.tickets[0].status).toBe("blocked");
+    expect(state.lastError).toContain("invalid verdict");
+    expect(state.pr).toBeUndefined();
+  },
+  30_000,
+);
+
+cliTest(
+  "stops after two repair attempts and keeps the review findings for handoff",
+  async () => {
+    const f = fixture("reject");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(
+      state.sessions.filter((session: { name: string }) => session.name.includes("implement")),
+    ).toHaveLength(3);
+    expect(state.tickets[0].status).toBe("blocked");
+    expect(state.tickets[1].status).toBe("pending");
+    const summary = readFileSync(join(runDir, "summary.md"), "utf8");
+    expect(summary).toContain("Missing acceptance criterion");
+    expect(summary).toContain("| blocked | 2/2 |");
+  },
+  30_000,
+);
+
+cliTest(
+  "finds an already-created PR after publication was interrupted",
+  async () => {
+    const f = fixture("publish-fail");
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.phase).toBe("publish");
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
+    expect((await f.run("resume", runDir)).status).toBe(0);
+    expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
+  },
+  30_000,
+);
+
+cliTest(
+  "reports a dependency cycle without starting a worker or publishing",
+  async () => {
+    const f = fixture("cycle");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.sessions).toEqual([]);
+    expect(state.lastError).toContain("dependency cycle");
+    expect(state.status).toBe("blocked");
+  },
+  30_000,
+);
+
+cliTest(
+  "rejects an empty queue rather than claiming the parent is complete",
+  async () => {
+    const f = fixture("empty");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("No open direct child issues");
+  },
+  30_000,
+);
+
+cliTest(
+  "stops a timed-out check instead of launching repair workers",
+  async () => {
+    const f = fixture("fail");
+    const first = await f.start();
+    expect(first.status, first.stderr).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)?.[1];
+    expect(runDir, first.stderr).toBeTruthy();
+    const statePath = join(runDir!, "state.json");
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(state.sessions).toHaveLength(1);
+    writeFileSync(join(state.worktree, "feature.txt"), "Manually fixed\n");
+    // Exercise real timeout handling on resume without the CLI's five-minute minimum.
+    state.timeoutMs = 500;
+    state.check = `${JSON.stringify(process.execPath)} -e "require('node:fs').writeFileSync('check-started', 'yes'); setInterval(() => {}, 1000)"`;
+    writeFileSync(statePath, JSON.stringify(state));
+    const result = await f.run("resume", runDir!);
+    expect(result.status, result.stderr).toBe(1);
+    expect(readFileSync(join(state.worktree, "check-started"), "utf8")).toBe("yes");
+    const stopped = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(stopped.status).toBe("blocked");
+    expect(stopped.sessions).toHaveLength(1);
+    expect(stopped.lastError).toContain("Timed out running /bin/sh");
+    expect(readWorkers(f.root)).toHaveLength(1);
+  },
+  30_000,
+);
+
+cliTest("rejects a timeout below the CLI minimum before starting workers", async () => {
   const f = fixture();
-  const dir = join(f.root, "loop-settings");
-  mkdirSync(dir, { recursive: true });
-  const settingsPath = join(dir, "loop-settings.json");
-  writeFileSync(settingsPath, JSON.stringify({ implementSkills: ["no-such-skill"] }), "utf8");
-  const result = f.run(
+  const result = await f.run(
     "start",
     "--repo",
     f.repo,
@@ -354,281 +523,239 @@ it("fails fast on an unknown loop skill without creating workers", () => {
     "10",
     "--check",
     "true",
-    "--settings",
-    settingsPath,
-  );
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain('Unknown loop skill "no-such-skill"');
-  expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
-}, 30_000);
-
-it("stops on malformed review output rather than accepting a stray PASS string", () => {
-  const f = fixture("malformed");
-  const result = f.start();
-  expect(result.status).toBe(1);
-  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(state.tickets[0].status).toBe("blocked");
-  expect(state.lastError).toContain("invalid verdict");
-  expect(state.pr).toBeUndefined();
-}, 30_000);
-
-it("stops after two repair attempts and keeps the review findings for handoff", () => {
-  const f = fixture("reject");
-  const result = f.start();
-  expect(result.status).toBe(1);
-  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(
-    state.sessions.filter((session: { name: string }) => session.name.includes("implement")),
-  ).toHaveLength(3);
-  expect(state.tickets[0].status).toBe("blocked");
-  expect(state.tickets[1].status).toBe("pending");
-  const summary = readFileSync(join(runDir, "summary.md"), "utf8");
-  expect(summary).toContain("Missing acceptance criterion");
-  expect(summary).toContain("| blocked | 2/2 |");
-}, 30_000);
-
-it("finds an already-created PR after publication was interrupted", () => {
-  const f = fixture("publish-fail");
-  const first = f.start();
-  expect(first.status).toBe(1);
-  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(state.phase).toBe("publish");
-  const resumed = f.run("resume", runDir);
-  expect(resumed.status, resumed.stderr).toBe(0);
-  expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
-  expect(f.run("resume", runDir).status).toBe(0);
-  expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
-}, 30_000);
-
-it("reports a dependency cycle without starting a worker or publishing", () => {
-  const f = fixture("cycle");
-  const result = f.start();
-  expect(result.status).toBe(1);
-  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(state.sessions).toEqual([]);
-  expect(state.lastError).toContain("dependency cycle");
-  expect(state.status).toBe("blocked");
-}, 30_000);
-
-it("rejects an empty queue rather than claiming the parent is complete", () => {
-  const f = fixture("empty");
-  const result = f.start();
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain("No open direct child issues");
-}, 30_000);
-
-it("stops a timed-out check instead of launching repair workers", () => {
-  const f = fixture();
-  const check = `${JSON.stringify(process.execPath)} -e "setInterval(() => {}, 1000)"`;
-  const result = f.run(
-    "start",
-    "--repo",
-    f.repo,
-    "--issue",
-    "10",
-    "--check",
-    check,
     "--timeout",
     "1",
   );
   expect(result.status).toBe(1);
-  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(state.sessions).toHaveLength(1);
-  expect(state.lastError).toContain("Timed out");
-}, 30_000);
+  expect(result.stderr).toContain("--timeout must be 300 to 7200 seconds");
+  expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
+});
 
-it("rechecks manual edits made after a publication failure", () => {
-  const f = fixture("publish-fail");
-  const first = f.start();
-  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  writeFileSync(join(state.worktree, "feature.txt"), "Manual integration fix\n");
-  const resumed = f.run("resume", runDir);
-  expect(resumed.status, resumed.stderr).toBe(0);
-  const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(
-    finished.sessions.filter((session: { name: string }) => session.name.includes("parent review")),
-  ).toHaveLength(2);
-  expect(readFileSync(join(state.worktree, "feature.txt"), "utf8")).toBe(
-    "Manual integration fix\n",
-  );
-}, 30_000);
+cliTest(
+  "rechecks manual edits made after a publication failure",
+  async () => {
+    const f = fixture("publish-fail");
+    const first = await f.start();
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    writeFileSync(join(state.worktree, "feature.txt"), "Manual integration fix\n");
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(
+      finished.sessions.filter((session: { name: string }) =>
+        session.name.includes("parent review"),
+      ),
+    ).toHaveLength(2);
+    expect(readFileSync(join(state.worktree, "feature.txt"), "utf8")).toBe(
+      "Manual integration fix\n",
+    );
+  },
+  30_000,
+);
 
-it.each(["reject", "parent-reject"])(
+cliTest.each(["reject", "parent-reject"])(
   "does not replenish an exhausted repair budget on resume (%s)",
-  (mode) => {
+  async (mode) => {
     const f = fixture(mode);
-    const first = f.start();
+    const first = await f.start();
     expect(first.status).toBe(1);
     const runDir = first.stdout.match(/Run directory: (.+)/)![1];
     const before = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
     const implementations = (state: typeof before) =>
       state.sessions.filter((session: { name: string }) => session.name.includes("implement"))
         .length;
-    expect(f.run("resume", runDir).status).toBe(1);
+    expect((await f.run("resume", runDir)).status).toBe(1);
     const after = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
     expect(implementations(after)).toBe(implementations(before));
     // A human fix can still be verified after the automatic repair budget is gone.
     f.env.FIXTURE_MODE = "pass";
-    expect(f.run("resume", runDir).status).toBe(0);
+    expect((await f.run("resume", runDir)).status).toBe(0);
   },
   30_000,
 );
 
-it("binds GitHub operations to origin instead of an inherited GH_REPO", () => {
-  const f = fixture();
-  Object.assign(f.env, { GH_REPO: "wrong/repository" });
-  const result = f.start();
-  expect(result.status, result.stderr).toBe(0);
-  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
-  expect(JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")).githubRepo).toBe(
-    "test/project",
-  );
-}, 30_000);
+cliTest(
+  "binds GitHub operations to origin instead of an inherited GH_REPO",
+  async () => {
+    const f = fixture();
+    Object.assign(f.env, { GH_REPO: "wrong/repository" });
+    const result = await f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    expect(JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")).githubRepo).toBe(
+      "test/project",
+    );
+  },
+  30_000,
+);
 
-it("refuses to resume after origin is changed", () => {
-  const f = fixture("fail");
-  const first = f.start();
-  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
-  f.git("remote", "set-url", "origin", "https://github.com/wrong/repository.git");
-  const result = f.run("resume", runDir);
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain("origin");
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(state.sessions).toHaveLength(1);
-}, 30_000);
-
-it("reports a forbidden HEAD change even when the worker exits unsuccessfully", () => {
-  const f = fixture("commit-fail");
-  const result = f.start();
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain("HEAD changed outside the controller");
-  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(state.tickets[0].status).toBe("blocked");
-}, 30_000);
-
-it("handles repeated interrupts without leaving a detached worker running", async () => {
-  const f = fixture("stubborn");
-  const child = spawn(
-    process.execPath,
-    [cli, "start", "--repo", f.repo, "--issue", "10", "--check", "true"],
-    { env: f.env, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let output = "";
-  child.stdout.on("data", (data) => {
-    output += data.toString();
-  });
-  child.stderr.resume();
-  const closed = new Promise<void>((resolve) => child.on("close", () => resolve()));
-  let workerPid: number | undefined;
-  try {
-    const marker = join(f.root, "stubborn.pid");
-    for (let i = 0; i < 200 && !existsSync(marker); i++) await delay(50);
-    expect(existsSync(marker)).toBe(true);
-    workerPid = Number(readFileSync(marker, "utf8"));
-    child.kill("SIGINT");
-    await delay(100);
-    child.kill("SIGINT");
-    await Promise.race([
-      closed,
-      delay(5000).then(() => {
-        throw new Error("Controller did not stop");
-      }),
-    ]);
-    const runDir = output.match(/Run directory: (.+)/)![1];
+cliTest(
+  "refuses to resume after origin is changed",
+  async () => {
+    const f = fixture("fail");
+    const first = await f.start();
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    f.git("remote", "set-url", "origin", "https://github.com/wrong/repository.git");
+    const result = await f.run("resume", runDir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("origin");
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-    expect(state.status).toBe("blocked");
-    expect(existsSync(join(runDir, "run.lock"))).toBe(false);
-    expect(() => process.kill(workerPid!, 0)).toThrow();
-  } finally {
-    child.kill("SIGKILL");
-    if (workerPid) {
-      try {
-        process.kill(-workerPid, "SIGKILL");
-      } catch {
-        /* Already stopped. */
+    expect(state.sessions).toHaveLength(1);
+  },
+  30_000,
+);
+
+cliTest(
+  "reports a forbidden HEAD change even when the worker exits unsuccessfully",
+  async () => {
+    const f = fixture("commit-fail");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("HEAD changed outside the controller");
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.tickets[0].status).toBe("blocked");
+  },
+  30_000,
+);
+
+cliTest(
+  "handles repeated interrupts without leaving a detached worker running",
+  async () => {
+    const f = fixture("stubborn");
+    const child = spawn(
+      process.execPath,
+      [cli, "start", "--repo", f.repo, "--issue", "10", "--check", "true"],
+      { env: f.env, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let output = "";
+    child.stdout.on("data", (data) => {
+      output += data.toString();
+    });
+    child.stderr.resume();
+    const closed = new Promise<void>((resolve) => child.on("close", () => resolve()));
+    let workerPid: number | undefined;
+    try {
+      const marker = join(f.root, "stubborn.pid");
+      for (let i = 0; i < 200 && !existsSync(marker); i++) await delay(50);
+      expect(existsSync(marker)).toBe(true);
+      workerPid = Number(readFileSync(marker, "utf8"));
+      child.kill("SIGINT");
+      await delay(100);
+      child.kill("SIGINT");
+      await Promise.race([
+        closed,
+        delay(5000).then(() => {
+          throw new Error("Controller did not stop");
+        }),
+      ]);
+      const runDir = output.match(/Run directory: (.+)/)![1];
+      const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+      expect(state.status).toBe("blocked");
+      expect(existsSync(join(runDir, "run.lock"))).toBe(false);
+      expect(() => process.kill(workerPid!, 0)).toThrow();
+    } finally {
+      child.kill("SIGKILL");
+      if (workerPid) {
+        try {
+          process.kill(-workerPid, "SIGKILL");
+        } catch {
+          /* Already stopped. */
+        }
       }
+      await closed;
     }
-    await closed;
-  }
-}, 30_000);
+  },
+  30_000,
+);
 
-it("rejects origin with multiple push destinations", () => {
-  const f = fixture();
-  const origin = f.git("remote", "get-url", "origin");
-  f.git("config", "--add", "remote.origin.pushurl", origin);
-  f.git("config", "--add", "remote.origin.pushurl", join(f.root, "unintended.git"));
-  const result = f.start();
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain("exactly one");
-  expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
-}, 30_000);
+cliTest(
+  "rejects origin with multiple push destinations",
+  async () => {
+    const f = fixture();
+    const origin = f.git("remote", "get-url", "origin");
+    f.git("config", "--add", "remote.origin.pushurl", origin);
+    f.git("config", "--add", "remote.origin.pushurl", join(f.root, "unintended.git"));
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("exactly one");
+    expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
+  },
+  30_000,
+);
 
-it("checks worktree-local remote settings before publication", () => {
-  const f = fixture("publish-fail");
-  const first = f.start();
-  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  f.git("config", "extensions.worktreeConfig", "true");
-  f.git(
-    "-C",
-    state.worktree,
-    "config",
-    "--worktree",
-    "remote.origin.pushurl",
-    join(f.root, "unintended.git"),
-  );
-  const resumed = f.run("resume", runDir);
-  expect(resumed.status).toBe(1);
-  expect(resumed.stderr).toContain("origin must have exactly one");
-}, 30_000);
+cliTest(
+  "checks worktree-local remote settings before publication",
+  async () => {
+    const f = fixture("publish-fail");
+    const first = await f.start();
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    f.git("config", "extensions.worktreeConfig", "true");
+    f.git(
+      "-C",
+      state.worktree,
+      "config",
+      "--worktree",
+      "remote.origin.pushurl",
+      join(f.root, "unintended.git"),
+    );
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status).toBe(1);
+    expect(resumed.stderr).toContain("origin must have exactly one");
+  },
+  30_000,
+);
 
-it("omits issue comments from saved requirements and every worker prompt", () => {
-  const f = fixture("comments");
-  const result = f.start();
-  expect(result.status, result.stderr).toBe(0);
-  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(state.parent.body).toBe("Implement the requested feature.");
-  expect(
-    state.tickets.every(
-      (ticket: { body: string }) => ticket.body === "Implement the requested feature.",
-    ),
-  ).toBe(true);
-  const workers = readFileSync(join(f.root, "workers.jsonl"), "utf8");
-  expect(workers).not.toContain("UNTRUSTED_COMMENT_INSTRUCTION");
-  expect(workers).toContain("Implement the requested feature.");
-}, 30_000);
+cliTest(
+  "omits issue comments from saved requirements and every worker prompt",
+  async () => {
+    const f = fixture("comments");
+    const result = await f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.parent.body).toBe("Implement the requested feature.");
+    expect(
+      state.tickets.every(
+        (ticket: { body: string }) => ticket.body === "Implement the requested feature.",
+      ),
+    ).toBe(true);
+    const workers = readFileSync(join(f.root, "workers.jsonl"), "utf8");
+    expect(workers).not.toContain("UNTRUSTED_COMMENT_INSTRUCTION");
+    expect(workers).toContain("Implement the requested feature.");
+  },
+  30_000,
+);
 
-it("refuses old snapshots that may already contain untrusted comments", () => {
-  const f = fixture("fail");
-  const first = f.start();
-  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
-  const statePath = join(runDir, "state.json");
-  const state = JSON.parse(readFileSync(statePath, "utf8"));
-  state.version = 1;
-  state.parent.body += "\n\n## Issue comments\n\nUNTRUSTED_COMMENT_INSTRUCTION";
-  writeFileSync(statePath, JSON.stringify(state));
-  const result = f.run("resume", runDir);
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain("older snapshots may include issue comments");
-  expect(readFileSync(join(f.root, "workers.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
-}, 30_000);
+cliTest(
+  "refuses old snapshots that may already contain untrusted comments",
+  async () => {
+    const f = fixture("fail");
+    const first = await f.start();
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const statePath = join(runDir, "state.json");
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    state.version = 1;
+    state.parent.body += "\n\n## Issue comments\n\nUNTRUSTED_COMMENT_INSTRUCTION";
+    writeFileSync(statePath, JSON.stringify(state));
+    const result = await f.run("resume", runDir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("older snapshots may include issue comments");
+    expect(readFileSync(join(f.root, "workers.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
+  },
+  30_000,
+);
 
-it.each([
+cliTest.each([
   ["parent-order", [12, 11]],
   ["parent-order-dependency", [11, 12]],
 ] as const)(
   "preserves parent order while respecting dependencies (%s)",
-  (mode, expected) => {
+  async (mode, expected) => {
     const f = fixture(mode);
-    const result = f.start();
+    const result = await f.start();
     expect(result.status, result.stderr).toBe(0);
     const runDir = result.stdout.match(/Run directory: (.+)/)![1];
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
@@ -646,39 +773,53 @@ it.each([
   30_000,
 );
 
-it("preserves UTF-8 issue text split across stdout chunks", () => {
-  const f = fixture("unicode");
-  const result = f.start();
-  expect(result.status, result.stderr).toBe(0);
-  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  expect(state.parent.body).toBe("Price €5.");
-  expect(state.tickets.every((ticket: { body: string }) => ticket.body === "Price €5.")).toBe(true);
-  expect(readFileSync(join(f.root, "workers.jsonl"), "utf8")).not.toContain("�");
-}, 30_000);
+cliTest(
+  "preserves UTF-8 issue text split across stdout chunks",
+  async () => {
+    const f = fixture("unicode");
+    const result = await f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.parent.body).toBe("Price €5.");
+    expect(state.tickets.every((ticket: { body: string }) => ticket.body === "Price €5.")).toBe(
+      true,
+    );
+    expect(readFileSync(join(f.root, "workers.jsonl"), "utf8")).not.toContain("�");
+  },
+  30_000,
+);
 
-it("preserves UTF-8 error text split across stderr chunks", () => {
-  const f = fixture("unicode-error");
-  const result = f.start();
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain("Provider says café");
-  const runDir = result.stdout.match(/Run directory: (.+)/)![1];
-  expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("Provider says café");
-}, 30_000);
+cliTest(
+  "preserves UTF-8 error text split across stderr chunks",
+  async () => {
+    const f = fixture("unicode-error");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Provider says café");
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("Provider says café");
+  },
+  30_000,
+);
 
-it("reports the signal when a worker is terminated externally", () => {
-  const f = fixture("signal-exit");
-  const result = f.start();
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain("pi terminated by SIGTERM");
-  expect(result.stderr).not.toContain("exited null");
-}, 30_000);
+cliTest(
+  "reports the signal when a worker is terminated externally",
+  async () => {
+    const f = fixture("signal-exit");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("pi terminated by SIGTERM");
+    expect(result.stderr).not.toContain("exited null");
+  },
+  30_000,
+);
 
-it.each(["missing-lock", "directory-lock"])(
+cliTest.each(["missing-lock", "directory-lock"])(
   "preserves the primary error if lock cleanup fails (%s)",
-  (mode) => {
+  async (mode) => {
     const f = fixture(mode);
-    const result = f.start();
+    const result = await f.start();
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Provider unavailable");
     const runDir = result.stdout.match(/Run directory: (.+)/)![1];
@@ -703,7 +844,7 @@ it("derives the GitHub host from common origin URL forms", () => {
 
 it("rejects a gh call when the inherited GH_HOST targets another host", async () => {
   const dir = mkdtempSync(join(tmpdir(), "issue-loop-gh-"));
-  roots.push(dir);
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   const saved = process.env.GH_HOST;
   process.env.GH_HOST = "other.example.com";
   try {
@@ -716,7 +857,7 @@ it("rejects a gh call when the inherited GH_HOST targets another host", async ()
 
 it("forces the origin host on gh calls instead of inheriting the environment", async () => {
   const dir = mkdtempSync(join(tmpdir(), "issue-loop-gh-"));
-  roots.push(dir);
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   const out = join(dir, "env.txt");
   writeFileSync(join(dir, "gh"), `#!/bin/sh\necho "$GH_HOST" > "$STUB_OUT"\nprintf '{}\\n'\n`, {
     mode: 0o755,
@@ -746,7 +887,7 @@ it("forces the origin host on gh calls instead of inheriting the environment", a
 
 it("normalizes an empty agent tools list to the role defaults", () => {
   const dir = mkdtempSync(join(tmpdir(), "issue-loop-settings-"));
-  roots.push(dir);
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(dir, "agents"), { recursive: true });
   for (const role of ["implement", "review"]) {
     writeFileSync(
@@ -768,36 +909,40 @@ it("normalizes an empty agent tools list to the role defaults", () => {
   expect(settings.review.tools).toEqual(["read", "grep", "find", "ls"]);
 });
 
-it("leaves a replaced run lock for its new owner", () => {
+cliTest("leaves a replaced run lock for its new owner", async () => {
   const f = fixture("replace-lock");
-  const result = f.start();
+  const result = await f.start();
   expect(result.status, result.stderr).toBe(0);
   const runDir = result.stdout.match(/Run directory: (.+)/)![1];
   expect(readFileSync(join(runDir, "run.lock"), "utf8")).toBe("new-owner\n");
   expect(result.stderr).toContain("replaced");
 });
 
-it("can resume a setup failure in the already-created worktree", () => {
-  const f = fixture();
-  const setup = `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('setup-ready')"`;
-  const first = f.run(
-    "start",
-    "--repo",
-    f.repo,
-    "--issue",
-    "10",
-    "--check",
-    "true",
-    "--setup",
-    setup,
-  );
-  expect(first.status).toBe(1);
-  const runDir = first.stdout.match(/Run directory: (.+)/)![1];
-  const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-  writeFileSync(join(state.worktree, "setup-ready"), "ready");
-  // Setup artifacts would normally be ignored dependency directories.
-  writeFileSync(join(f.root, "ignore"), "setup-ready\n");
-  f.git("config", "core.excludesFile", join(f.root, "ignore"));
-  const resumed = f.run("resume", runDir);
-  expect(resumed.status, resumed.stderr).toBe(0);
-}, 30_000);
+cliTest(
+  "can resume a setup failure in the already-created worktree",
+  async () => {
+    const f = fixture();
+    const setup = `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('setup-ready')"`;
+    const first = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--setup",
+      setup,
+    );
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    writeFileSync(join(state.worktree, "setup-ready"), "ready");
+    // Setup artifacts would normally be ignored dependency directories.
+    writeFileSync(join(f.root, "ignore"), "setup-ready\n");
+    f.git("config", "core.excludesFile", join(f.root, "ignore"));
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+  },
+  30_000,
+);
