@@ -1,6 +1,6 @@
 # Subagent delegation architecture
 
-This document describes the implemented design of `packages/herdr-subagent` — durable module ownership and invariants only. Vocabulary follows `CONTEXT.md`: **subagent delegation**, **delegated task**, **delegated task number**, **delegated task outcome**, **visible subagent session**, and **callable agent catalog**.
+This document describes the implemented design of `packages/herdr-subagent` — durable module ownership and invariants only. Vocabulary follows `GLOSSARY.md`: **subagent delegation**, **delegated task**, **delegated task number**, **delegated task outcome**, **visible subagent session**, and **callable agent catalog**.
 
 The agent-state projection that backs delegated-turn settlement is Herdr-managed (see [ADR-0004](../adr/0004-keep-herdr-agent-state-managed-by-herdr.md)); this module consumes it as an external boundary and observes it through `agent.get`.
 

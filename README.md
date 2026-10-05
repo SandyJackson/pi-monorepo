@@ -12,7 +12,7 @@ My Pi setup in one repo. Extensions, skills, and agents I use day to day.
 | [herdr-subagent](./packages/herdr-subagent) | Delegates work to subagents in visible Herdr panes. |
 | [session-auto-name](./packages/session-auto-name) | Names untitled sessions after the first exchange. |
 
-Skills live in [skills](./skills). Agent definitions live in [agents](./agents). Shared vocabulary is in [CONTEXT.md](./CONTEXT.md).
+Skills live in [skills](./skills). Agent definitions live in [agents](./agents). Shared vocabulary is in [GLOSSARY.md](./GLOSSARY.md).
 
 ## Installation
 
