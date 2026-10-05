@@ -37,8 +37,8 @@ export interface RoleSettings {
 }
 
 /**
- * Progress-watchdog policy. Later slices enforce these; T1 persists them so a
- * resumed run keeps its configured allowances.
+ * Progress-watchdog policy enforced by the supervised worker. Persisted with a
+ * run so resume keeps the same allowances.
  */
 export interface WatchdogSettings {
   /** Silence without observable output before a step is suspicious. */

@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { LoopSettings } from "./settings.ts";
-import type { FindingAxis } from "./worker.ts";
+import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName } from "./worker.ts";
 
 export const RUN_STATE_VERSION = 5;
 
@@ -57,6 +57,16 @@ export interface Session {
   name: string;
   path: string;
   log: string;
+  /** Execution time the phase task had consumed when it last stopped. */
+  consumedMs?: number;
+  /** Whether the single incomplete/stalled continuation was used. */
+  continuationUsed?: boolean;
+  /** Controller-recorded stop explanation from the watchdog or a worker failure. */
+  stopReason?: string;
+  /** Checkpoint evidence persisted before an abort, replayed on recovery. */
+  checkpoint?: CheckpointEvidence;
+  /** Phase outcome the worker returned; an interrupted attempt leaves this unset so resume reuses its allowance. */
+  outcome?: PhaseOutcomeName;
 }
 
 export interface RunState {

@@ -172,6 +172,53 @@ function handle(command) {
  fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'workers.jsonl'), JSON.stringify({name, session, args, prompt, cwd:process.cwd()})+'\\n');
  const isImplement = name.includes('implement');
  const mode = process.env.FIXTURE_MODE;
+ if (command.type === 'steer') {
+  out({id: command.id, type:'response', command:'steer', success:true, data:{disposition:'queued'}});
+  return;
+ }
+ if (command.type === 'clear_queue') {
+  out({id: command.id, type:'response', command:'clear_queue', success:true, data:{steering:[], followUp:[]}});
+  return;
+ }
+ if (command.type === 'abort') {
+  out({id: command.id, type:'response', command:'abort', success:true});
+  process.exit(0);
+ }
+ if (mode === 'stall-review' && !isImplement) {
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'tool_execution_start', toolCallId:'review-stall', toolName:'bash', args:{}});
+  return;
+ }
+ if (mode === 'stall-once' && !isImplement) {
+  const counterFile = path.join(process.env.FIXTURE_ROOT, 'review-count');
+  const count = (fs.existsSync(counterFile) ? Number(fs.readFileSync(counterFile, 'utf8')) : 0) + 1;
+  fs.writeFileSync(counterFile, String(count));
+  if (count === 1) {
+   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+   out({type:'agent_start'});
+   out({type:'message_start', message:{role:'assistant', content:[]}});
+   out({type:'tool_execution_start', toolCallId:'review-stall', toolName:'bash', args:{}});
+   return;
+  }
+  if (count === 2) {
+   const text = JSON.stringify({outcome:'changes_requested', summary:'Fix the review finding', findings:[{axis:'spec',severity:'major',location:'feature.txt',description:'Fix the review finding'}]});
+   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+   out({type:'agent_start'});
+   out({type:'message_start', message:{role:'assistant', content:[]}});
+   out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+   out({type:'agent_end', messages:[], willRetry:false});
+   out({type:'agent_settled'});
+   return;
+  }
+ }
+ if (mode === 'fail-review-after-delay' && !isImplement) {
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  setTimeout(() => { console.error('Provider unavailable'); process.exit(1); }, 300);
+  return;
+ }
  if (isImplement) {
   if (mode === 'signal-exit') process.kill(process.pid, 'SIGTERM');
   if (mode === 'replace-lock') {
@@ -398,6 +445,8 @@ cliTest(
     ]);
     expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("Provider unavailable");
     expect(blocked.sessions[0].name).toContain("#11 implement · attempt 1");
+    // An unsuccessful exit persists its elapsed runtime for resume.
+    expect(typeof blocked.sessions[0].consumedMs).toBe("number");
     writeFileSync(join(blocked.worktree, "feature.txt"), "Manually fixed\n");
     f.env.FIXTURE_MODE = "pass";
     const resumed = await f.run("resume", runDir);
@@ -683,7 +732,9 @@ cliTest(
 
 cliTest.each([
   ["editing-pass", "Invalid editing outcome"],
-  ["editing-incomplete", "Implementation incomplete"],
+  // A voluntary incomplete consumes the one continuation and a second one is
+  // bounded, retaining the phase allowance instead of finishing the attempt.
+  ["editing-incomplete", "second-incomplete"],
   ["editing-blocked", "Implementation blocked"],
 ])(
   "does not approve invalid editing outcome %s",
@@ -703,20 +754,23 @@ cliTest.each([
 );
 
 cliTest(
-  "stops on an incomplete review outcome without accepting work",
+  "bounds a repeated incomplete review outcome without accepting work",
   async () => {
     const f = fixture("review-incomplete");
     const result = await f.start();
     expect(result.status).toBe(1);
     const runDir = result.stdout.match(/Run directory: (.+)/)![1];
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-    expect(state.lastError).toContain("Review incomplete");
-    expect(state.tickets[0].review).toMatchObject({
-      outcome: "incomplete",
-      remainingWork: "Need more evidence.",
-    });
+    expect(state.lastError).toContain("second-incomplete");
+    expect(state.tickets[0].review).toBeUndefined();
     expect(state.tickets[0].status).toBe("blocked");
     expect(state.tickets[0].commit).toBeUndefined();
+    // The persisted stop reason retains the reported remaining work.
+    const review = state.sessions.find((session: { name: string }) =>
+      session.name.includes("review"),
+    );
+    expect(review.stopReason).toContain("second-incomplete");
+    expect(review.stopReason).toContain("Need more evidence.");
   },
   30_000,
 );
@@ -1320,6 +1374,227 @@ cliTest(
     f.git("config", "core.excludesFile", join(f.root, "ignore"));
     const resumed = await f.run("resume", runDir);
     expect(resumed.status, resumed.stderr).toBe(0);
+  },
+  30_000,
+);
+
+function writeWatchdogSettings(root: string): string {
+  const settingsPath = join(root, "watchdog-settings.json");
+  writeFileSync(
+    settingsPath,
+    JSON.stringify({
+      watchdog: {
+        silenceMs: 100,
+        toolMs: 100_000,
+        softCheckpointMs: 100_000,
+        hardCeilingMs: 100_000,
+        checkpointGraceMs: 100,
+        abortGraceMs: 100,
+        sigkillEscalationMs: 100,
+      },
+    }),
+    "utf8",
+  );
+  return settingsPath;
+}
+
+cliTest(
+  "checkpoints and aborts a stalled worker while persisting the stop explanation",
+  async () => {
+    const f = fixture("stall-review");
+    const settingsPath = writeWatchdogSettings(f.root);
+    const result = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    );
+    expect(result.status, result.stderr).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("blocked");
+    const review = state.sessions.find((session: { name: string }) =>
+      session.name.includes("review"),
+    );
+    expect(review.stopReason).toContain("checkpoint-grace");
+    expect(review.consumedMs).toBeGreaterThanOrEqual(100);
+    // The specific stalled-step evidence is persisted, not just the abort reason.
+    expect(review.checkpoint).toMatchObject({ reason: "silence" });
+    expect(review.checkpoint.detail).toContain("no observable progress");
+    expect(state.lastError).toContain("checkpoint-grace");
+    expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("checkpoint-grace");
+    // The checkpoint request was delivered before the abort.
+    const reviewCommands = readWorkers(f.root).filter((entry) => entry.name.includes("review"));
+    expect(reviewCommands.some((entry) => entry.prompt?.includes("Controller checkpoint"))).toBe(
+      true,
+    );
+  },
+  30_000,
+);
+
+cliTest(
+  "reuses consumed watchdog runtime when resuming an interrupted review",
+  async () => {
+    const f = fixture("stall-review");
+    const settingsPath = writeWatchdogSettings(f.root);
+    const args = [
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    ];
+    const first = await f.run(...args);
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const afterFirst = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const attemptOne = afterFirst.sessions.find((session: { name: string }) =>
+      session.name.includes("review · attempt 1"),
+    );
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status).toBe(1);
+    const afterResume = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const attemptTwo = afterResume.sessions.find((session: { name: string }) =>
+      session.name.includes("review · attempt 2"),
+    );
+    expect(attemptOne.consumedMs).toBeGreaterThanOrEqual(100);
+    expect(attemptTwo.consumedMs).toBeGreaterThan(attemptOne.consumedMs + 50);
+    expect(attemptTwo.continuationUsed).toBe(false);
+    // The recovery prompt replays the persisted checkpoint evidence so an
+    // unconsumed steer is not the only record.
+    const attemptTwoWorkers = readWorkers(f.root).filter((entry) =>
+      entry.name.includes("review · attempt 2"),
+    );
+    expect(attemptTwoWorkers.some((entry) => entry.prompt.includes("Recovery context"))).toBe(true);
+    expect(attemptTwoWorkers.some((entry) => entry.prompt.includes("no observable progress"))).toBe(
+      true,
+    );
+  },
+  30_000,
+);
+
+cliTest(
+  "inherits recovery state when resume startup is interrupted before accounting",
+  async () => {
+    const f = fixture("stall-review");
+    const settingsPath = writeWatchdogSettings(f.root);
+    const args = [
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    ];
+    const first = await f.run(...args);
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const statePath = join(runDir, "state.json");
+    const afterFirst = JSON.parse(readFileSync(statePath, "utf8"));
+    const attemptOne = afterFirst.sessions.find((session: { name: string }) =>
+      session.name.includes("review · attempt 1"),
+    );
+    expect(attemptOne.consumedMs).toBeGreaterThanOrEqual(100);
+    expect(attemptOne.checkpoint).toMatchObject({ reason: "silence" });
+    // Interrupt the controller after it persists the new attempt but before the
+    // worker can report any accounting. A directory at the log path makes the
+    // worker fail to start without touching the restored state.
+    const nextLog = join(runDir, "logs", `${afterFirst.sessions.length + 1}-review.log`);
+    mkdirSync(nextLog, { recursive: true });
+    const interrupted = await f.run("resume", runDir);
+    expect(interrupted.status).toBe(1);
+    const afterInterrupt = JSON.parse(readFileSync(statePath, "utf8"));
+    const attemptTwo = afterInterrupt.sessions.find((session: { name: string }) =>
+      session.name.includes("review · attempt 2"),
+    );
+    // The interrupted attempt must inherit the allowance and evidence, not
+    // reset them, because it is now the latest recovery source.
+    expect(attemptTwo.consumedMs).toBe(attemptOne.consumedMs);
+    expect(attemptTwo.continuationUsed).toBe(false);
+    expect(attemptTwo.checkpoint).toMatchObject({ reason: "silence" });
+    expect(attemptTwo.outcome).toBeUndefined();
+    rmSync(nextLog, { recursive: true, force: true });
+    f.env.FIXTURE_MODE = "pass";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(statePath, "utf8"));
+    const attemptThree = finished.sessions.find((session: { name: string }) =>
+      session.name.includes("review · attempt 3"),
+    );
+    expect(attemptThree.consumedMs).toBeGreaterThanOrEqual(attemptTwo.consumedMs);
+  },
+  30_000,
+);
+
+cliTest(
+  "reuses consumed runtime after an unsuccessful exit, not only a watchdog abort",
+  async () => {
+    const f = fixture("fail-review-after-delay");
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const afterFirst = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const attemptOne = afterFirst.sessions.find((session: { name: string }) =>
+      session.name.includes("review · attempt 1"),
+    );
+    expect(attemptOne.consumedMs).toBeGreaterThanOrEqual(200);
+    f.env.FIXTURE_MODE = "pass";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const afterResume = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const attemptTwo = afterResume.sessions.find((session: { name: string }) =>
+      session.name.includes("review · attempt 2"),
+    );
+    // The resumed review inherits the runtime already spent by the crashed one.
+    expect(attemptTwo.consumedMs).toBeGreaterThan(attemptOne.consumedMs);
+  },
+  30_000,
+);
+
+cliTest(
+  "starts a fresh review task after a repair instead of reusing an obsolete interrupted review",
+  async () => {
+    const f = fixture("stall-once");
+    const settingsPath = writeWatchdogSettings(f.root);
+    const first = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    );
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const reviews = state.sessions.filter((session: { name: string }) =>
+      session.name.includes("#11 review"),
+    );
+    expect(reviews).toHaveLength(3);
+    const [interrupted, repaired, fresh] = reviews;
+    expect(interrupted.outcome).toBeUndefined();
+    expect(repaired.outcome).toBe("changes_requested");
+    expect(fresh.outcome).toBe("pass");
+    // A completed review ends the phase task; the next review must not inherit
+    // the obsolete interrupted attempt's consumed allowance.
+    expect(fresh.consumedMs).toBeLessThan(interrupted.consumedMs);
   },
   30_000,
 );

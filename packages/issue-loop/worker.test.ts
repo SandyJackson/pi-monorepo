@@ -1,4 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -7,6 +14,10 @@ import {
   parsePhaseOutcome,
   REVIEW_OUTCOME_EXAMPLES,
   runWorker,
+  type WorkerAccounting,
+  type WorkerClock,
+  type WorkerIntervention,
+  type WorkerRecovery,
 } from "./worker.ts";
 
 const root = mkdtempSync(join(tmpdir(), "loop-worker-test-"));
@@ -139,12 +150,12 @@ function run(scenario: string, timeoutMs = 5_000) {
 }
 
 it("frames partial, coalesced, and CRLF JSONL records", async () => {
-  await expect(run("framing")).resolves.toEqual({ text: "AUTHORITATIVE" });
+  await expect(run("framing")).resolves.toMatchObject({ text: "AUTHORITATIVE" });
 });
 
 it("ignores responses for other command ids and waits for the settled run", async () => {
-  await expect(run("wait-settled")).resolves.toEqual({ text: "SECOND" });
-  await expect(run("ignore-mismatched")).resolves.toEqual({ text: "OK" });
+  await expect(run("wait-settled")).resolves.toMatchObject({ text: "SECOND" });
+  await expect(run("ignore-mismatched")).resolves.toMatchObject({ text: "OK" });
 });
 
 it("rejects a handled prompt that started no run", async () => {
@@ -163,11 +174,131 @@ it("rejects a process that exits before the run settles", async () => {
   await expect(run("exit-early")).rejects.toThrow(/before the run settled/);
 });
 
+it("persists consumed runtime when a worker exits before settling", async () => {
+  const accounting: WorkerAccounting[] = [];
+  await expect(
+    runWorker({
+      executable: process.execPath,
+      args: [peerScript, "exit-early"],
+      cwd: root,
+      prompt: "Do the thing.",
+      log: join(root, "exit-early-accounting.log"),
+      timeoutMs: 5_000,
+      onAccounting: (value) => accounting.push(value),
+    }),
+  ).rejects.toThrow(/before the run settled/);
+  expect(accounting.length).toBeGreaterThan(0);
+  expect(typeof accounting.at(-1)?.consumedMs).toBe("number");
+});
+
 it("rejects a settled run whose final message failed, even with valid outcome JSON", async () => {
   await expect(run("error-message")).rejects.toThrow(
     /unsuccessful response \(error: provider stream failed\)/,
   );
   await expect(run("aborted-message")).rejects.toThrow(/unsuccessful response \(aborted\)/);
+});
+
+it("completes process-group escalation before settling after an abort", async () => {
+  const wd = startWatchdog("descendant");
+  const promise = wd.start({
+    watchdog: {
+      silenceMs: 200,
+      toolMs: 1_000_000,
+      softCheckpointMs: 1_000_000,
+      hardCeilingMs: 1_000_000,
+      checkpointGraceMs: 100,
+      abortGraceMs: 100,
+      sigkillEscalationMs: 100,
+    },
+  });
+  let settled = "pending";
+  promise.then(
+    () => {
+      settled = "resolved";
+    },
+    () => {
+      settled = "rejected";
+    },
+  );
+  const pidFile = join(wd.dir, "descendant.pid");
+  const readyFile = join(wd.dir, "desc-ready");
+  let pid: number | undefined;
+  try {
+    await wd.accepted();
+    const leaderPid = Number(readFileSync(join(wd.dir, "leader.pid"), "utf8"));
+    for (let attempt = 0; attempt < 200 && !existsSync(readyFile); attempt++) await delay(10);
+    expect(existsSync(readyFile)).toBe(true);
+    pid = Number(readFileSync(pidFile, "utf8"));
+    await wd.clock.advance(200);
+    await wd.waitForCommand("steer");
+    await wd.clock.advance(100);
+    await wd.waitForCommand("abort");
+    // Abort grace starts the SIGTERM; the leader exits but its descendant
+    // ignores it, so the promise must wait for the SIGKILL escalation.
+    await wd.clock.advance(100);
+    await expect(processGone(leaderPid)).resolves.toBe(true);
+    await flush();
+    expect(settled).toBe("pending");
+    await wd.clock.advance(100);
+    await flush();
+    expect(settled).toBe("rejected");
+    await expect(promise).rejects.toThrow(/checkpoint-grace/);
+    await expect(processGone(pid)).resolves.toBe(true);
+  } finally {
+    if (pid) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* Already stopped. */
+      }
+    }
+  }
+});
+
+it("terminates descendants when the leader exits before acknowledging the abort", async () => {
+  const wd = startWatchdog("exit-on-abort");
+  const promise = wd.start({
+    watchdog: {
+      silenceMs: 200,
+      toolMs: 1_000_000,
+      softCheckpointMs: 1_000_000,
+      hardCeilingMs: 1_000_000,
+      checkpointGraceMs: 100,
+      abortGraceMs: 10_000,
+      sigkillEscalationMs: 100,
+    },
+  });
+  const pidFile = join(wd.dir, "descendant.pid");
+  const readyFile = join(wd.dir, "desc-ready");
+  let pid: number | undefined;
+  try {
+    await wd.accepted();
+    const leaderPid = Number(readFileSync(join(wd.dir, "leader.pid"), "utf8"));
+    for (let attempt = 0; attempt < 200 && !existsSync(readyFile); attempt++) await delay(10);
+    expect(existsSync(readyFile)).toBe(true);
+    pid = Number(readFileSync(pidFile, "utf8"));
+    await wd.clock.advance(200);
+    await wd.waitForCommand("steer");
+    await wd.clock.advance(100);
+    await wd.waitForCommand("abort");
+    // The leader exits without acknowledging, long before the abort grace.
+    // finish must still start the bounded group termination it would otherwise
+    // have lost with the cleared abort timer.
+    await expect(processGone(leaderPid)).resolves.toBe(true);
+    await flush();
+    await wd.clock.advance(100);
+    await flush();
+    await expect(promise).rejects.toThrow(/checkpoint-grace/);
+    await expect(processGone(pid)).resolves.toBe(true);
+  } finally {
+    if (pid) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* Already stopped. */
+      }
+    }
+  }
 });
 
 it("bounds shutdown of a settled peer that ignores SIGTERM", async () => {
@@ -183,7 +314,7 @@ it("bounds shutdown of a settled peer that ignores SIGTERM", async () => {
       settleGraceMs: 50,
       sigkillEscalationMs: 50,
     }),
-  ).resolves.toEqual({ text: "DONE" });
+  ).resolves.toMatchObject({ text: "DONE" });
   expect(Date.now() - started).toBeLessThan(2_000);
   const pid = Number(readFileSync(join(root, "settled.pid"), "utf8"));
   await expect(processGone(pid)).resolves.toBe(true);
@@ -357,5 +488,606 @@ describe("parsePhaseOutcome", () => {
         }),
       ).findings[0].description,
     ).toContain("````");
+  });
+});
+
+/** Virtual clock so watchdog deadlines are exercised without wall-clock waits. */
+class FakeClock implements WorkerClock {
+  private current = 0;
+  private nextId = 1;
+  private readonly timers = new Map<number, { at: number; callback: () => void }>();
+
+  now(): number {
+    return this.current;
+  }
+
+  setTimer(callback: () => void, delayMs: number): unknown {
+    const id = this.nextId++;
+    this.timers.set(id, { at: this.current + Math.max(0, delayMs), callback });
+    return id;
+  }
+
+  clearTimer(handle: unknown): void {
+    this.timers.delete(handle as number);
+  }
+
+  async advance(ms: number): Promise<void> {
+    const target = this.current + ms;
+    for (;;) {
+      let next: { id: number; at: number } | undefined;
+      for (const [id, timer] of this.timers)
+        if (timer.at <= target && (!next || timer.at < next.at)) next = { id, at: timer.at };
+      if (!next) break;
+      const timer = this.timers.get(next.id);
+      this.timers.delete(next.id);
+      this.current = Math.max(this.current, next.at);
+      timer?.callback();
+      await flush();
+    }
+    this.current = target;
+    await flush();
+  }
+}
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+async function flush(): Promise<void> {
+  for (let index = 0; index < 4; index++) await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function waitForLog(log: string, marker: string, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(log) && readFileSync(log, "utf8").includes(marker)) return;
+    await delay(5);
+  }
+  throw new Error(`Timed out waiting for log marker ${marker}`);
+}
+
+async function waitForCount(log: string, marker: string, count: number): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const text = existsSync(log) ? readFileSync(log, "utf8") : "";
+    if (text.split(marker).length - 1 >= count) return;
+    await delay(5);
+  }
+  throw new Error(`Timed out waiting for ${count} copies of ${marker}`);
+}
+
+const watchdogPeer = join(root, "watchdog-peer.mjs");
+writeFileSync(
+  watchdogPeer,
+  `import { spawn } from "node:child_process";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+const dir = process.argv[2];
+const scenario = process.argv[3] || "cooperative";
+const commandsFile = dir + "/commands.jsonl";
+const eventsFile = dir + "/events.jsonl";
+const out = (record) => process.stdout.write(JSON.stringify(record) + "\\n");
+const record = (value) => appendFileSync(commandsFile, JSON.stringify(value) + "\\n");
+writeFileSync(dir + "/leader.pid", String(process.pid));
+let eventOffset = 0;
+function drainEvents() {
+  if (!existsSync(eventsFile)) return;
+  const text = readFileSync(eventsFile, "utf8");
+  const lines = text.slice(eventOffset).split("\\n");
+  const complete = lines.slice(0, -1);
+  eventOffset = text.length - lines[lines.length - 1].length;
+  for (const line of complete) {
+    if (!line.trim()) continue;
+    out(JSON.parse(line));
+  }
+}
+setInterval(drainEvents, 1).unref();
+function handle(command) {
+  record({ type: command.type, id: command.id, message: command.message });
+  if (command.type === "prompt") {
+    out({ id: command.id, type: "response", command: "prompt", success: true, data: { disposition: "started" } });
+    record({ type: "accepted", id: command.id });
+    if (scenario === "uncooperative" || scenario === "queued") process.on("SIGTERM", () => {});
+    if (scenario === "descendant" || scenario === "exit-on-abort") {
+      const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{}); require('fs').writeFileSync(" + JSON.stringify(dir + "/desc-ready") + ", ''); setInterval(()=>{},1000);"], { stdio: ["ignore", "ignore", "ignore"] });
+      writeFileSync(dir + "/descendant.pid", String(child.pid));
+      if (scenario === "descendant") process.on("SIGTERM", () => process.exit(0));
+    }
+    return;
+  }
+  if (command.type === "steer") {
+    out({ id: command.id, type: "response", command: "steer", success: true, data: { disposition: "queued" } });
+    return;
+  }
+  if (command.type === "clear_queue") {
+    const steering = scenario === "queued" ? ["stale checkpoint"] : [];
+    out({ id: command.id, type: "response", command: "clear_queue", success: true, data: { steering, followUp: [] } });
+    return;
+  }
+  if (command.type === "abort") {
+    if (scenario === "exit-on-abort") {
+      process.exit(0);
+      return;
+    }
+    if (scenario === "uncooperative" || scenario === "queued" || scenario === "descendant") return;
+    out({ id: command.id, type: "response", command: "abort", success: true });
+    setTimeout(() => process.exit(0), 5);
+    return;
+  }
+}
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  for (let index = buffer.indexOf("\\n"); index !== -1; index = buffer.indexOf("\\n")) {
+    const line = buffer.slice(0, index);
+    buffer = buffer.slice(index + 1);
+    if (line.trim()) handle(JSON.parse(line));
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`,
+  { mode: 0o755 },
+);
+
+const WATCHDOG_DEFAULTS = {
+  silenceMs: 1_000_000,
+  toolMs: 1_000_000,
+  softCheckpointMs: 1_000_000,
+  checkpointGraceMs: 1_000_000,
+  hardCeilingMs: 1_000_000,
+  abortGraceMs: 1_000,
+  sigkillEscalationMs: 1_000,
+};
+
+interface WatchdogCommand {
+  type: string;
+  id?: string;
+  message?: string;
+}
+
+function startWatchdog(scenario = "cooperative") {
+  const dir = mkdtempSync(join(root, "wd-"));
+  const clock = new FakeClock();
+  const log = join(dir, "worker.log");
+  const notices: WorkerIntervention[] = [];
+  const commands = (): WatchdogCommand[] => {
+    const file = join(dir, "commands.jsonl");
+    if (!existsSync(file)) return [];
+    return readFileSync(file, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as WatchdogCommand);
+  };
+  const inject = (event: unknown) => {
+    appendFileSync(join(dir, "events.jsonl"), `${JSON.stringify(event)}\n`);
+  };
+  const waitForCommand = async (type: string, count = 1) => {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      if (commands().filter((command) => command.type === type).length >= count) return;
+      await delay(5);
+    }
+    throw new Error(`Timed out waiting for command ${type}`);
+  };
+  const accepted = async () => {
+    await waitForCommand("accepted");
+    await flush();
+  };
+  const start = ({
+    phase,
+    watchdog,
+    recovery,
+    prompt,
+    onAccounting,
+  }: {
+    phase?: "editing" | "review";
+    watchdog?: Partial<typeof WATCHDOG_DEFAULTS>;
+    recovery?: WorkerRecovery;
+    prompt?: string;
+    onAccounting?: (accounting: WorkerAccounting) => void;
+  } = {}) => {
+    const promise = runWorker({
+      executable: process.execPath,
+      args: [watchdogPeer, dir, scenario],
+      cwd: dir,
+      prompt: prompt ?? "Do the thing.",
+      log,
+      clock,
+      phase: phase ?? "editing",
+      watchdog: { ...WATCHDOG_DEFAULTS, ...watchdog },
+      recovery,
+      onIntervention: (notice) => notices.push(notice),
+      onAccounting,
+    });
+    // Tests assert rejection after driving virtual time; attach a handler now so
+    // an interim rejection is not reported as an unhandled error.
+    promise.catch(() => {});
+    return promise;
+  };
+  return { dir, clock, log, notices, commands, inject, start, waitForCommand, accepted };
+}
+
+const startTool = (id: string, name = "bash") => ({
+  type: "tool_execution_start",
+  toolCallId: id,
+  toolName: name,
+  args: {},
+});
+const toolUpdate = (id: string, text: string) => ({
+  type: "tool_execution_update",
+  toolCallId: id,
+  toolName: "bash",
+  partialResult: { content: [{ type: "text", text }] },
+});
+const outcomeMessage = (outcome: Record<string, unknown>) => ({
+  type: "message_end",
+  message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(outcome) }] },
+});
+
+describe("supervised worker watchdog", () => {
+  it("requests one structured checkpoint after the silence threshold", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({ watchdog: { silenceMs: 1_000 } });
+    await wd.accepted();
+    wd.inject(startTool("call-a"));
+    await waitForLog(wd.log, "tool_execution_start");
+    await wd.clock.advance(1_000);
+    await wd.waitForCommand("steer");
+    const steer = wd.commands().find((command) => command.type === "steer");
+    expect(steer?.message).toContain("Phase: editing");
+    expect(steer?.message).toContain("call-a");
+    expect(steer?.message).toContain("Elapsed:");
+    expect(steer?.message).toContain("Last progress:");
+    expect(wd.notices.map((notice) => [notice.kind, notice.reason])).toEqual([
+      ["checkpoint", "silence"],
+    ]);
+    expect(wd.notices[0].consumedMs).toBeGreaterThanOrEqual(1_000);
+    // Incomplete checkpoint grants one same-session continuation that completes.
+    wd.inject(
+      outcomeMessage({ outcome: "incomplete", summary: "Still going.", remainingWork: "Finish." }),
+    );
+    wd.inject({ type: "agent_settled" });
+    await wd.waitForCommand("prompt", 2);
+    const continuation = wd.commands().filter((command) => command.type === "prompt")[1];
+    expect(continuation.message).toContain("continuation");
+    expect(continuation.message).toContain("Finish.");
+    wd.inject(outcomeMessage({ outcome: "complete", summary: "Done." }));
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).resolves.toMatchObject({
+      text: expect.stringContaining('"complete"'),
+      continuationUsed: true,
+    });
+    expect(wd.notices.map((notice) => notice.kind)).toEqual(["checkpoint", "continuation"]);
+  });
+
+  it("does not refresh progress on duplicate or empty tool snapshots", async () => {
+    const wd = startWatchdog("uncooperative");
+    const promise = wd.start({
+      watchdog: {
+        silenceMs: 1_000,
+        checkpointGraceMs: 500,
+        abortGraceMs: 100,
+        sigkillEscalationMs: 100,
+      },
+    });
+    await wd.accepted();
+    wd.inject(startTool("a"));
+    wd.inject(toolUpdate("a", "partial"));
+    await waitForLog(wd.log, "partial");
+    await wd.clock.advance(500);
+    wd.inject(toolUpdate("a", "partial"));
+    wd.inject(toolUpdate("a", ""));
+    await waitForCount(wd.log, '"text":"partial"', 2);
+    await waitForCount(wd.log, '"text":""', 1);
+    await wd.clock.advance(501);
+    await wd.waitForCommand("steer");
+    expect(wd.notices[0]).toMatchObject({
+      kind: "checkpoint",
+      reason: "silence",
+      detail: expect.stringContaining("no observable progress for 1000ms"),
+    });
+    await wd.clock.advance(500);
+    await wd.clock.advance(100);
+    await wd.clock.advance(100);
+    await expect(promise).rejects.toThrow(/Worker stopped/);
+  });
+
+  it("caps a stalled tool independently of activity in another call", async () => {
+    const wd = startWatchdog("uncooperative");
+    const promise = wd.start({
+      watchdog: {
+        silenceMs: 1_000_000,
+        toolMs: 2_000,
+        checkpointGraceMs: 500,
+        abortGraceMs: 100,
+        sigkillEscalationMs: 100,
+      },
+    });
+    await wd.accepted();
+    wd.inject(startTool("slow"));
+    await waitForLog(wd.log, '"slow"');
+    await wd.clock.advance(500);
+    wd.inject(startTool("busy"));
+    wd.inject(toolUpdate("busy", "new output"));
+    await waitForLog(wd.log, "new output");
+    await wd.clock.advance(1_500);
+    await wd.waitForCommand("steer");
+    expect(wd.notices[0]).toMatchObject({
+      kind: "checkpoint",
+      reason: "tool-duration",
+      detail: expect.stringContaining("slow"),
+    });
+    await wd.clock.advance(500);
+    await wd.clock.advance(100);
+    await wd.clock.advance(100);
+    await expect(promise).rejects.toThrow(/Worker stopped/);
+  });
+
+  it("caps a noisy tool regardless of continuous output", async () => {
+    const wd = startWatchdog("uncooperative");
+    const promise = wd.start({
+      watchdog: {
+        silenceMs: 800,
+        toolMs: 2_000,
+        checkpointGraceMs: 500,
+        abortGraceMs: 100,
+        sigkillEscalationMs: 100,
+      },
+    });
+    await wd.accepted();
+    wd.inject(startTool("noisy"));
+    await waitForLog(wd.log, '"noisy"');
+    for (const [at, text] of [
+      [500, "first"],
+      [1_000, "second"],
+      [1_500, "third"],
+    ] as const) {
+      await wd.clock.advance(at - wd.clock.now());
+      wd.inject(toolUpdate("noisy", text));
+      await waitForLog(wd.log, text);
+    }
+    await wd.clock.advance(500);
+    await wd.waitForCommand("steer");
+    expect(wd.notices[0]).toMatchObject({ kind: "checkpoint", reason: "tool-duration" });
+    await wd.clock.advance(500);
+    await wd.clock.advance(100);
+    await wd.clock.advance(100);
+    await expect(promise).rejects.toThrow(/Worker stopped/);
+  });
+
+  it("requests a soft checkpoint for a long productive phase", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({
+      watchdog: { softCheckpointMs: 1_000, checkpointGraceMs: 1_000, abortGraceMs: 500 },
+    });
+    await wd.accepted();
+    wd.inject(startTool("a"));
+    await waitForLog(wd.log, "tool_execution_start");
+    await wd.clock.advance(1_000);
+    await wd.waitForCommand("steer");
+    expect(wd.notices[0]).toMatchObject({ kind: "checkpoint", reason: "soft-checkpoint" });
+    wd.inject(outcomeMessage({ outcome: "complete", summary: "Done." }));
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).resolves.toMatchObject({ text: expect.stringContaining('"complete"') });
+  });
+
+  it("aborts after checkpoint grace and terminates the process group", async () => {
+    const wd = startWatchdog("uncooperative");
+    const promise = wd.start({
+      watchdog: {
+        silenceMs: 1_000,
+        checkpointGraceMs: 500,
+        abortGraceMs: 300,
+        sigkillEscalationMs: 200,
+      },
+    });
+    await wd.accepted();
+    wd.inject(startTool("a"));
+    await waitForLog(wd.log, "tool_execution_start");
+    await wd.clock.advance(1_000);
+    await wd.waitForCommand("steer");
+    await wd.clock.advance(500);
+    await wd.waitForCommand("abort");
+    expect(wd.notices.map((notice) => notice.reason)).toEqual(["silence", "checkpoint-grace"]);
+    await wd.clock.advance(300);
+    await wd.clock.advance(200);
+    await expect(promise).rejects.toThrow(/checkpoint-grace/);
+  });
+
+  it("preserves the hard ceiling across resume using consumed runtime", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({
+      watchdog: { hardCeilingMs: 1_000, checkpointGraceMs: 1_000, abortGraceMs: 500 },
+      recovery: { consumedMs: 900 },
+    });
+    await wd.accepted();
+    wd.inject(startTool("a"));
+    await waitForLog(wd.log, "tool_execution_start");
+    await wd.clock.advance(100);
+    await wd.waitForCommand("abort");
+    const abort = wd.notices.find((notice) => notice.kind === "abort");
+    expect(abort).toMatchObject({ reason: "hard-ceiling" });
+    expect(abort?.consumedMs).toBeGreaterThanOrEqual(1_000);
+    await expect(promise).rejects.toThrow(/hard-ceiling/);
+  });
+
+  it("does not grant a second continuation after the persisted budget is used", async () => {
+    const wd = startWatchdog("uncooperative");
+    const promise = wd.start({
+      watchdog: {
+        silenceMs: 1_000,
+        checkpointGraceMs: 500,
+        abortGraceMs: 200,
+        sigkillEscalationMs: 100,
+      },
+      recovery: { continuationUsed: true },
+    });
+    await wd.accepted();
+    wd.inject(startTool("a"));
+    await waitForLog(wd.log, "tool_execution_start");
+    await wd.clock.advance(1_000);
+    await wd.waitForCommand("abort");
+    expect(wd.commands().some((command) => command.type === "steer")).toBe(false);
+    expect(wd.notices.at(-1)).toMatchObject({
+      kind: "abort",
+      reason: "silence",
+      continuationUsed: true,
+    });
+    await wd.clock.advance(200);
+    await wd.clock.advance(100);
+    await expect(promise).rejects.toThrow(/Worker stopped/);
+  });
+
+  it("accounts for queued messages and preserves the stop explanation", async () => {
+    const wd = startWatchdog("queued");
+    const promise = wd.start({
+      watchdog: {
+        silenceMs: 1_000,
+        checkpointGraceMs: 500,
+        abortGraceMs: 200,
+        sigkillEscalationMs: 100,
+      },
+    });
+    await wd.accepted();
+    wd.inject(startTool("a"));
+    await waitForLog(wd.log, "tool_execution_start");
+    await wd.clock.advance(1_000);
+    await wd.waitForCommand("steer");
+    await wd.clock.advance(500);
+    await wd.waitForCommand("abort");
+    await flush();
+    await delay(20);
+    await wd.clock.advance(200);
+    await wd.clock.advance(100);
+    await expect(promise).rejects.toThrow(/Cleared queued steering: stale checkpoint/);
+  });
+
+  it("checkpoints a silent tool even while another call keeps producing output", async () => {
+    const wd = startWatchdog("uncooperative");
+    const promise = wd.start({
+      watchdog: {
+        silenceMs: 1_000,
+        toolMs: 1_000_000,
+        checkpointGraceMs: 500,
+        abortGraceMs: 100,
+        sigkillEscalationMs: 100,
+      },
+    });
+    await wd.accepted();
+    wd.inject(startTool("silent"));
+    await waitForLog(wd.log, '"silent"');
+    await wd.clock.advance(400);
+    wd.inject(startTool("busy"));
+    wd.inject(toolUpdate("busy", "alive-1"));
+    await waitForLog(wd.log, "alive-1");
+    for (const [at, text] of [
+      [700, "alive-2"],
+      [1_000, "alive-3"],
+    ] as const) {
+      await wd.clock.advance(at - wd.clock.now());
+      wd.inject(toolUpdate("busy", text));
+      await waitForLog(wd.log, text);
+    }
+    await wd.clock.advance(100);
+    await wd.waitForCommand("steer");
+    expect(wd.notices[0]).toMatchObject({
+      kind: "checkpoint",
+      reason: "silence",
+      detail: expect.stringContaining("silent"),
+    });
+    await wd.clock.advance(500);
+    await wd.clock.advance(100);
+    await wd.clock.advance(100);
+    await expect(promise).rejects.toThrow(/Worker stopped/);
+  });
+
+  it("grants the one continuation to a voluntary incomplete outcome", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start();
+    await wd.accepted();
+    wd.inject(
+      outcomeMessage({
+        outcome: "incomplete",
+        summary: "Not done.",
+        remainingWork: "Finish the parser.",
+      }),
+    );
+    wd.inject({ type: "agent_settled" });
+    await wd.waitForCommand("prompt", 2);
+    const continuation = wd.commands().filter((command) => command.type === "prompt")[1];
+    expect(continuation.message).toContain("continuation");
+    expect(continuation.message).toContain("Finish the parser.");
+    expect(wd.notices.map((notice) => notice.kind)).toEqual(["continuation"]);
+    wd.inject(outcomeMessage({ outcome: "complete", summary: "Done." }));
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).resolves.toMatchObject({
+      text: expect.stringContaining('"complete"'),
+      continuationUsed: true,
+    });
+  });
+
+  it("bounds a second voluntary incomplete after its continuation", async () => {
+    const wd = startWatchdog("uncooperative");
+    const promise = wd.start({
+      watchdog: { checkpointGraceMs: 500, abortGraceMs: 100, sigkillEscalationMs: 100 },
+    });
+    await wd.accepted();
+    wd.inject(
+      outcomeMessage({ outcome: "incomplete", summary: "Not done.", remainingWork: "Finish." }),
+    );
+    wd.inject({ type: "agent_settled" });
+    await wd.waitForCommand("prompt", 2);
+    wd.inject(
+      outcomeMessage({
+        outcome: "incomplete",
+        summary: "Still not done.",
+        remainingWork: "Still finish.",
+      }),
+    );
+    wd.inject({ type: "agent_settled" });
+    await wd.waitForCommand("abort");
+    expect(wd.notices.at(-1)).toMatchObject({ kind: "abort", reason: "second-incomplete" });
+    await wd.clock.advance(100);
+    await wd.clock.advance(100);
+    await expect(promise).rejects.toThrow(/second-incomplete/);
+  });
+
+  it("flushes consumed runtime periodically for controller-crash durability", async () => {
+    const wd = startWatchdog();
+    const accounting: WorkerAccounting[] = [];
+    const promise = wd.start({ onAccounting: (value) => accounting.push(value) });
+    await wd.accepted();
+    await wd.clock.advance(60_000);
+    await flush();
+    expect(accounting.length).toBeGreaterThanOrEqual(1);
+    expect(accounting[0].consumedMs).toBeGreaterThanOrEqual(60_000);
+    wd.inject(outcomeMessage({ outcome: "complete", summary: "Done." }));
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).resolves.toMatchObject({ text: expect.stringContaining('"complete"') });
+  });
+
+  it("replays the interrupted attempt's stop explanation on recovery", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({
+      recovery: {
+        consumedMs: 100,
+        continuationUsed: false,
+        stopReason: "checkpoint-grace: checkpoint grace expired without a structured response",
+        checkpoint: {
+          reason: "silence",
+          detail: "tool bash (call-a) produced no observable progress for 10000ms",
+          elapsedMs: 10_000,
+          consumedMs: 100,
+        },
+      },
+    });
+    await wd.accepted();
+    const initial = wd
+      .commands()
+      .find((command) => command.type === "prompt" && command.id === "prompt-1");
+    expect(initial?.message).toContain("Recovery context");
+    expect(initial?.message).toContain("checkpoint-grace");
+    expect(initial?.message).toContain("no observable progress for 10000ms");
+    wd.inject(outcomeMessage({ outcome: "complete", summary: "Done." }));
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).resolves.toMatchObject({ text: expect.stringContaining('"complete"') });
   });
 });

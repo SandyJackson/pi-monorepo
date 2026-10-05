@@ -17,6 +17,7 @@ import {
   type Review,
   type RunState,
   reviewObservations,
+  type Session,
   save,
   type Ticket,
 } from "./state.ts";
@@ -99,13 +100,28 @@ async function worker(
 ): Promise<PhaseOutcome> {
   const number = state.sessions.length + 1;
   const subject = ticket ? `#${ticket.number}` : "parent";
-  const attempt =
-    state.sessions.filter((session) => session.name.includes(` · ${subject} ${role} · `)).length +
-    1;
-  const session = {
+  const marker = ` · ${subject} ${role} · `;
+  // Recovery belongs to the current phase task: only the most recent attempt
+  // can still be interrupted. Once a later attempt completes, the next worker
+  // is a fresh phase task and starts with a fresh allowance.
+  const latest = state.sessions.filter((item) => item.name.includes(marker)).at(-1);
+  const prior = latest && !latest.outcome ? latest : undefined;
+  const attempt = state.sessions.filter((item) => item.name.includes(marker)).length + 1;
+  const session: Session = {
     name: `${state.name} · ${subject} ${role} · attempt ${attempt}`,
     path: join(state.runDir, "sessions", `${number}-${ticket?.number ?? "parent"}-${role}.jsonl`),
     log: join(state.runDir, "logs", `${number}-${role}.log`),
+    // Inherit the interrupted attempt's allowance and stop evidence before this
+    // attempt is persisted. If the controller stops before the worker reports
+    // any accounting, resume still sees the consumed runtime and checkpoint.
+    ...(prior
+      ? {
+          consumedMs: prior.consumedMs,
+          continuationUsed: prior.continuationUsed,
+          stopReason: prior.stopReason,
+          checkpoint: prior.checkpoint,
+        }
+      : {}),
   };
   state.sessions.push(session);
   if (ticket) ticket.phase = phase;
@@ -141,21 +157,58 @@ async function worker(
     args.push("--append-system-prompt", appendFile);
   }
   try {
-    const { text } = await runWorker({
+    const result = await runWorker({
       args,
       cwd: state.worktree,
       prompt,
       log: session.log,
-      timeoutMs: state.settings.watchdog.hardCeilingMs,
-      sigkillEscalationMs: state.settings.watchdog.sigkillEscalationMs,
+      phase,
+      watchdog: state.settings.watchdog,
+      recovery: prior
+        ? {
+            consumedMs: prior.consumedMs,
+            continuationUsed: prior.continuationUsed,
+            stopReason: prior.stopReason,
+            checkpoint: prior.checkpoint,
+          }
+        : undefined,
+      onIntervention: (notice) => {
+        // Persist the stop explanation and consumed allowance before the worker
+        // aborts, so an unconsumed checkpoint steer is never the only record.
+        session.consumedMs = notice.consumedMs;
+        session.continuationUsed = notice.continuationUsed;
+        if (notice.kind === "checkpoint")
+          session.checkpoint = {
+            reason: notice.reason,
+            detail: notice.detail,
+            elapsedMs: notice.elapsedMs,
+            consumedMs: notice.consumedMs,
+          };
+        if (notice.kind === "abort") session.stopReason = `${notice.reason}: ${notice.detail}`;
+        save(state);
+      },
+      onAccounting: (accounting) => {
+        // Periodic flush so a controller crash cannot replenish the allowance.
+        session.consumedMs = accounting.consumedMs;
+        session.continuationUsed = accounting.continuationUsed;
+        save(state);
+      },
     });
+    session.consumedMs = result.consumedMs;
+    session.continuationUsed = result.continuationUsed;
+    let outcome: PhaseOutcome;
     try {
-      return parsePhaseOutcome(phase, text);
+      outcome = parsePhaseOutcome(phase, result.text);
     } catch (error) {
+      session.stopReason = error instanceof Error ? error.message : String(error);
+      save(state);
       throw new Error(
-        `${error instanceof Error ? error.message : String(error)}. Inspect ${session.log} and resume; no work was accepted`,
+        `${session.stopReason}. Inspect ${session.log} and resume; no work was accepted`,
       );
     }
+    session.outcome = outcome.outcome;
+    save(state);
+    return outcome;
   } finally {
     await unchangedHead(state, head);
   }
