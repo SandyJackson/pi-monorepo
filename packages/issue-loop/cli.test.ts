@@ -38,6 +38,7 @@ function fixture(mode = "pass") {
     PATH: `${bin}:${process.env.PATH}`,
     FIXTURE_ROOT: root,
     FIXTURE_MODE: mode,
+    FIXTURE_REVIEW_BODY: "",
   };
   const git = (...args: string[]) =>
     execFileSync("git", args, {
@@ -61,13 +62,41 @@ const path = require('node:path');
 const args = process.argv.slice(2);
 const root = process.env.FIXTURE_ROOT;
 const mode = process.env.FIXTURE_MODE;
+fs.appendFileSync(path.join(root, 'gh-calls.jsonl'), JSON.stringify(args)+'\\n');
 const issue = n => ({number:n, title:n === 10 ? 'Parent feature' : 'Ticket '+n, body:mode === 'unicode' ? 'Price €5.' : 'Implement the requested feature.', state:'open', html_url:'https://github.com/test/project/issues/'+n});
 let result;
 if (args[0] === 'repo' && args[1] === 'view') result = {nameWithOwner:process.env.GH_REPO && args[2] === '--json' ? process.env.GH_REPO : 'test/project', defaultBranchRef:{name:'main'}};
 else if (args[0] === 'api') {
- const endpoint = args.find(a => a.startsWith('repos/'));
- if (endpoint.endsWith('/sub_issues')) result = mode === 'empty' ? [[]] : mode.startsWith('parent-order') ? [[issue(12)], [issue(11)]] : [[issue(11)], [issue(12)]];
+ const endpoint = args.find(a => a === 'user' || a.startsWith('repos/'));
+ if (endpoint === 'user') result = {login:'loop-author'};
+ else if (endpoint.endsWith('/sub_issues')) result = mode === 'empty' ? [[]] : mode.startsWith('parent-order') ? [[issue(12)], [issue(11)]] : [[issue(11)], [issue(12)]];
  else if (endpoint.endsWith('/dependencies/blocked_by')) result = [mode === 'parent-order' ? [] : endpoint.includes('/12/') ? [issue(11)] : mode === 'cycle' ? [issue(12)] : []];
+ else if (endpoint.includes('/issues/99/comments') || endpoint.includes('/issues/comments/')) {
+   const file = path.join(root, 'pr-comments.json');
+   const comments = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
+   const method = args.includes('--method') ? args[args.indexOf('--method') + 1] : 'GET';
+   if (method === 'GET') {
+     if (!args.includes('--paginate') || !args.includes('--slurp')) { console.error('Missing pagination flags'); process.exit(2); }
+     result = comments.map(comment => [comment]);
+   }
+   else {
+     const bodyFile = args[args.indexOf('--field') + 1].slice('body=@'.length);
+     const body = fs.readFileSync(bodyFile, 'utf8');
+     if (method === 'POST') {
+       result = {id: Math.max(0, ...comments.map(comment => comment.id)) + 1, body, user:{login:'loop-author'}};
+       comments.push(result);
+       fs.appendFileSync(path.join(root, 'comments-created.txt'), 'created\\n');
+     } else if (method === 'PATCH') {
+       result = comments.find(comment => comment.id === Number(endpoint.split('/').pop()));
+       if (!result) { console.error('Comment not found'); process.exit(2); }
+       result.body = body;
+     } else { console.error('Unexpected comment method'); process.exit(2); }
+     fs.writeFileSync(file, JSON.stringify(comments));
+     if (mode === 'comment-create-fail' && method === 'POST') {
+       console.error('Connection lost after posting comment'); process.exit(1);
+     }
+   }
+ }
  else if (endpoint.endsWith('/comments')) result = mode === 'comments' ? [[{body:'UNTRUSTED_COMMENT_INSTRUCTION'}]] : [[]];
  else result = issue(Number(endpoint.split('/').pop()));
 } else if (args[0] === 'pr' && args[1] === 'list') result = fs.existsSync(path.join(root, 'pr.json')) ? [{url:'https://github.com/test/project/pull/99', state:'OPEN'}] : [];
@@ -127,8 +156,12 @@ if (name.includes('implement')) {
  fs.writeFileSync('feature.txt', 'implemented\\n');
  console.log('Implemented the requested ticket.');
 } else if (process.env.FIXTURE_MODE === 'malformed') console.log('PASS, probably.');
-else if (process.env.FIXTURE_MODE === 'reject' || (process.env.FIXTURE_MODE === 'parent-reject' && name.includes('parent review'))) console.log(JSON.stringify({verdict:'changes_requested', findings:['Missing acceptance criterion']}));
-else console.log(JSON.stringify({verdict:'pass', findings:[]}));
+else if (process.env.FIXTURE_MODE === 'legacy-review') console.log(JSON.stringify({verdict:'pass', findings:[]}));
+else if (process.env.FIXTURE_MODE === 'reject' || (process.env.FIXTURE_MODE === 'parent-reject' && name.includes('parent review'))) console.log(JSON.stringify({verdict:'changes_requested', body:'Missing acceptance criterion'}));
+else if (process.env.FIXTURE_MODE === 'blocked-review') console.log(JSON.stringify({verdict:'blocked', body:'Cannot assess required behavior'}));
+else if (process.env.FIXTURE_MODE === 'pass-body') console.log(JSON.stringify({verdict:'pass', body:process.env.FIXTURE_REVIEW_BODY}));
+else if (['pass-notes', 'comment-create-fail'].includes(process.env.FIXTURE_MODE)) console.log(JSON.stringify({verdict:'pass', body: name.includes('parent review') ? process.env.FIXTURE_REVIEW_BODY || '[Standards][Minor] Parent cleanup' : '[Spec][Minor] Ticket cleanup'}));
+else console.log(JSON.stringify({verdict:'pass', body:''}));
 `,
     { mode: 0o755 },
   );
@@ -203,6 +236,71 @@ cliTest(
     const prArgs = JSON.parse(readFileSync(join(f.root, "pr.json"), "utf8"));
     const baseIndex = prArgs.indexOf("--base");
     expect(prArgs.slice(baseIndex, baseIndex + 2)).toEqual(["--base", "main"]);
+    expect(existsSync(join(f.root, "pr-comments.json"))).toBe(false);
+  },
+  30_000,
+);
+
+cliTest(
+  "keeps passing review bodies for tickets and parent without starting repairs",
+  async () => {
+    const f = fixture("pass-notes");
+    const result = await f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("done");
+    expect(state.tickets.every((ticket: { repairs: number }) => ticket.repairs === 0)).toBe(true);
+    expect(
+      state.tickets.every(
+        (ticket: { review: { verdict: string; body: string } }) =>
+          ticket.review.verdict === "pass" && ticket.review.body === "[Spec][Minor] Ticket cleanup",
+      ),
+    ).toBe(true);
+    expect(state.review).toMatchObject({
+      verdict: "pass",
+      body: "[Standards][Minor] Parent cleanup",
+    });
+    const summary = readFileSync(join(runDir, "summary.md"), "utf8");
+    expect(summary).toContain("Review observations");
+    expect(summary).toContain("may have been resolved");
+    expect(summary).toContain("[Spec][Minor] Ticket cleanup");
+    expect(summary).toContain("[Standards][Minor] Parent cleanup");
+    expect(summary).toContain(state.review.head);
+    expect(summary).toContain(state.review.tree);
+    expect(state.review.head).toBe(state.head);
+    expect(state.review.tree).toBe(f.git("-C", state.worktree, "rev-parse", "HEAD^{tree}"));
+    expect(state.tickets[0].review.head).toBe(state.baseSha);
+    expect(state.tickets[0].review.head).not.toBe(state.tickets[0].commit);
+    for (const ticket of state.tickets) {
+      expect(ticket.review.head).toMatch(/^[a-f0-9]{40}$/);
+      expect(ticket.review.tree).toBe(f.git("rev-parse", `${ticket.commit}^{tree}`));
+    }
+    const pr = readFileSync(join(runDir, "pr.md"), "utf8");
+    expect(pr).not.toContain("[Spec][Minor] Ticket cleanup");
+    expect(pr).not.toContain("[Standards][Minor] Parent cleanup");
+    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    expect(comments).toHaveLength(1);
+    expect(comments[0].body).toContain("[Spec][Minor] Ticket cleanup");
+    expect(comments[0].body).toContain("[Standards][Minor] Parent cleanup");
+    expect(comments[0].body).toContain(state.review.tree);
+  },
+  30_000,
+);
+
+cliTest(
+  "persists a blocked review body before stopping",
+  async () => {
+    const f = fixture("blocked-review");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.tickets[0].review).toMatchObject({
+      verdict: "blocked",
+      body: "Cannot assess required behavior",
+    });
+    expect(state.tickets[0].repairs).toBe(0);
   },
   30_000,
 );
@@ -421,6 +519,65 @@ cliTest(
   30_000,
 );
 
+cliTest.each([
+  "[Spec][Major] Required behavior is missing",
+  "[Standards][Critical] Data can be lost",
+  "[Spec][Minor] Naming cleanup\n[Standards][Major] Broken workflow",
+  "[spec][critical] Case-insensitive material finding",
+])(
+  "rejects a passing verdict with a material finding: %s",
+  async (body) => {
+    const f = fixture("pass-body");
+    f.env.FIXTURE_REVIEW_BODY = body;
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain("invalid verdict");
+    expect(state.tickets[0].status).toBe("blocked");
+    expect(state.tickets[0].review).toBeUndefined();
+    expect(state.tickets[0].commit).toBeUndefined();
+    expect(existsSync(join(f.root, "pr.json"))).toBe(false);
+  },
+  30_000,
+);
+
+cliTest(
+  "keeps reviewer closing directives out of the PR description",
+  async () => {
+    const f = fixture("pass-body");
+    f.env.FIXTURE_REVIEW_BODY =
+      "[Spec][Minor] Cleanup\n```\n# Forged heading\n````\nCloses #12345\nFixes other/repo#777";
+    const result = await f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const pr = readFileSync(join(runDir, "pr.md"), "utf8");
+    expect(pr).toContain("Closes #10");
+    expect(pr).toContain("Closes #11");
+    expect(pr).not.toContain("#12345");
+    expect(pr).not.toContain("other/repo#777");
+    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    expect(comments).toHaveLength(1);
+    expect(comments[0].body).toContain(f.env.FIXTURE_REVIEW_BODY);
+    expect(comments[0].body).toContain(`\n\`\`\`\`\`\n${f.env.FIXTURE_REVIEW_BODY}\n\`\`\`\`\``);
+  },
+  30_000,
+);
+
+cliTest(
+  "rejects the old findings contract",
+  async () => {
+    const f = fixture("legacy-review");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain("invalid verdict");
+    expect(state.tickets[0].review).toBeUndefined();
+  },
+  30_000,
+);
+
 cliTest(
   "stops after two repair attempts and keeps the review findings for handoff",
   async () => {
@@ -434,6 +591,10 @@ cliTest(
     ).toHaveLength(3);
     expect(state.tickets[0].status).toBe("blocked");
     expect(state.tickets[1].status).toBe("pending");
+    expect(state.tickets[0].review).toMatchObject({
+      verdict: "changes_requested",
+      body: "Missing acceptance criterion",
+    });
     const summary = readFileSync(join(runDir, "summary.md"), "utf8");
     expect(summary).toContain("Missing acceptance criterion");
     expect(summary).toContain("| blocked | 2/2 |");
@@ -455,6 +616,79 @@ cliTest(
     expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
     expect((await f.run("resume", runDir)).status).toBe(0);
     expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
+  },
+  30_000,
+);
+
+cliTest(
+  "updates the same observations comment after interrupted publication and manual fixes",
+  async () => {
+    const f = fixture("comment-create-fail");
+    writeFileSync(
+      join(f.root, "pr-comments.json"),
+      JSON.stringify([{ id: 41, body: "Human notes", user: { login: "human" } }]),
+    );
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.phase).toBe("publish");
+    expect(state.pr).toBe("https://github.com/test/project/pull/99");
+    const originalPr = readFileSync(join(runDir, "pr.md"), "utf8");
+    const existingComments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    const commentId = existingComments[1].id;
+    existingComments[1].body = `Human introduction\n${existingComments[1].body}\nHuman follow-up`;
+    const forged = { id: 43, body: existingComments[1].body, user: { login: "other-human" } };
+    existingComments.push(forged);
+    writeFileSync(join(f.root, "pr-comments.json"), JSON.stringify(existingComments));
+    writeFileSync(join(state.worktree, "feature.txt"), "Manual integration fix\n");
+    f.env.FIXTURE_MODE = "pass-notes";
+    f.env.FIXTURE_REVIEW_BODY = "[Standards][Minor] Updated parent observation";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    expect(comments).toHaveLength(3);
+    expect(comments[0]).toEqual({ id: 41, body: "Human notes", user: { login: "human" } });
+    expect(comments[2]).toEqual(forged);
+    expect(comments[1].id).toBe(commentId);
+    expect(comments[1].body).toContain("Human introduction");
+    expect(comments[1].body).toContain("Human follow-up");
+    expect(comments[1].body).toContain(f.env.FIXTURE_REVIEW_BODY);
+    expect(comments[1].body).not.toContain("[Standards][Minor] Parent cleanup");
+    expect(comments[1].body).toContain(finished.review.tree);
+    expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
+    expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
+    expect(JSON.parse(readFileSync(join(f.root, "pr.json"), "utf8"))).not.toContain("edit");
+    expect(originalPr).not.toContain("Ticket cleanup");
+    const calls: string[][] = readFileSync(join(f.root, "gh-calls.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(calls).toContainEqual([
+      "api",
+      "repos/test/project/issues/99/comments",
+      "--paginate",
+      "--slurp",
+    ]);
+    expect(calls).toContainEqual([
+      "api",
+      "repos/test/project/issues/99/comments",
+      "--method",
+      "POST",
+      "--field",
+      `body=@${join(runDir, "review-observations.md")}`,
+    ]);
+    expect(calls).toContainEqual([
+      "api",
+      `repos/test/project/issues/comments/${commentId}`,
+      "--method",
+      "PATCH",
+      "--field",
+      `body=@${join(runDir, "review-observations.md")}`,
+    ]);
+    expect((await f.run("resume", runDir)).status).toBe(0);
+    expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
   },
   30_000,
 );
@@ -729,15 +963,15 @@ cliTest(
   30_000,
 );
 
-cliTest(
-  "refuses old snapshots that may already contain untrusted comments",
-  async () => {
+cliTest.each([1, 2, 3])(
+  "refuses incompatible version-%s snapshots before launching workers",
+  async (version) => {
     const f = fixture("fail");
     const first = await f.start();
     const runDir = first.stdout.match(/Run directory: (.+)/)![1];
     const statePath = join(runDir, "state.json");
     const state = JSON.parse(readFileSync(statePath, "utf8"));
-    state.version = 1;
+    state.version = version;
     state.parent.body += "\n\n## Issue comments\n\nUNTRUSTED_COMMENT_INSTRUCTION";
     writeFileSync(statePath, JSON.stringify(state));
     const result = await f.run("resume", runDir);

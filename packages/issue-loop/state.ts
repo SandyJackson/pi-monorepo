@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { LoopSettings } from "./settings.ts";
 
-export const RUN_STATE_VERSION = 3;
+export const RUN_STATE_VERSION = 4;
 export const MAX_REPAIRS = 2;
 
 export interface Issue {
@@ -13,6 +13,13 @@ export interface Issue {
   state: "open" | "closed";
 }
 
+export interface Review {
+  verdict: "pass" | "changes_requested" | "blocked";
+  body: string;
+  head: string;
+  tree: string;
+}
+
 export interface Ticket extends Issue {
   blockers: Issue[];
   repairs: number;
@@ -20,6 +27,7 @@ export interface Ticket extends Issue {
   baseline?: string;
   commit?: string;
   feedback?: string;
+  review?: Review;
 }
 
 export interface Session {
@@ -53,6 +61,7 @@ export interface RunState {
   status: "running" | "blocked" | "done";
   currentTicket?: number;
   feedback?: string;
+  review?: Review;
   lastError?: string;
   pr?: string;
 }
@@ -64,6 +73,39 @@ export function shellQuote(value: string): string {
 function atomicWrite(path: string, text: string): void {
   writeFileSync(`${path}.tmp`, text, { mode: 0o600 });
   renameSync(`${path}.tmp`, path);
+}
+
+export function reviewObservations(state: RunState): string[] {
+  const observations: string[] = [];
+  const append = (title: string, review: Review | undefined) => {
+    if (review?.verdict !== "pass" || !review.body.trim()) return;
+    const fence = "`".repeat(
+      (review.body.match(/`+/g) ?? []).reduce(
+        (length, ticks) => Math.max(length, ticks.length + 1),
+        3,
+      ),
+    );
+    observations.push(
+      `### ${title}`,
+      `Reviewed HEAD: \`${review.head}\`; content tree: \`${review.tree}\`.`,
+      "",
+      fence,
+      review.body,
+      fence,
+      "",
+    );
+  };
+  for (const ticket of state.tickets) append(`#${ticket.number} ${ticket.title}`, ticket.review);
+  append("Parent review", state.review);
+  return observations.length
+    ? [
+        "## Review observations",
+        "",
+        "Historical observations from passing reviews; these may have been resolved by later changes.",
+        "",
+        ...observations,
+      ]
+    : [];
 }
 
 export function save(state: RunState): void {
@@ -79,6 +121,7 @@ export function save(state: RunState): void {
     (session) =>
       `- ${session.name}\n  - Log: ${session.log}\n  - Reopen: \`cd ${shellQuote(state.worktree)} && pi --session ${shellQuote(session.path)}\``,
   );
+  const observations = reviewObservations(state);
   writeFileSync(
     join(state.runDir, "summary.md"),
     [
@@ -92,6 +135,7 @@ export function save(state: RunState): void {
       "",
       state.lastError ?? "No recorded failure.",
       active?.feedback ?? state.feedback ?? "",
+      ...(observations.length ? ["", ...observations] : []),
       `Resume: \`node ${shellQuote(cli)} resume ${shellQuote(state.runDir)}\``,
       "",
       ...sessions,
@@ -105,7 +149,7 @@ export function load(runDir: string): RunState {
   const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")) as RunState;
   if (state.version !== RUN_STATE_VERSION) {
     throw new Error(
-      "Unsupported run state version; older snapshots may include issue comments. Preserve any work and start a new run from reviewed issue bodies. Do not change the version by hand.",
+      "Unsupported run state version; older snapshots may include issue comments or use an incompatible reviewer contract. Preserve any work and start a new run from reviewed issue bodies. Do not change the version by hand.",
     );
   }
   if (
