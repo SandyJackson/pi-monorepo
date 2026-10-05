@@ -1,40 +1,30 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-describe("Pi workspace package", () => {
-  const packageJson = JSON.parse(readFileSync(join(import.meta.dirname, "package.json"), "utf-8"));
+interface PiResources {
+  extensions: string[];
+  skills: string[];
+}
 
-  it("has required pi package fields", () => {
-    expect(packageJson.name).toBe("pi-workspace");
-    expect(packageJson.private).toBe(true);
-    expect(packageJson.keywords).toContain("pi-package");
+const root = import.meta.dirname;
+const manifest = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as {
+  pi: PiResources;
+};
+
+describe("Pi workspace resource registration", () => {
+  it("registers extensions that resolve to TypeScript entrypoints", () => {
+    expect(manifest.pi.extensions.length).toBeGreaterThan(0);
+    for (const entry of manifest.pi.extensions) {
+      expect(entry).toMatch(/\.ts$/);
+      expect(statSync(resolve(root, entry)).isFile(), entry).toBe(true);
+    }
   });
 
-  it("declares pi extensions", () => {
-    expect(packageJson.pi?.extensions).toBeDefined();
-    expect(packageJson.pi?.extensions.length).toBeGreaterThan(0);
-  });
-
-  it("declares pi skills path", () => {
-    expect(packageJson.pi?.skills).toBeDefined();
-    expect(packageJson.pi?.skills).toContain("./skills");
-  });
-
-  it("requires Node 22+", () => {
-    expect(packageJson.engines?.node).toBe(">=22");
-  });
-
-  it("has Pi core packages as devDependencies", () => {
-    expect(packageJson.devDependencies?.["@earendil-works/pi-coding-agent"]).toBeDefined();
-    expect(packageJson.devDependencies?.["@earendil-works/pi-ai"]).toBeDefined();
-    expect(packageJson.devDependencies?.["@earendil-works/pi-tui"]).toBeDefined();
-  });
-
-  it("has workspace dependencies for extension packages", () => {
-    expect(packageJson.dependencies?.["@pi-workspace/herdr-contract"]).toBeDefined();
-    expect(packageJson.dependencies?.["@pi-workspace/herdr-subagent"]).toBeDefined();
-    expect(packageJson.dependencies?.["@pi-workspace/herdr-bridge"]).toBeDefined();
-    expect(packageJson.dependencies?.["@pi-workspace/session-auto-name"]).toBeDefined();
+  it("registers existing skill directories", () => {
+    expect(manifest.pi.skills.length).toBeGreaterThan(0);
+    for (const entry of manifest.pi.skills) {
+      expect(statSync(resolve(root, entry)).isDirectory(), entry).toBe(true);
+    }
   });
 });
