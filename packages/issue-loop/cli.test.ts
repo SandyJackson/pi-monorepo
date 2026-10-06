@@ -211,11 +211,71 @@ function handle(command) {
   out({type:'agent_settled'});
   return;
  }
+ if (mode === 'fixup') {
+  if (isImplement) {
+   if (fs.existsSync('first.txt')) fs.writeFileSync('second.txt', 'second');
+   else fs.writeFileSync('first.txt', 'first');
+  }
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  let text;
+  if (isImplement) text = implementOutcome();
+  else if (isParentReview()) text = JSON.stringify({outcome:'pass', summary:'Parent review passed.', findings:[]});
+  else {
+   const counterFile = path.join(process.env.FIXTURE_ROOT, 'fixup-review-count');
+   const count = (fs.existsSync(counterFile) ? Number(fs.readFileSync(counterFile, 'utf8')) : 0) + 1;
+   fs.writeFileSync(counterFile, String(count));
+   text = count === 1
+    ? JSON.stringify({outcome:'changes_requested', summary:'Fix the first attempt', findings:[{axis:'spec',severity:'major',location:'first.txt',description:'Fix the first attempt'}]})
+    : JSON.stringify({outcome:'pass', summary:'Review passed.', findings:[]});
+  }
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
+ }
+ if (mode === 'noop') {
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  const text = isImplement ? implementOutcome() : reviewOutcome();
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
+ }
+ if (mode === 'review-edit' && !isImplement) {
+  fs.appendFileSync(path.join(process.cwd(), 'feature.txt'), 'tampered');
+  const text = JSON.stringify({outcome:'pass', summary:'Review passed.', findings:[]});
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
+ }
  if (mode === 'stall-review' && !isImplement) {
   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
   out({type:'agent_start'});
   out({type:'message_start', message:{role:'assistant', content:[]}});
   out({type:'tool_execution_start', toolCallId:'review-stall', toolName:'bash', args:{}});
+  return;
+ }
+ if (mode === 'stall-implement' && isImplement) {
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'tool_execution_start', toolCallId:'implement-stall', toolName:'bash', args:{}});
+  return;
+ }
+ if (mode === 'stall-after-write' && isImplement) {
+  fs.writeFileSync('feature.txt', 'partial\\n');
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'tool_execution_start', toolCallId:'implement-stall', toolName:'bash', args:{}});
   return;
  }
  if (mode === 'stall-once' && !isImplement) {
@@ -417,8 +477,10 @@ cliTest(
     expect(summary).toContain(state.review.tree);
     expect(state.review.head).toBe(state.head);
     expect(state.review.tree).toBe(f.git("-C", state.worktree, "rev-parse", "HEAD^{tree}"));
-    expect(state.tickets[0].review.head).toBe(state.baseSha);
-    expect(state.tickets[0].review.head).not.toBe(state.tickets[0].commit);
+    // The committed feature anchor is the exact reviewed artifact, then accepted.
+    expect(state.tickets[0].review.head).toBe(state.tickets[0].anchor);
+    expect(state.tickets[0].review.head).toBe(state.tickets[0].commit);
+    expect(state.tickets[0].workHead).toBe(state.tickets[0].commit);
     for (const ticket of state.tickets) {
       expect(ticket.review.head).toMatch(/^[a-f0-9]{40}$/);
       expect(ticket.review.tree).toBe(f.git("rev-parse", `${ticket.commit}^{tree}`));
@@ -1188,7 +1250,7 @@ cliTest(
   30_000,
 );
 
-cliTest.each([1, 2, 3, 4, 5])(
+cliTest.each([1, 2, 3, 4, 5, 6])(
   "refuses incompatible version-%s snapshots before launching workers",
   async (version) => {
     const f = fixture("fail");
@@ -1288,6 +1350,272 @@ cliTest.each(["missing-lock", "directory-lock"])(
     if (mode === "directory-lock")
       expect(result.stderr).toContain("Warning: could not remove run lock");
     else expect(result.stderr).not.toContain("ENOENT");
+  },
+  30_000,
+);
+
+cliTest(
+  "creates a feature anchor and fixup history for changed child repairs",
+  async () => {
+    const f = fixture("fixup");
+    const result = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", "true");
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const ticket = state.tickets[0];
+    expect(ticket.baseline).toBe(state.baseSha);
+    expect(ticket.anchor).toMatch(/^[a-f0-9]{40}$/);
+    expect(ticket.repairCommits).toHaveLength(1);
+    expect(ticket.workHead).toBe(ticket.repairCommits[0]);
+    // Acceptance is recorded separately from the work commits that built it.
+    expect(ticket.commit).toBe(ticket.workHead);
+    expect(ticket.anchor).not.toBe(ticket.commit);
+    // The failed first assessment survives the feature/fixup cycle, still
+    // linked to the anchor it reviewed, alongside the later passing verdict.
+    expect(ticket.reviews).toHaveLength(1);
+    expect(ticket.reviews[0]).toMatchObject({ outcome: "changes_requested" });
+    expect(ticket.reviews[0].head).toBe(ticket.anchor);
+    expect(ticket.reviews[0].tree).toBe(
+      f.git("-C", state.worktree, "rev-parse", `${ticket.anchor}^{tree}`),
+    );
+    expect(ticket.reviews[0].findings[0]).toMatchObject({
+      artifact: { head: ticket.anchor, tree: ticket.reviews[0].tree },
+    });
+    expect(ticket.review).toMatchObject({ outcome: "pass" });
+    expect(
+      f.git(
+        "-C",
+        state.worktree,
+        "log",
+        "--format=%s",
+        "--reverse",
+        `${state.baseSha}..${ticket.commit}`,
+      ),
+    ).toBe([`loop: #11 Ticket 11`, `fixup! loop: #11 Ticket 11`].join("\n"));
+    // The second review saw the whole cumulative delta, not only the fixup.
+    const patch = readFileSync(join(runDir, "review.patch"), "utf8");
+    expect(patch).toContain("first.txt");
+    expect(patch).toContain("second.txt");
+  },
+  30_000,
+);
+
+cliTest(
+  "creates no commit for a completed phase that changed nothing",
+  async () => {
+    const f = fixture("noop");
+    const result = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", "true");
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.head).toBe(state.baseSha);
+    expect(f.git("-C", state.worktree, "rev-list", "--count", `${state.baseSha}..HEAD`)).toBe("0");
+    for (const ticket of state.tickets) {
+      expect(ticket.anchor).toBeUndefined();
+      expect(ticket.commit).toBe(state.baseSha);
+    }
+  },
+  30_000,
+);
+
+cliTest(
+  "records a work commit without accepting the ticket when review is blocked",
+  async () => {
+    const f = fixture("blocked-review");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const ticket = state.tickets[0];
+    expect(ticket.anchor).toMatch(/^[a-f0-9]{40}$/);
+    expect(ticket.workHead).toBe(ticket.anchor);
+    // A recorded work commit is not ticket acceptance.
+    expect(ticket.commit).toBeUndefined();
+    expect(ticket.status).toBe("blocked");
+    expect(ticket.review).toMatchObject({ outcome: "blocked" });
+    expect(f.git("-C", state.worktree, "log", "--format=%s", "-1", ticket.anchor)).toBe(
+      "loop: #11 Ticket 11",
+    );
+  },
+  30_000,
+);
+
+cliTest(
+  "rechecks a clean hook mutation before review",
+  async () => {
+    const f = fixture("blocked-review");
+    const hooks = join(f.repo, ".git", "hooks");
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(
+      join(hooks, "pre-commit"),
+      `#!/bin/sh\necho mutated >> feature.txt\ngit add feature.txt\n`,
+      { mode: 0o755 },
+    );
+    const check = `${JSON.stringify(process.execPath)} -e "const fs=require('node:fs');fs.appendFileSync(process.env.FIXTURE_ROOT + '/checks.txt', 'x');process.stdout.write(fs.readFileSync('feature.txt','utf8'))"`;
+    const result = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", check);
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const ticket = state.tickets[0];
+    expect(ticket.anchor).toMatch(/^[a-f0-9]{40}$/);
+    // The hook-mutated committed tree is reviewed, so checks ran again first.
+    expect(readFileSync(join(f.root, "checks.txt"), "utf8")).toHaveLength(2);
+    expect(f.git("-C", state.worktree, "show", `${ticket.anchor}:feature.txt`)).toContain(
+      "mutated",
+    );
+    // The reviewer gets the recheck log describing the tree it actually reads.
+    const review = readWorkers(f.root).find((entry) => entry.name.includes("review"))!;
+    const checkLog = review.prompt.match(/Successful check output: (.+)/)![1];
+    expect(readFileSync(checkLog, "utf8")).toContain("mutated");
+  },
+  30_000,
+);
+
+cliTest(
+  "stops without reconciling when a successful hook leaves the worktree dirty",
+  async () => {
+    const f = fixture("blocked-review");
+    const hooks = join(f.repo, ".git", "hooks");
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(join(hooks, "pre-commit"), `#!/bin/sh\necho dirty >> feature.txt\n`, {
+      mode: 0o755,
+    });
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain("dirty after committing");
+    expect(state.tickets[0].anchor).toMatch(/^[a-f0-9]{40}$/);
+    // The hook's work is preserved rather than discarded or auto-committed.
+    expect(readFileSync(join(state.worktree, "feature.txt"), "utf8")).toContain("dirty");
+  },
+  30_000,
+);
+
+cliTest(
+  "does not auto-commit or accept an unchanged resume after a dirty hook",
+  async () => {
+    const f = fixture();
+    const hooks = join(f.repo, ".git", "hooks");
+    mkdirSync(hooks, { recursive: true });
+    // Dirty the worktree on the first successful commit only; a later resume
+    // must not silently turn the leftover into a fixup.
+    writeFileSync(
+      join(hooks, "pre-commit"),
+      `#!/bin/sh\nif [ ! -f "${join(f.root, "hook-dirtied-once")}" ]; then\n  touch "${join(f.root, "hook-dirtied-once")}"\n  echo dirty >> feature.txt\nfi\n`,
+      { mode: 0o755 },
+    );
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const anchor = blocked.tickets[0].anchor;
+    expect(anchor).toMatch(/^[a-f0-9]{40}$/);
+    expect(blocked.lastError).toContain("dirty after committing");
+    expect(blocked.tickets[0].commit).toBeUndefined();
+    // Resume with no explicit resolution: the hook's leftover work must not
+    // become a fixup, and the ticket must not be accepted.
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status).toBe(1);
+    const after = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(after.lastError).toContain("Unresolved hook");
+    expect(after.tickets[0].anchor).toBe(anchor);
+    expect(after.tickets[0].workHead).toBe(anchor);
+    expect(after.tickets[0].commit).toBeUndefined();
+    expect(after.tickets[0].status).toBe("blocked");
+    expect(f.git("-C", after.worktree, "rev-list", "--count", `${anchor}..HEAD`)).toBe("0");
+    // The hook's work is still preserved.
+    expect(readFileSync(join(after.worktree, "feature.txt"), "utf8")).toContain("dirty");
+  },
+  30_000,
+);
+
+cliTest(
+  "resumes after a dirty hook once the operator commits the preserved work",
+  async () => {
+    const f = fixture();
+    const hooks = join(f.repo, ".git", "hooks");
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(
+      join(hooks, "pre-commit"),
+      `#!/bin/sh\nif [ ! -f "${join(f.root, "hook-dirtied-once")}" ]; then\n  touch "${join(f.root, "hook-dirtied-once")}"\n  echo dirty >> feature.txt\nfi\n`,
+      { mode: 0o755 },
+    );
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    // The operator explicitly commits the hook's preserved work.
+    f.git("-C", blocked.worktree, "add", "-A");
+    f.git("-C", blocked.worktree, "commit", "-m", "Manual resolution of hook leftovers");
+    const manual = f.git("-C", blocked.worktree, "rev-parse", "HEAD");
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    // Acceptance records the operator's commit; the controller adds no fixup.
+    expect(finished.tickets[0].commit).toBe(manual);
+    expect(finished.tickets[0].workHead).toBe(manual);
+    expect(finished.tickets[0].repairCommits).toBeUndefined();
+  },
+  30_000,
+);
+
+cliTest(
+  "preserves work and stops when a hook rejects the commit",
+  async () => {
+    const f = fixture("blocked-review");
+    const hooks = join(f.repo, ".git", "hooks");
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(join(hooks, "pre-commit"), `#!/bin/sh\nexit 1\n`, { mode: 0o755 });
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain("hooks rejected");
+    expect(state.tickets[0].anchor).toBeUndefined();
+    // The staged work survives the rejected commit.
+    expect(f.git("-C", state.worktree, "diff", "--cached", "--name-only")).toContain("feature.txt");
+    // An unchanged resume must not retry or auto-commit the preserved work.
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status).toBe(1);
+    const after = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(after.lastError).toContain("Unresolved hook");
+    expect(after.tickets[0].anchor).toBeUndefined();
+    expect(after.tickets[0].commit).toBeUndefined();
+  },
+  30_000,
+);
+
+cliTest(
+  "refuses a verdict when the read-only review edits the artifact",
+  async () => {
+    const f = fixture("review-edit");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain("changed the worktree");
+    expect(state.tickets[0].status).toBe("blocked");
+    expect(state.tickets[0].review).toBeUndefined();
+    expect(readFileSync(join(state.worktree, "feature.txt"), "utf8")).toContain("tampered");
+  },
+  30_000,
+);
+
+cliTest(
+  "keeps failed-check work uncommitted and preserves it for repair",
+  async () => {
+    const f = fixture();
+    const result = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", "false");
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.tickets[0].anchor).toBeUndefined();
+    expect(state.tickets[0].commit).toBeUndefined();
+    expect(f.git("-C", state.worktree, "rev-list", "--count", `${state.baseSha}..HEAD`)).toBe("0");
+    // The worker's changes survive outside a commit.
+    expect(existsSync(join(state.worktree, "feature.txt"))).toBe(true);
   },
   30_000,
 );
@@ -1462,6 +1790,77 @@ cliTest(
     expect(reviewCommands.some((entry) => entry.prompt?.includes("Controller checkpoint"))).toBe(
       true,
     );
+  },
+  30_000,
+);
+
+cliTest(
+  "makes no work commit for an incomplete watchdog checkpoint",
+  async () => {
+    const f = fixture("stall-implement");
+    const settingsPath = writeWatchdogSettings(f.root);
+    const result = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    );
+    expect(result.status, result.stderr).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("blocked");
+    expect(state.tickets[0].anchor).toBeUndefined();
+    expect(state.tickets[0].commit).toBeUndefined();
+    expect(f.git("-C", state.worktree, "rev-list", "--count", `${state.baseSha}..HEAD`)).toBe("0");
+  },
+  30_000,
+);
+
+cliTest(
+  "does not commit an interrupted editing phase's saved files on resume",
+  async () => {
+    const f = fixture("stall-after-write");
+    const settingsPath = writeWatchdogSettings(f.root);
+    const args = [
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    ];
+    const first = await f.run(...args);
+    expect(first.status, first.stderr).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const afterFirst = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    // The interrupted worker's saved file is preserved but uncommitted.
+    expect(existsSync(join(afterFirst.worktree, "feature.txt"))).toBe(true);
+    expect(afterFirst.tickets[0].anchor).toBeUndefined();
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(1);
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    // Resuming unchanged must not turn the leftover file into a work commit.
+    expect(state.tickets[0].anchor).toBeUndefined();
+    expect(state.tickets[0].commit).toBeUndefined();
+    expect(f.git("-C", state.worktree, "rev-list", "--count", `${state.baseSha}..HEAD`)).toBe("0");
+    // The uncommitted artifact was still reviewed as HEAD plus its content tree,
+    // with the untracked file in the cumulative patch.
+    expect(state.tickets[0].review).toMatchObject({ outcome: "pass", head: state.baseSha });
+    expect(state.tickets[0].review.tree).toMatch(/^[a-f0-9]{40}$/);
+    expect(state.tickets[0].review.tree).not.toBe(
+      f.git("-C", state.worktree, "rev-parse", `${state.baseSha}^{tree}`),
+    );
+    const patch = readFileSync(join(runDir, "review.patch"), "utf8");
+    expect(patch).toContain("feature.txt");
+    expect(patch).toContain("partial");
   },
   30_000,
 );

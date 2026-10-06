@@ -1,9 +1,10 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { ArtifactIdentity } from "./artifact.ts";
 import type { LoopSettings } from "./settings.ts";
 import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName } from "./worker.ts";
 
-export const RUN_STATE_VERSION = 6;
+export const RUN_STATE_VERSION = 7;
 
 export interface Issue {
   number: number;
@@ -13,13 +14,19 @@ export interface Issue {
   state: "open" | "closed";
 }
 
-/** Exact reviewed artifact: tree preserves mutations that leave HEAD unchanged. */
-export interface ArtifactIdentity {
-  head: string;
+export type Severity = "critical" | "major" | "minor";
+
+/**
+ * A hook result that preserved uncommitted work. The controller refuses to
+ * auto-commit or accept it until the artifact changes (an explicit manual fix
+ * or a new editing phase); otherwise an unchanged resume would reconcile hook
+ * leftovers as a fixup. The recovery slice later routes these to repair.
+ */
+export interface HookStop {
+  reason: string;
+  /** Content tree of the preserved work when the hook stopped. */
   tree: string;
 }
-
-export type Severity = "critical" | "major" | "minor";
 
 /** Controller-assigned, artifact-linked review finding. */
 export interface Finding {
@@ -47,10 +54,25 @@ export interface Ticket extends Issue {
   status: "pending" | "running" | "blocked" | "accepted";
   /** Worker phase that most recently ran for this ticket. */
   phase?: "editing" | "review";
+  /** Original child baseline: the accepted HEAD before this child started. */
   baseline?: string;
+  /** Feature anchor commit: the first changed work commit for this child. */
+  anchor?: string;
+  /** Subsequent repair fixups targeting the anchor, oldest first. */
+  repairCommits?: string[];
+  /** HEAD after the latest child work commit (anchor or a later fixup). */
+  workHead?: string;
+  /** Accepted SHA. A work commit alone never implies acceptance. */
   commit?: string;
+  /** Worktree content tree when the latest editing phase stopped without completing. */
+  stoppedTree?: string;
+  /** Unresolved hook outcome that preserved work and must not be auto-committed. */
+  hookStop?: HookStop;
   feedback?: string;
+  /** Latest artifact-linked review verdict; earlier verdicts remain in `reviews`. */
   review?: Review;
+  /** Earlier artifact-linked review verdicts, oldest first. */
+  reviews?: Review[];
 }
 
 export interface Session {
@@ -91,13 +113,23 @@ export interface RunState {
   settings: LoopSettings;
   parent: Issue;
   tickets: Ticket[];
+  /** Parent integration anchor and its repair fixups, distinct from child history. */
+  anchor?: string;
+  repairCommits?: string[];
   sessions: Session[];
   finalRepairs: number;
   phase: "setup" | "tickets" | "final" | "publish" | "done";
   status: "running" | "blocked" | "done";
   currentTicket?: number;
+  /** Worktree content tree when the latest parent editing phase stopped without completing. */
+  stoppedTree?: string;
+  /** Unresolved parent hook outcome that preserved work and must not be auto-committed. */
+  hookStop?: HookStop;
   feedback?: string;
+  /** Latest parent review verdict; earlier verdicts remain in `reviews`. */
   review?: Review;
+  /** Earlier parent review verdicts, oldest first. */
+  reviews?: Review[];
   lastError?: string;
   pr?: string;
 }
