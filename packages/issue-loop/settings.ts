@@ -64,6 +64,17 @@ export interface DeadlineSettings {
   gitMs: number;
 }
 
+/**
+ * Controller recovery policy applied after Pi exhausts its own native retries.
+ * Persisted with a run so resume keeps the same allowances.
+ */
+export interface RecoverySettings {
+  /** Maximum classified transient retries per phase task. */
+  transientRetries: number;
+  /** Backoff before each transient retry; index i is used for retry i+1. */
+  transientBackoffMs: number[];
+}
+
 export const DEFAULT_WATCHDOG: WatchdogSettings = {
   silenceMs: 10 * 60_000,
   toolMs: 30 * 60_000,
@@ -80,6 +91,11 @@ export const DEFAULT_DEADLINES: DeadlineSettings = {
   gitMs: 60_000,
 };
 
+export const DEFAULT_RECOVERY: RecoverySettings = {
+  transientRetries: 2,
+  transientBackoffMs: [5_000, 15_000],
+};
+
 /** Resolved settings snapshot stored with the run; `resume` reuses it verbatim. */
 export interface LoopSettings {
   implement: RoleSettings;
@@ -87,6 +103,7 @@ export interface LoopSettings {
   review: RoleSettings;
   repairRounds: number;
   watchdog: WatchdogSettings;
+  recovery: RecoverySettings;
   deadlines: DeadlineSettings;
   appendSystemPrompt?: string;
 }
@@ -212,6 +229,35 @@ function readOverrides<T extends object>(
   return result as T;
 }
 
+/** Parse and validate the optional controller recovery policy. */
+function readRecovery(settingsPath: string, value: unknown): RecoverySettings {
+  const defaults: RecoverySettings = {
+    transientRetries: DEFAULT_RECOVERY.transientRetries,
+    transientBackoffMs: [...DEFAULT_RECOVERY.transientBackoffMs],
+  };
+  if (value === undefined) return defaults;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`"recovery" in ${settingsPath} must be an object`);
+  const record = value as Record<string, unknown>;
+  const transientRetries =
+    record.transientRetries === undefined
+      ? defaults.transientRetries
+      : readInteger("recovery.transientRetries", settingsPath, record.transientRetries, {
+          min: 0,
+          max: 10,
+        });
+  let transientBackoffMs = defaults.transientBackoffMs;
+  if (record.transientBackoffMs !== undefined) {
+    const backoff = record.transientBackoffMs;
+    if (!Array.isArray(backoff) || !backoff.every((item) => Number.isInteger(item) && item >= 0))
+      throw new Error(
+        `"recovery.transientBackoffMs" in ${settingsPath} must be an array of millisecond integers`,
+      );
+    transientBackoffMs = [...(backoff as number[])];
+  }
+  return { transientRetries, transientBackoffMs };
+}
+
 /** Directory holding the blessed role agent files, resolved beside this module. */
 export function blessedAgentsDir(): string {
   return resolve(import.meta.dirname, "agents");
@@ -236,6 +282,10 @@ export function defaultLoopSettings(): LoopSettings {
     review: { ...review, skills: [] },
     repairRounds: DEFAULT_REPAIR_ROUNDS,
     watchdog: { ...DEFAULT_WATCHDOG },
+    recovery: {
+      transientRetries: DEFAULT_RECOVERY.transientRetries,
+      transientBackoffMs: [...DEFAULT_RECOVERY.transientBackoffMs],
+    },
     deadlines: { ...DEFAULT_DEADLINES },
   };
 }
@@ -287,6 +337,7 @@ export function loadLoopSettings(settingsPath: string): LoopSettings {
       min: 1,
       max: 24 * 60 * 60_000,
     }),
+    recovery: readRecovery(resolved, config.recovery),
     deadlines: readOverrides("deadlines", resolved, config.deadlines, DEFAULT_DEADLINES, {
       min: 1,
       max: 24 * 60 * 60_000,

@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import type { LoopSettings } from "./settings.ts";
 import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName } from "./worker.ts";
 
-export const RUN_STATE_VERSION = 5;
+export const RUN_STATE_VERSION = 6;
 
 export interface Issue {
   number: number;
@@ -61,6 +61,10 @@ export interface Session {
   consumedMs?: number;
   /** Whether the single incomplete/stalled continuation was used. */
   continuationUsed?: boolean;
+  /** Controller transient retries consumed after Pi exhausted its native retries. */
+  transientRetries?: number;
+  /** Response correction attempts consumed for this phase task. */
+  corrections?: number;
   /** Controller-recorded stop explanation from the watchdog or a worker failure. */
   stopReason?: string;
   /** Checkpoint evidence persisted before an abort, replayed on recovery. */
@@ -196,6 +200,7 @@ export function load(runDir: string): RunState {
     !Array.isArray(state.sessions) ||
     !state.settings?.repair ||
     !state.settings.watchdog ||
+    !state.settings.recovery ||
     !state.settings.deadlines ||
     !Number.isInteger(state.settings.repairRounds) ||
     !["setup", "tickets", "final", "publish", "done"].includes(state.phase) ||

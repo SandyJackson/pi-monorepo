@@ -10,7 +10,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  assertOutcomeConsistent,
   EDITING_OUTCOME_EXAMPLES,
+  type PhaseOutcome,
   parsePhaseOutcome,
   REVIEW_OUTCOME_EXAMPLES,
   runWorker,
@@ -671,18 +673,32 @@ function startWatchdog(scenario = "cooperative") {
     await waitForCommand("accepted");
     await flush();
   };
+  const waitForNotice = async (kind: WorkerIntervention["kind"], count = 1) => {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      if (notices.filter((notice) => notice.kind === kind).length >= count) return;
+      await delay(5);
+    }
+    throw new Error(`Timed out waiting for ${kind} notice`);
+  };
   const start = ({
     phase,
     watchdog,
     recovery,
     prompt,
     onAccounting,
+    resolveOutcome,
+    transientRetryLimit,
+    transientBackoffMs,
   }: {
     phase?: "editing" | "review";
     watchdog?: Partial<typeof WATCHDOG_DEFAULTS>;
     recovery?: WorkerRecovery;
     prompt?: string;
     onAccounting?: (accounting: WorkerAccounting) => void;
+    resolveOutcome?: (text: string) => PhaseOutcome;
+    transientRetryLimit?: number;
+    transientBackoffMs?: number[];
   } = {}) => {
     const promise = runWorker({
       executable: process.execPath,
@@ -694,6 +710,9 @@ function startWatchdog(scenario = "cooperative") {
       phase: phase ?? "editing",
       watchdog: { ...WATCHDOG_DEFAULTS, ...watchdog },
       recovery,
+      resolveOutcome,
+      transientRetryLimit,
+      transientBackoffMs,
       onIntervention: (notice) => notices.push(notice),
       onAccounting,
     });
@@ -702,7 +721,18 @@ function startWatchdog(scenario = "cooperative") {
     promise.catch(() => {});
     return promise;
   };
-  return { dir, clock, log, notices, commands, inject, start, waitForCommand, accepted };
+  return {
+    dir,
+    clock,
+    log,
+    notices,
+    commands,
+    inject,
+    start,
+    waitForCommand,
+    waitForNotice,
+    accepted,
+  };
 }
 
 const startTool = (id: string, name = "bash") => ({
@@ -1089,5 +1119,266 @@ describe("supervised worker watchdog", () => {
     wd.inject(outcomeMessage({ outcome: "complete", summary: "Done." }));
     wd.inject({ type: "agent_settled" });
     await expect(promise).resolves.toMatchObject({ text: expect.stringContaining('"complete"') });
+  });
+
+  const autoRetryStarted = {
+    type: "auto_retry_start",
+    attempt: 1,
+    maxAttempts: 3,
+    delayMs: 10,
+    errorMessage: "529 overloaded",
+  };
+  const autoRetryExhausted = {
+    type: "auto_retry_end",
+    success: false,
+    attempt: 3,
+    finalError: "529 overloaded",
+  };
+  const failedTurn = {
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "provider failed" }],
+      stopReason: "error",
+      errorMessage: "529 overloaded",
+    },
+  };
+  const injectFailedTurn = (wd: ReturnType<typeof startWatchdog>) => {
+    // Pi emits the failing assistant message before its native retry ends.
+    wd.inject(failedTurn);
+    wd.inject(autoRetryStarted);
+    wd.inject(autoRetryExhausted);
+    wd.inject({ type: "agent_settled" });
+  };
+
+  it("does not charge Pi's native retries to the controller retry budget", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({ transientRetryLimit: 2, transientBackoffMs: [100, 100] });
+    await wd.accepted();
+    wd.inject(autoRetryStarted);
+    wd.inject({ type: "auto_retry_end", success: true, attempt: 2 });
+    wd.inject(outcomeMessage({ outcome: "complete", summary: "Done." }));
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).resolves.toMatchObject({ transientRetries: 0, corrections: 0 });
+    expect(wd.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+  });
+
+  it("retries a transient failure after the configured backoff", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({ transientRetryLimit: 2, transientBackoffMs: [100, 200] });
+    await wd.accepted();
+    injectFailedTurn(wd);
+    await wd.waitForNotice("retry");
+    // The retry waits out its backoff; the recorded failure reason is replayed.
+    expect(wd.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+    await wd.clock.advance(100);
+    await wd.waitForCommand("prompt", 2);
+    const retry = wd.commands().filter((command) => command.type === "prompt")[1];
+    expect(retry.message).toContain("transient");
+    expect(retry.message).toContain("529 overloaded");
+    expect(retry.message).toContain("blindly");
+    wd.inject(outcomeMessage({ outcome: "complete", summary: "Done." }));
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).resolves.toMatchObject({ transientRetries: 1, corrections: 0 });
+    expect(wd.notices.filter((notice) => notice.kind === "retry")).toHaveLength(1);
+  });
+
+  it("bounds transient controller retries and keeps their count durable", async () => {
+    const wd = startWatchdog();
+    const accounting: WorkerAccounting[] = [];
+    const promise = wd.start({
+      transientRetryLimit: 2,
+      transientBackoffMs: [50, 75],
+      onAccounting: (value) => accounting.push(value),
+    });
+    await wd.accepted();
+    injectFailedTurn(wd);
+    for (const [index, backoff] of [50, 75].entries()) {
+      await wd.waitForNotice("retry", index + 1);
+      await wd.clock.advance(backoff);
+      await wd.waitForCommand("prompt", index + 2);
+      injectFailedTurn(wd);
+    }
+    await expect(promise).rejects.toThrow(/transient retries were exhausted/);
+    expect(wd.commands().filter((command) => command.type === "prompt")).toHaveLength(3);
+    expect(wd.notices.at(-1)?.transientRetries).toBe(2);
+    // Backoff time counts against the phase allowance, not as free recovery time.
+    expect(accounting.at(-1)?.consumedMs).toBeGreaterThanOrEqual(125);
+  });
+
+  it("does not retry an unclassified failure without Pi's transient signal", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({ transientRetryLimit: 2, transientBackoffMs: [100, 100] });
+    await wd.accepted();
+    wd.inject(failedTurn);
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).rejects.toThrow(/unsuccessful response/);
+    expect(wd.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+    expect(wd.notices.at(-1)?.transientRetries ?? 0).toBe(0);
+  });
+
+  it("does not retry a cancelled native retry", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({ transientRetryLimit: 2, transientBackoffMs: [100, 100] });
+    await wd.accepted();
+    wd.inject(failedTurn);
+    wd.inject(autoRetryStarted);
+    wd.inject({
+      type: "auto_retry_end",
+      success: false,
+      attempt: 1,
+      finalError: "Retry cancelled",
+    });
+    wd.inject({ type: "agent_settled" });
+    // The finalError is preserved; the retryable terminal text is not retried.
+    await expect(promise).rejects.toThrow(/unsuccessful response \(error: Retry cancelled\)/);
+    expect(wd.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+    expect(wd.notices.at(-1)?.transientRetries ?? 0).toBe(0);
+  });
+
+  it("does not retry a non-retryable failure after an earlier retry", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({ transientRetryLimit: 2, transientBackoffMs: [100, 100] });
+    await wd.accepted();
+    wd.inject({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "provider failed" }],
+        stopReason: "error",
+        errorMessage: "401 invalid api key",
+      },
+    });
+    wd.inject(autoRetryStarted);
+    wd.inject({
+      type: "auto_retry_end",
+      success: false,
+      attempt: 1,
+      finalError: "401 invalid api key",
+    });
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).rejects.toThrow(/401 invalid api key/);
+    expect(wd.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+    expect(wd.notices.at(-1)?.transientRetries ?? 0).toBe(0);
+  });
+
+  it("does not retry authorization failure from a turn queued after exhausted transient retries", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({ transientRetryLimit: 2, transientBackoffMs: [100, 100] });
+    await wd.accepted();
+    // Pi exhausts its own native retries on the overloaded provider...
+    wd.inject(failedTurn);
+    wd.inject(autoRetryStarted);
+    wd.inject(autoRetryExhausted);
+    // ...then processes queued checkpoint steering in a second turn that fails
+    // with a non-retryable authentication error and emits no retry-end event.
+    wd.inject({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "provider failed" }],
+        stopReason: "error",
+        errorMessage: "401 invalid api key",
+      },
+    });
+    wd.inject({ type: "agent_settled" });
+    // The stale overload evidence must not spend a controller retry here; the
+    // worker must stop and report the authorization failure instead.
+    const reported = () =>
+      wd.notices.some((notice) => notice.kind === "retry" || notice.kind === "abort");
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline && !reported()) await delay(5);
+    expect(wd.notices.some((notice) => notice.kind === "retry")).toBe(false);
+    await expect(promise).rejects.toThrow(/401 invalid api key/);
+    expect(wd.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+    expect(wd.notices.at(-1)?.transientRetries ?? 0).toBe(0);
+  });
+
+  it("cancels a pending retry when the hard ceiling expires during backoff", async () => {
+    const wd = startWatchdog("uncooperative");
+    const promise = wd.start({
+      transientRetryLimit: 2,
+      transientBackoffMs: [500, 500],
+      watchdog: { hardCeilingMs: 200, abortGraceMs: 200, sigkillEscalationMs: 100 },
+    });
+    await wd.accepted();
+    injectFailedTurn(wd);
+    await wd.waitForNotice("retry");
+    await wd.clock.advance(200);
+    await wd.waitForCommand("abort");
+    // The backoff expires during the unresponsive abort grace; no turn may be
+    // dispatched after cancellation.
+    await wd.clock.advance(200);
+    await wd.clock.advance(100);
+    await expect(promise).rejects.toThrow(/hard-ceiling/);
+    expect(wd.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+  });
+
+  it("corrects one malformed phase response in the same session", async () => {
+    const wd = startWatchdog();
+    const validated: string[] = [];
+    const promise = wd.start({
+      resolveOutcome: (text) => {
+        validated.push(text);
+        if (text !== '{"outcome":"complete","summary":"Done."}')
+          throw new Error("not a valid outcome");
+        return parsePhaseOutcome("editing", text);
+      },
+    });
+    await wd.accepted();
+    wd.inject({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "PASS, probably." }] },
+    });
+    wd.inject({ type: "agent_settled" });
+    await wd.waitForCommand("prompt", 2);
+    const correction = wd.commands().filter((command) => command.type === "prompt")[1];
+    expect(correction.message).toContain("could not accept");
+    expect(correction.message).toContain("not a valid outcome");
+    wd.inject(outcomeMessage({ outcome: "complete", summary: "Done." }));
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).resolves.toMatchObject({
+      outcome: { outcome: "complete" },
+      corrections: 1,
+      transientRetries: 0,
+    });
+    expect(validated).toHaveLength(2);
+  });
+
+  it("stops after one correction when the response stays invalid", async () => {
+    const wd = startWatchdog();
+    const promise = wd.start({
+      resolveOutcome: () => {
+        throw new Error("still not a valid outcome");
+      },
+    });
+    await wd.accepted();
+    wd.inject({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "bad" }] },
+    });
+    wd.inject({ type: "agent_settled" });
+    await wd.waitForCommand("prompt", 2);
+    wd.inject({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "still bad" }] },
+    });
+    wd.inject({ type: "agent_settled" });
+    await expect(promise).rejects.toThrow(/stayed invalid after one correction/);
+    expect(wd.commands().filter((command) => command.type === "prompt")).toHaveLength(2);
+    expect(wd.notices.at(-1)?.corrections).toBe(1);
+  });
+});
+
+describe("assertOutcomeConsistent", () => {
+  it("rejects a passing review when required checks failed", () => {
+    const pass = parsePhaseOutcome(
+      "review",
+      JSON.stringify({ outcome: "pass", summary: "Fine.", findings: [] }),
+    );
+    expect(() => assertOutcomeConsistent("review", pass, { checksPassed: false })).toThrow(
+      /required checks failed/,
+    );
+    expect(() => assertOutcomeConsistent("review", pass, { checksPassed: true })).not.toThrow();
   });
 });

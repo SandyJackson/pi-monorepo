@@ -22,6 +22,7 @@ import {
   type Ticket,
 } from "./state.ts";
 import {
+  assertOutcomeConsistent,
   EDITING_OUTCOME_EXAMPLES,
   type ParsedFinding,
   type PhaseOutcome,
@@ -97,6 +98,7 @@ async function worker(
   phase: "editing" | "review",
   prompt: string,
   ticket?: Ticket,
+  checksPassed = true,
 ): Promise<PhaseOutcome> {
   const number = state.sessions.length + 1;
   const subject = ticket ? `#${ticket.number}` : "parent";
@@ -118,6 +120,8 @@ async function worker(
       ? {
           consumedMs: prior.consumedMs,
           continuationUsed: prior.continuationUsed,
+          transientRetries: prior.transientRetries,
+          corrections: prior.corrections,
           stopReason: prior.stopReason,
           checkpoint: prior.checkpoint,
         }
@@ -164,10 +168,21 @@ async function worker(
       log: session.log,
       phase,
       watchdog: state.settings.watchdog,
+      // A passing review is inconsistent with failed required checks; the
+      // worker turns that into one bounded correction request.
+      resolveOutcome: (text) => {
+        const outcome = parsePhaseOutcome(phase, text);
+        assertOutcomeConsistent(phase, outcome, { checksPassed });
+        return outcome;
+      },
+      transientRetryLimit: state.settings.recovery.transientRetries,
+      transientBackoffMs: state.settings.recovery.transientBackoffMs,
       recovery: prior
         ? {
             consumedMs: prior.consumedMs,
             continuationUsed: prior.continuationUsed,
+            transientRetries: prior.transientRetries,
+            corrections: prior.corrections,
             stopReason: prior.stopReason,
             checkpoint: prior.checkpoint,
           }
@@ -177,6 +192,8 @@ async function worker(
         // aborts, so an unconsumed checkpoint steer is never the only record.
         session.consumedMs = notice.consumedMs;
         session.continuationUsed = notice.continuationUsed;
+        session.transientRetries = notice.transientRetries;
+        session.corrections = notice.corrections;
         if (notice.kind === "checkpoint")
           session.checkpoint = {
             reason: notice.reason,
@@ -185,30 +202,40 @@ async function worker(
             consumedMs: notice.consumedMs,
           };
         if (notice.kind === "abort") session.stopReason = `${notice.reason}: ${notice.detail}`;
+        // Preserve the recovery reason too, so a crash during a retry backoff
+        // or correction still replays why the phase restarted.
+        if (notice.kind === "retry")
+          session.stopReason = `transient retry pending: ${notice.detail}`;
+        if (notice.kind === "correction")
+          session.stopReason = `response correction requested: ${notice.detail}`;
         save(state);
       },
       onAccounting: (accounting) => {
         // Periodic flush so a controller crash cannot replenish the allowance.
         session.consumedMs = accounting.consumedMs;
         session.continuationUsed = accounting.continuationUsed;
+        session.transientRetries = accounting.transientRetries;
+        session.corrections = accounting.corrections;
         save(state);
       },
     });
     session.consumedMs = result.consumedMs;
     session.continuationUsed = result.continuationUsed;
-    let outcome: PhaseOutcome;
-    try {
-      outcome = parsePhaseOutcome(phase, result.text);
-    } catch (error) {
-      session.stopReason = error instanceof Error ? error.message : String(error);
+    session.transientRetries = result.transientRetries;
+    session.corrections = result.corrections;
+    const outcome = result.outcome;
+    if (!outcome) {
+      session.stopReason = "worker finished without a validated phase outcome";
       save(state);
-      throw new Error(
-        `${session.stopReason}. Inspect ${session.log} and resume; no work was accepted`,
-      );
+      throw new Error(`${session.stopReason}. Inspect ${session.log}`);
     }
     session.outcome = outcome.outcome;
     save(state);
     return outcome;
+  } catch (error) {
+    session.stopReason = error instanceof Error ? error.message : String(error);
+    save(state);
+    throw error;
   } finally {
     await unchangedHead(state, head);
   }
@@ -264,6 +291,7 @@ async function verify(
   const head = await git(state.worktree, "rev-parse", "HEAD");
   const log = join(state.runDir, "logs", `checks-${Date.now()}.log`);
   console.log(`Checks: ${state.check}`);
+  let checksPassed = true;
   try {
     await command("/bin/sh", ["-c", state.check], {
       cwd: state.worktree,
@@ -272,6 +300,7 @@ async function verify(
     });
   } catch (error) {
     if (error instanceof Error && error.name === "CommandStoppedError") throw error;
+    checksPassed = false;
     return `Checks failed: ${String(error)}`;
   } finally {
     await unchangedHead(state, head);
@@ -298,6 +327,7 @@ async function verify(
       REVIEW_OUTCOME_SCHEMA,
     ].join("\n\n"),
     ticket,
+    checksPassed,
   );
   await git(state.worktree, "add", "-A");
   if ((await git(state.worktree, "write-tree")) !== tree)
@@ -351,6 +381,18 @@ async function accept(state: RunState, ticket?: Ticket): Promise<void> {
   save(state);
 }
 
+/**
+ * Whether the ticket's latest editing phase was interrupted before completing.
+ * A non-complete editing phase (crashed, incomplete, blocked) is execution
+ * recovery: its next check failure re-runs the worker without spending a
+ * code-repair round.
+ */
+function editingInterrupted(state: RunState, ticket: Ticket): boolean {
+  const marker = `#${ticket.number} implement · `;
+  const latest = state.sessions.filter((session) => session.name.includes(marker)).at(-1);
+  return latest?.outcome !== "complete";
+}
+
 async function resolveTicket(state: RunState, ticket: Ticket): Promise<void> {
   const resuming = ticket.status !== "pending";
   ticket.baseline ??= await git(state.worktree, "rev-parse", "HEAD");
@@ -365,10 +407,15 @@ async function resolveTicket(state: RunState, ticket: Ticket): Promise<void> {
       await accept(state, ticket);
       return;
     }
-    if (ticket.repairs >= state.settings.repairRounds)
-      throw new Error(`Ticket #${ticket.number} exhausted its repair budget. ${ticket.feedback}`);
-    ticket.repairs++;
-    save(state);
+    // An interrupted editing phase is execution recovery, not a code repair:
+    // re-run it without spending a repair round. A completed editing phase
+    // whose checks failed is a genuine code repair.
+    if (!editingInterrupted(state, ticket)) {
+      if (ticket.repairs >= state.settings.repairRounds)
+        throw new Error(`Ticket #${ticket.number} exhausted its repair budget. ${ticket.feedback}`);
+      ticket.repairs++;
+      save(state);
+    }
     await implement(state, ticket);
   }
 }

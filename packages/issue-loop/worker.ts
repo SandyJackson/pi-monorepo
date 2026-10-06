@@ -65,6 +65,10 @@ export interface WorkerRecovery {
   consumedMs?: number;
   /** Whether the one incomplete/stalled continuation has been used. */
   continuationUsed?: boolean;
+  /** Controller transient retries already consumed by this phase task. */
+  transientRetries?: number;
+  /** Response correction attempts already consumed by this phase task. */
+  corrections?: number;
   /** Why the interrupted attempt stopped, replayed as recovery context. */
   stopReason?: string;
   /** Checkpoint requested before the attempt stopped, replayed on recovery. */
@@ -75,17 +79,21 @@ export interface WorkerRecovery {
 export interface WorkerAccounting {
   consumedMs: number;
   continuationUsed: boolean;
+  transientRetries: number;
+  corrections: number;
 }
 
 /** Watchdog decision recorded before the controller acts on it. */
 export interface WorkerIntervention {
-  kind: "checkpoint" | "continuation" | "abort";
+  kind: "checkpoint" | "continuation" | "abort" | "retry" | "correction";
   phase: WorkerPhase;
   reason: string;
   detail: string;
   elapsedMs: number;
   consumedMs: number;
   continuationUsed: boolean;
+  transientRetries: number;
+  corrections: number;
   queuedSteering?: string[];
   queuedFollowUp?: string[];
 }
@@ -106,6 +114,15 @@ export interface WorkerOptions {
   clock?: WorkerClock;
   /** Allowance already consumed by this phase task. */
   recovery?: WorkerRecovery;
+  /**
+   * Validate a settled response. A thrown error requests one correction prompt
+   * in the same session before the phase task is allowed to fail.
+   */
+  resolveOutcome?: (text: string) => PhaseOutcome;
+  /** Maximum classified transient controller retries. Defaults to 0. */
+  transientRetryLimit?: number;
+  /** Backoff before each transient retry; index i is used for retry i+1. */
+  transientBackoffMs?: number[];
   /** Called before a checkpoint, continuation, or abort is acted on. */
   onIntervention?: (notice: WorkerIntervention) => void;
   /** Called periodically so the controller can persist runtime across a crash. */
@@ -119,10 +136,34 @@ export interface WorkerOptions {
 }
 
 const INITIAL_PROMPT_ID = "prompt-1";
-const CONTINUATION_PROMPT_ID = "prompt-2";
 const CHECKPOINT_STEER_ID = "steer-1";
 const CLEAR_QUEUE_ID = "clear-1";
 const ABORT_ID = "abort-1";
+
+/**
+ * Provider failures Pi itself treats as non-retryable. Pi does not expose the
+ * retryability flag over RPC, and `auto_retry_end(success: false)` is emitted
+ * for exhausted retries, a cancelled retry, and a non-retryable error after an
+ * earlier retry alike. Re-classify the recorded error so only a known transient
+ * failure spends a controller retry. Mirrors Pi's `isRetryableAssistantError`
+ * (`agent-session.ts` / `buildProviderErrorPattern`).
+ */
+const NON_RETRYABLE_PROVIDER_ERROR_PATTERN =
+  /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing|subscription_sharing_usage_limit_exceeded/i;
+const RETRYABLE_PROVIDER_ERROR_PATTERN =
+  /overloaded|currently experiencing high demand|rate.?limit|too many requests|429|500|502|503|504|520|524|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|exceeded request buffer limit while retrying upstream|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|getaddrinfo|ENOTFOUND|EAI_AGAIN|upstream.?connect|reset before headers|socket hang up|socket connection was closed|timed? out|timeout|terminated|websocket.?closed|websocket.?error|ended without|stream ended before message_stop|stream ended before a terminal response event|http2 request did not get a response|retry delay|you can retry your request|try your request again|please retry your request|ResourceExhausted|subscription_sharing_usage_unavailable|subscription_sharing_user_unavailable/i;
+
+/**
+ * Classify a recorded final failure. Cancellation, provider limits (billing,
+ * quota) and unrecognized errors are never retried; only known transient
+ * provider failures are.
+ */
+function isTransientProviderFailure(finalError: string | undefined): boolean {
+  if (!finalError) return false;
+  if (/retry cancelled/i.test(finalError)) return false;
+  if (NON_RETRYABLE_PROVIDER_ERROR_PATTERN.test(finalError)) return false;
+  return RETRYABLE_PROVIDER_ERROR_PATTERN.test(finalError);
+}
 
 const EDITING_OUTCOMES: PhaseOutcomeName[] = ["complete", "incomplete", "blocked"];
 const REVIEW_OUTCOMES: PhaseOutcomeName[] = ["pass", "changes_requested", "incomplete", "blocked"];
@@ -332,6 +373,34 @@ function continuationPrompt(
 }
 
 /**
+ * Same-session retry prompt used after Pi's own native retries are exhausted.
+ * Replays the recorded failure so the agent can avoid repeating it blindly.
+ */
+function transientRetryPrompt(phase: WorkerPhase, failure: string): string {
+  return [
+    "Pi exhausted its native provider retries and the previous attempt failed transiently.",
+    `Recorded failure: ${failure}`,
+    "The controller is retrying this phase within its bounded transient budget. Continue from where it stopped.",
+    "Inspect any step or command involved in the failure before repeating it; do not repeat a failed or stalled command blindly.",
+    `When finished, reply with exactly one structured ${phase} outcome JSON object.`,
+  ].join("\n");
+}
+
+/** One correction prompt for a malformed or phase-inconsistent response. */
+function correctionPrompt(phase: WorkerPhase, problem: string): string {
+  const allowed =
+    phase === "review"
+      ? "pass, changes_requested, incomplete, or blocked"
+      : "complete, incomplete, or blocked";
+  return [
+    "The controller could not accept your previous reply as a valid phase outcome.",
+    `Problem: ${problem}`,
+    "Reply again with exactly one structured outcome JSON object and no trailing text.",
+    `Allowed outcomes: ${allowed}. Use incomplete with remainingWork when the work is not finished, or blocked with blockers when you cannot proceed.`,
+  ].join("\n");
+}
+
+/**
  * Replay the interrupted attempt's stop evidence as the first prompt of a
  * resumed phase task, so an unconsumed checkpoint steer is not the only record.
  */
@@ -366,10 +435,16 @@ interface TrackedTool {
 export interface WorkerRunResult {
   /** Authoritative final assistant text from the settled run. */
   text: string;
+  /** Validated phase outcome; present when the caller supplied `resolveOutcome`. */
+  outcome?: PhaseOutcome;
   /** Execution time consumed by this phase task, including earlier attempts. */
   consumedMs: number;
   /** Whether the single incomplete/stalled continuation was used. */
   continuationUsed: boolean;
+  /** Classified transient controller retries consumed. */
+  transientRetries: number;
+  /** Response correction attempts consumed. */
+  corrections: number;
 }
 
 /**
@@ -419,12 +494,14 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
     let assistant = "";
     let stderr = "";
     let terminal: { stopReason?: string; errorMessage?: string } | undefined;
+    let resolvedOutcome: PhaseOutcome | undefined;
 
     let watchdogTimer: unknown;
     let abortTimer: unknown;
     let killTimer: unknown;
     let drainTimer: unknown;
     let accountingTimer: unknown;
+    let retryTimer: unknown;
 
     // Model generation and each in-flight tool call track progress separately,
     // so activity in one call cannot hide another that has gone silent.
@@ -434,6 +511,22 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
 
     let softCheckpointUsed = consumedBefore >= softCheckpointMs;
     let continuationUsed = options.recovery?.continuationUsed ?? false;
+    // Recovery counters are separate and durable: native retries stay outside
+    // the controller budget, and a restart never replenishes them.
+    let transientRetries = Math.max(0, options.recovery?.transientRetries ?? 0);
+    let corrections = Math.max(0, options.recovery?.corrections ?? 0);
+    const transientRetryLimit = Math.max(0, options.transientRetryLimit ?? 0);
+    const transientBackoffMs = options.transientBackoffMs ?? [];
+    let autoRetryExhausted = false;
+    let autoRetryFinalError: string | undefined;
+    // A native-retry exhaustion belongs to the assistant failure that produced
+    // it. Pi may process queued steering in a later turn before settling; a
+    // fresh failure must not reuse the earlier transient classification.
+    let assistantFailures = 0;
+    let autoRetryFailure = -1;
+    let retryScheduled = false;
+    let promptSequence = 1;
+    let activePromptId = INITIAL_PROMPT_ID;
     let awaitingCheckpoint = false;
     let checkpointDeadline = 0;
     const checkpointReasons: string[] = [];
@@ -461,6 +554,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
     const cleanup = () => {
       clearTimer(watchdogTimer);
       clearTimer(abortTimer);
+      clearTimer(retryTimer);
       // A terminated process group may still hold members that ignored SIGTERM;
       // leave the bounded SIGKILL escalation running so they cannot outlive the
       // worker or keep mutating the worktree after termination.
@@ -473,7 +567,12 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
     const flushAccounting = () => {
       if (!options.onAccounting) return;
       try {
-        options.onAccounting({ consumedMs: consumedMs(), continuationUsed });
+        options.onAccounting({
+          consumedMs: consumedMs(),
+          continuationUsed,
+          transientRetries,
+          corrections,
+        });
       } catch (error) {
         console.error(
           `Warning: could not persist worker accounting: ${error instanceof Error ? error.message : String(error)}`,
@@ -497,7 +596,15 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
       flushAccounting();
       cleanup();
       if (error) reject(error);
-      else resolve({ text: assistant, consumedMs: consumedMs(), continuationUsed });
+      else
+        resolve({
+          text: assistant,
+          outcome: resolvedOutcome,
+          consumedMs: consumedMs(),
+          continuationUsed,
+          transientRetries,
+          corrections,
+        });
     };
     const terminateProcess = () => {
       if (terminated) return;
@@ -537,6 +644,11 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
       failure = reason;
       clearTimer(watchdogTimer);
       watchdogTimer = undefined;
+      // A pending transient-retry backoff must not dispatch a new turn after
+      // the phase has been stopped.
+      clearTimer(retryTimer);
+      retryTimer = undefined;
+      retryScheduled = false;
       // Persist diagnostics and consumed runtime before terminating so a
       // controller interrupt does not replenish the phase allowance.
       notify("abort", "stopped", reason);
@@ -571,6 +683,8 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
           elapsedMs: clock.now() - startedAt,
           consumedMs: consumedMs(),
           continuationUsed,
+          transientRetries,
+          corrections,
           ...(queuedSteering.length ? { queuedSteering: [...queuedSteering] } : {}),
           ...(queuedFollowUp.length ? { queuedFollowUp: [...queuedFollowUp] } : {}),
         });
@@ -635,6 +749,9 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
 
     const watchdogDeadline = (): number | undefined => {
       if (finished || settled || aborted) return undefined;
+      // During a transient retry backoff only the hard ceiling applies: the
+      // phase is intentionally idle, so silence is not a stall.
+      if (retryScheduled) return hardDeadline;
       const candidates: number[] = [hardDeadline];
       if (awaitingCheckpoint) {
         candidates.push(checkpointDeadline);
@@ -682,6 +799,11 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
       checkpointReasons.push(abortReason);
       clearTimer(watchdogTimer);
       watchdogTimer = undefined;
+      // The phase is cancelled; a retry firing during the abort grace must not
+      // send another prompt.
+      clearTimer(retryTimer);
+      retryTimer = undefined;
+      retryScheduled = false;
       // Persist the stop explanation before any irreversible abort.
       notify("abort", reason, detail);
       // Queue cleanup first: an abort continues queued messages, which would
@@ -735,24 +857,40 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
       refreshWatchdog();
     };
 
-    const beginContinuation = (remainingWork: string) => {
+    const nextPromptId = () => `prompt-${++promptSequence}`;
+
+    /**
+     * Start another turn in the same process. Retries, corrections and
+     * continuations all reset the per-run bookkeeping (but never the durable
+     * phase allowance) and share the same command/settle contract.
+     */
+    const beginRun = (prompt: string, progress: string) => {
       awaitingCheckpoint = false;
       settled = false;
       accepted = false;
       assistant = "";
       terminal = undefined;
+      autoRetryExhausted = false;
+      resolvedOutcome = undefined;
+      autoRetryFinalError = undefined;
+      assistantFailures = 0;
+      autoRetryFailure = -1;
       tools.clear();
+      modelProgressAt = clock.now();
+      lastProgress = progress;
+      activePromptId = nextPromptId();
+      sendCommand({ id: activePromptId, type: "prompt", message: prompt });
+      refreshWatchdog();
+    };
+
+    const beginContinuation = (remainingWork: string) => {
       // The continuation is the phase's last allowance: no further checkpoint,
       // and the soft checkpoint is not retriggered.
       softCheckpointUsed = true;
-      modelProgressAt = clock.now();
-      lastProgress = "continuation started";
-      sendCommand({
-        id: CONTINUATION_PROMPT_ID,
-        type: "prompt",
-        message: continuationPrompt(phase, checkpointReasons.join("; "), remainingWork),
-      });
-      refreshWatchdog();
+      beginRun(
+        continuationPrompt(phase, checkpointReasons.join("; "), remainingWork),
+        "continuation started",
+      );
     };
 
     const finishNormally = () => {
@@ -762,6 +900,66 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
       closeStdin();
       // Give the settled process a bounded chance to exit, then escalate.
       drainTimer = clock.setTimer(terminateProcess, settleGraceMs);
+    };
+
+    /**
+     * Grant one classified transient retry, waiting out its backoff first.
+     * Only Pi's structured native-retry exhaustion qualifies; an unclassified
+     * exit or abort never reaches here. Returns false when the budget is spent.
+     */
+    const scheduleTransientRetry = (detail: string): boolean => {
+      if (transientRetries >= transientRetryLimit) return false;
+      const index = transientRetries;
+      transientRetries += 1;
+      retryScheduled = true;
+      notify("retry", "transient", detail);
+      modelProgressAt = clock.now();
+      lastProgress = "transient retry backoff";
+      clearTimer(watchdogTimer);
+      watchdogTimer = undefined;
+      const delay = transientBackoffMs[index] ?? transientBackoffMs.at(-1) ?? 0;
+      retryTimer = clock.setTimer(() => {
+        retryTimer = undefined;
+        retryScheduled = false;
+        // The backoff can outlive a stop or the hard ceiling (abort grace may
+        // still be running); never dispatch a turn after cancellation.
+        if (finished || aborted || failure) return;
+        if (clock.now() >= hardDeadline) {
+          abortPhase("hard-ceiling", `phase hard ceiling of ${hardCeilingMs}ms reached`);
+          return;
+        }
+        beginRun(transientRetryPrompt(phase, detail), "transient retry started");
+      }, delay);
+      refreshWatchdog();
+      return true;
+    };
+
+    /** One same-session correction prompt for an invalid phase response. */
+    const beginCorrection = (problem: string) => {
+      corrections += 1;
+      notify("correction", "invalid-response", problem);
+      beginRun(correctionPrompt(phase, problem), "response correction requested");
+    };
+
+    // Validate the settled response, allowing one correction before the phase
+    // task is allowed to fail. Persistent inconsistency never approves work.
+    const resolveAndFinish = () => {
+      if (!options.resolveOutcome) {
+        finishNormally();
+        return;
+      }
+      try {
+        resolvedOutcome = options.resolveOutcome(assistant);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (corrections < 1) {
+          beginCorrection(message);
+          return;
+        }
+        stop(`phase response stayed invalid after one correction: ${message}`);
+        return;
+      }
+      finishNormally();
     };
 
     // Grant the one incomplete continuation, or bound a second incomplete
@@ -800,11 +998,11 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
       }
       // complete/pass/changes_requested (or an unparseable final message that
       // the caller will reject) ends the phase task.
-      finishNormally();
+      resolveAndFinish();
     };
 
     const handleSettled = () => {
-      if (finished || aborted) return;
+      if (finished || aborted || retryScheduled) return;
       if (!accepted) {
         stop("pi settled before accepting the prompt");
         return;
@@ -812,16 +1010,30 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
       // Pi settles failed and aborted responses too. Only a successful final
       // message is authoritative, so valid outcome JSON inside a failed
       // stream cannot approve work.
-      if (terminal?.stopReason === "error" || terminal?.stopReason === "aborted") {
-        stop(
-          `pi settled after an unsuccessful response (${terminal.stopReason}${
-            terminal.errorMessage ? `: ${terminal.errorMessage}` : ""
-          })`,
-        );
+      if (terminal?.stopReason === "aborted") {
+        stop("pi settled after an unsuccessful response (aborted)");
         return;
       }
-      if (terminal?.errorMessage) {
-        stop(`pi settled after reporting an error: ${terminal.errorMessage}`);
+      if (terminal?.stopReason === "error" || terminal?.errorMessage) {
+        // Native-retry evidence only describes the latest assistant failure. A
+        // queued turn that fails afterwards must report its own error and must
+        // not spend a controller retry on the earlier transient classification.
+        const retryEvidenceCurrent = autoRetryFailure === assistantFailures;
+        const recorded =
+          (retryEvidenceCurrent ? autoRetryFinalError : undefined) ??
+          terminal?.errorMessage ??
+          terminal?.stopReason ??
+          "error";
+        const detail = `unsuccessful response (${terminal?.stopReason ?? "error"}: ${recorded})`;
+        const exhausted = autoRetryExhausted && retryEvidenceCurrent;
+        // A user interruption, a plain exit, or any failure not classified as
+        // transient is never retried.
+        if (exhausted && scheduleTransientRetry(detail)) return;
+        stop(
+          `pi settled after an ${detail}${
+            exhausted ? " and its transient retries were exhausted" : ""
+          }`,
+        );
         return;
       }
       if (awaitingCheckpoint) {
@@ -841,7 +1053,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
         decideIncomplete(voluntary.remainingWork ?? "");
         return;
       }
-      finishNormally();
+      resolveAndFinish();
     };
 
     const handleResponse = (value: Record<string, unknown>) => {
@@ -860,7 +1072,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
           stop(`pi returned an unknown prompt disposition ${JSON.stringify(disposition)}`);
           return;
         }
-        if (value.id === INITIAL_PROMPT_ID || value.id === CONTINUATION_PROMPT_ID) accepted = true;
+        if (value.id === activePromptId) accepted = true;
         return;
       }
       if (command === "clear_queue") {
@@ -899,6 +1111,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
             errorMessage?: unknown;
           };
           if (record.role === "assistant") {
+            assistantFailures += 1;
             terminal = {
               stopReason: typeof record.stopReason === "string" ? record.stopReason : undefined,
               errorMessage:
@@ -953,14 +1166,29 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
         markModelProgress(tool ? `finished ${tool.name}` : "tool finished");
         return;
       }
+      if (value.type === "auto_retry_start") {
+        // Pi's own transient retries stay outside the controller budget.
+        markModelProgress("native retry scheduled");
+        return;
+      }
+      if (value.type === "auto_retry_end") {
+        // `success: false` covers exhausted retries, a cancelled retry, and a
+        // non-retryable error after an earlier retry. Only a classified
+        // transient finalError may spend a controller retry; the recorded
+        // finalError is preserved for the retry/stop diagnostics.
+        autoRetryFinalError = typeof value.finalError === "string" ? value.finalError : undefined;
+        autoRetryExhausted =
+          value.success === false && isTransientProviderFailure(autoRetryFinalError);
+        autoRetryFailure = assistantFailures;
+        markModelProgress("native retry finished");
+        return;
+      }
       if (
         value.type === "message_start" ||
         value.type === "turn_start" ||
         value.type === "turn_end" ||
         value.type === "agent_start" ||
         value.type === "agent_end" ||
-        value.type === "auto_retry_start" ||
-        value.type === "auto_retry_end" ||
         value.type === "compaction_start" ||
         value.type === "compaction_end"
       ) {
@@ -1172,4 +1400,18 @@ export function parsePhaseOutcome(phase: WorkerPhase, text: string): PhaseOutcom
     if (message.startsWith(`Invalid ${phase} outcome:`)) throw error;
     throw new Error(`Invalid ${phase} outcome: ${message}`);
   }
+}
+
+/**
+ * Reject an outcome the controller knows is inconsistent with deterministic
+ * evidence. A passing review cannot follow failed required checks, so this
+ * becomes a bounded response-correction request rather than an approval.
+ */
+export function assertOutcomeConsistent(
+  phase: WorkerPhase,
+  outcome: PhaseOutcome,
+  evidence: { checksPassed: boolean },
+): void {
+  if (phase === "review" && outcome.outcome === "pass" && !evidence.checksPassed)
+    throw new Error("a pass cannot be accepted when required checks failed");
 }

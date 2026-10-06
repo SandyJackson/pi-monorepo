@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_DEADLINES,
   DEFAULT_IMPLEMENT_TOOLS,
+  DEFAULT_RECOVERY,
   DEFAULT_REPAIR_ROUNDS,
   DEFAULT_REVIEW_TOOLS,
   DEFAULT_WATCHDOG,
@@ -88,6 +89,7 @@ describe("loadLoopSettings", () => {
       },
       repairRounds: DEFAULT_REPAIR_ROUNDS,
       watchdog: DEFAULT_WATCHDOG,
+      recovery: DEFAULT_RECOVERY,
       deadlines: DEFAULT_DEADLINES,
       appendSystemPrompt: "Prefer small changes.",
     });
@@ -122,6 +124,7 @@ describe("loadLoopSettings", () => {
     });
     expect(settings.repairRounds).toBe(DEFAULT_REPAIR_ROUNDS);
     expect(settings.watchdog).toEqual(DEFAULT_WATCHDOG);
+    expect(settings.recovery).toEqual(DEFAULT_RECOVERY);
     expect(settings.deadlines).toEqual(DEFAULT_DEADLINES);
     expect(settings.appendSystemPrompt).toBeUndefined();
   });
@@ -166,12 +169,25 @@ describe("loadLoopSettings", () => {
     expect(settings.deadlines).toEqual({ ...DEFAULT_DEADLINES, checkMs: 2000 });
   });
 
+  it("overrides the controller recovery policy", () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({
+        recovery: { transientRetries: 1, transientBackoffMs: [10, 20] },
+      }),
+    });
+    const settings = loadLoopSettings(settingsPath);
+    expect(settings.recovery).toEqual({ transientRetries: 1, transientBackoffMs: [10, 20] });
+  });
+
   it.each([
     [{ repairRounds: -1 }, /repairRounds/],
     [{ repairRounds: 1.5 }, /repairRounds/],
     [{ repairRounds: 11 }, /repairRounds/],
     [{ watchdog: { silenceMs: 0 } }, /watchdog.silenceMs/],
     [{ watchdog: [] }, /watchdog/],
+    [{ recovery: { transientRetries: -1 } }, /recovery.transientRetries/],
+    [{ recovery: { transientBackoffMs: [10, "soon"] } }, /recovery.transientBackoffMs/],
+    [{ recovery: [] }, /recovery/],
     [{ deadlines: { gitMs: "soon" } }, /deadlines.gitMs/],
   ])("rejects invalid policy settings (%j)", (config, pattern) => {
     const settingsPath = writeSettingsDir({ "loop-settings.json": JSON.stringify(config) });

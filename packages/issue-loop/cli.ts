@@ -25,7 +25,7 @@ Starts from origin's default branch. Uses direct open GitHub child issues and na
 Worker supervision uses the watchdog policy in the settings snapshot.
 --settings points at an optional JSON file customizing worker models, tool allowlists,
 role guidance, per-role loop skills, repair rounds, watchdog policy, controller
-command deadlines, and a shared system-prompt addition
+recovery policy, controller command deadlines, and a shared system-prompt addition
 (see Customizing workers below). Workers always start with --no-skills and --no-extensions;
 only curated loop skills named in the settings file are loaded.
 

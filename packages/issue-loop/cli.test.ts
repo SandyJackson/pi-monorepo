@@ -9,6 +9,7 @@ import { gh, githubHostFromOrigin } from "./github.ts";
 import {
   DEFAULT_DEADLINES,
   DEFAULT_IMPLEMENT_TOOLS,
+  DEFAULT_RECOVERY,
   DEFAULT_REPAIR_ROUNDS,
   DEFAULT_WATCHDOG,
   loadLoopSettings,
@@ -133,6 +134,7 @@ const name = value('--name') || '';
 const session = value('--session');
 const out = record => process.stdout.write(JSON.stringify(record)+'\\n');
 const isParentReview = () => name.includes('parent review');
+let promptCount = 0;
 function materialSeverity(body) {
  const lower = String(body || '').toLowerCase();
  if (lower.includes('[critical]')) return 'critical';
@@ -183,6 +185,31 @@ function handle(command) {
  if (command.type === 'abort') {
   out({id: command.id, type:'response', command:'abort', success:true});
   process.exit(0);
+ }
+ if (command.type === 'prompt') promptCount++;
+ if (isImplement && (mode === 'recover-transient' || mode === 'recover-exhausted' || mode === 'recover-correction')) {
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  if (mode === 'recover-correction' && promptCount === 1) {
+   out({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'PASS, probably.'}]}});
+   out({type:'agent_end', messages:[], willRetry:false});
+   out({type:'agent_settled'});
+   return;
+  }
+  if (mode === 'recover-exhausted' || (mode === 'recover-transient' && promptCount === 1)) {
+   out({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'provider failed'}], stopReason:'error', errorMessage:'529 overloaded'}});
+   out({type:'auto_retry_start', attempt:1, maxAttempts:3, delayMs:10, errorMessage:'529 overloaded'});
+   out({type:'auto_retry_end', success:false, attempt:3, finalError:'529 overloaded'});
+   out({type:'agent_end', messages:[], willRetry:false});
+   out({type:'agent_settled'});
+   return;
+  }
+  fs.writeFileSync('feature.txt', 'implemented\\n');
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text:implementOutcome()}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
  }
  if (mode === 'stall-review' && !isImplement) {
   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
@@ -544,6 +571,7 @@ cliTest(
       },
       repairRounds: DEFAULT_REPAIR_ROUNDS,
       watchdog: DEFAULT_WATCHDOG,
+      recovery: DEFAULT_RECOVERY,
       deadlines: DEFAULT_DEADLINES,
       appendSystemPrompt: "SHARED STYLE NOTE.",
     });
@@ -1160,7 +1188,7 @@ cliTest(
   30_000,
 );
 
-cliTest.each([1, 2, 3, 4])(
+cliTest.each([1, 2, 3, 4, 5])(
   "refuses incompatible version-%s snapshots before launching workers",
   async (version) => {
     const f = fixture("fail");
@@ -1378,13 +1406,13 @@ cliTest(
   30_000,
 );
 
-function writeWatchdogSettings(root: string): string {
+function writeWatchdogSettings(root: string, silenceMs = 100): string {
   const settingsPath = join(root, "watchdog-settings.json");
   writeFileSync(
     settingsPath,
     JSON.stringify({
       watchdog: {
-        silenceMs: 100,
+        silenceMs,
         toolMs: 100_000,
         softCheckpointMs: 100_000,
         hardCeilingMs: 100_000,
@@ -1392,6 +1420,7 @@ function writeWatchdogSettings(root: string): string {
         abortGraceMs: 100,
         sigkillEscalationMs: 100,
       },
+      recovery: { transientRetries: 2, transientBackoffMs: [1, 1] },
     }),
     "utf8",
   );
@@ -1595,6 +1624,167 @@ cliTest(
     // A completed review ends the phase task; the next review must not inherit
     // the obsolete interrupted attempt's consumed allowance.
     expect(fresh.consumedMs).toBeLessThan(interrupted.consumedMs);
+  },
+  30_000,
+);
+
+cliTest(
+  "recovers a transient execution failure within the controller budget",
+  async () => {
+    const f = fixture("recover-transient");
+    const settingsPath = writeWatchdogSettings(f.root, 100_000);
+    const result = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("done");
+    const implement = state.sessions.find((session: { name: string }) =>
+      session.name.includes("#11 implement"),
+    );
+    expect(implement.transientRetries).toBe(1);
+    expect(implement.outcome).toBe("complete");
+    // Recovery does not consume a child code-repair round.
+    expect(state.tickets[0].repairs).toBe(0);
+    // The retry prompt replayed the failure and warned against blind repetition.
+    const prompts = readWorkers(f.root)
+      .filter((worker) => worker.name.includes("#11 implement"))
+      .map((worker) => worker.prompt);
+    expect(
+      prompts.some((prompt) => prompt.includes("transient") && prompt.includes("blindly")),
+    ).toBe(true);
+  },
+  30_000,
+);
+
+cliTest(
+  "bounds transient recovery and keeps the exhausted count across resume",
+  async () => {
+    const f = fixture("recover-exhausted");
+    const settingsPath = writeWatchdogSettings(f.root, 100_000);
+    const args = [
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('feature.txt')"`,
+      "--settings",
+      settingsPath,
+    ];
+    const first = await f.run(...args);
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.lastError).toContain("transient retries were exhausted");
+    const attemptOne = blocked.sessions.find((session: { name: string }) =>
+      session.name.includes("#11 implement"),
+    );
+    expect(attemptOne.transientRetries).toBe(2);
+    // Execution recovery is separate from a code repair.
+    expect(blocked.tickets[0].repairs).toBe(0);
+    // Resume does not replenish the budget: the next transient failure stops
+    // immediately without another retry prompt.
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status).toBe(1);
+    const afterResume = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const attemptTwo = afterResume.sessions.find((session: { name: string }) =>
+      session.name.includes("#11 implement · attempt 2"),
+    );
+    expect(attemptTwo.transientRetries).toBe(2);
+    // Repeated infrastructure-failure resumes never spend the repair budget.
+    expect(afterResume.tickets[0].repairs).toBe(0);
+    // Resume does not replenish the budget, so the new attempt sends no retry.
+    const attemptTwoPrompts = readWorkers(f.root).filter((worker) =>
+      worker.name.includes("#11 implement · attempt 2"),
+    );
+    expect(
+      attemptTwoPrompts.some(
+        (worker) =>
+          worker.prompt?.includes("Recovery context") && worker.prompt?.includes("transient"),
+      ),
+    ).toBe(true);
+    const retryPrompts = attemptTwoPrompts.filter((worker) =>
+      worker.prompt?.includes("exhausted its native provider retries"),
+    );
+    expect(retryPrompts).toHaveLength(0);
+    // Once the environment is fixed, a later resume completes the run.
+    f.env.FIXTURE_MODE = "pass";
+    const finished = await f.run("resume", runDir);
+    expect(finished.status, finished.stderr).toBe(0);
+    const afterFinish = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(afterFinish.status).toBe("done");
+    expect(afterFinish.tickets[0].repairs).toBe(0);
+  },
+  60_000,
+);
+
+cliTest(
+  "corrects one malformed response instead of blocking the run",
+  async () => {
+    const f = fixture("recover-correction");
+    const settingsPath = writeWatchdogSettings(f.root, 100_000);
+    const result = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("done");
+    const implement = state.sessions.find((session: { name: string }) =>
+      session.name.includes("#11 implement"),
+    );
+    expect(implement.corrections).toBe(1);
+    expect(implement.outcome).toBe("complete");
+    // The correction attempt does not consume a child code-repair round.
+    expect(state.tickets[0].repairs).toBe(0);
+    const prompts = readWorkers(f.root).filter((worker) => worker.name.includes("#11 implement"));
+    expect(prompts.some((worker) => worker.prompt.includes("could not accept"))).toBe(true);
+  },
+  30_000,
+);
+
+cliTest(
+  "does not spend a transient retry on an unclassified execution failure",
+  async () => {
+    const f = fixture("fail");
+    const settingsPath = writeWatchdogSettings(f.root, 100_000);
+    const result = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    );
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.sessions).toHaveLength(1);
+    expect(state.sessions[0].transientRetries ?? 0).toBe(0);
+    expect(state.lastError).toContain("Provider unavailable");
   },
   30_000,
 );
