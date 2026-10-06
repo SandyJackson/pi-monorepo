@@ -4,7 +4,7 @@ import type { ArtifactIdentity } from "./artifact.ts";
 import type { LoopSettings } from "./settings.ts";
 import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName } from "./worker.ts";
 
-export const RUN_STATE_VERSION = 7;
+export const RUN_STATE_VERSION = 8;
 
 export interface Issue {
   number: number;
@@ -48,12 +48,15 @@ export interface Review {
   tree: string;
 }
 
+/** Persisted child phase, used to resume an authorized repair or review. */
+export type TicketPhase = "implement" | "repair" | "review" | "audit";
+
 export interface Ticket extends Issue {
   blockers: Issue[];
   repairs: number;
   status: "pending" | "running" | "blocked" | "accepted";
-  /** Worker phase that most recently ran for this ticket. */
-  phase?: "editing" | "review";
+  /** Worker phase that most recently ran or is pending for this ticket. */
+  phase?: TicketPhase;
   /** Original child baseline: the accepted HEAD before this child started. */
   baseline?: string;
   /** Feature anchor commit: the first changed work commit for this child. */
@@ -69,16 +72,47 @@ export interface Ticket extends Issue {
   /** Unresolved hook outcome that preserved work and must not be auto-committed. */
   hookStop?: HookStop;
   feedback?: string;
-  /** Latest artifact-linked review verdict; earlier verdicts remain in `reviews`. */
+  /** Latest artifact-linked primary review verdict; earlier verdicts remain in `reviews`. */
   review?: Review;
   /** Earlier artifact-linked review verdicts, oldest first. */
   reviews?: Review[];
+  /** Read-only second pass confirming the latest failed review's findings on the unchanged artifact. */
+  audit?: Review;
+  /** Review rounds started, used to derive the next review phase-task identity. */
+  reviewRounds?: number;
+  /** Conversation (session file) hosting the current review round, its audit, and its repair. */
+  reviewConversation?: string;
+  /** Phase-task identity of the current review round; the audit shares its budget. */
+  reviewTask?: string;
+  /** Artifact identity the pending review/audit was attempted against; detects operator changes across a review stop. */
+  reviewAttempt?: ArtifactIdentity;
+  /** Phase-task identity of the editing phase currently being worked. */
+  editTask?: string;
+  /** Conversation (session file) that hosts the current editing phase task. */
+  editConversation?: string;
+  /** Originating role of the editing conversation; keeps its model/thinking unchanged during repair. */
+  editConversationRole?: "implement" | "review";
+  /** Intervening repair/retraction explanation supplied to the latest-findings audit. */
+  repairNote?: string;
+  /** Explanation recorded when a repair round produced no artifact change (retraction). */
+  retraction?: string;
 }
+
+export type SessionKind = "implement" | "review" | "repair" | "audit";
 
 export interface Session {
   name: string;
+  /** Shared session file for every attempt in one worker conversation. */
   path: string;
   log: string;
+  /** Ticket this conversation belongs to, or undefined for the parent conversation. */
+  ticket?: number;
+  /** Role guidance/config this attempt ran with. */
+  kind: SessionKind;
+  /** Originating role of the conversation; selects model/thinking for every attempt. */
+  conversationRole: "implement" | "review";
+  /** Phase-task identity; attempts sharing it share one runtime budget. */
+  phaseTask: string;
   /** Execution time the phase task had consumed when it last stopped. */
   consumedMs?: number;
   /** Whether the single incomplete/stalled continuation was used. */

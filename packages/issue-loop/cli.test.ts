@@ -173,6 +173,7 @@ function handle(command) {
  fs.writeFileSync(session, JSON.stringify({type:'session_info', name})+'\\n');
  fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'workers.jsonl'), JSON.stringify({name, session, args, prompt, cwd:process.cwd()})+'\\n');
  const isImplement = name.includes('implement');
+ const isEditing = name.includes('implement') || name.includes('repair');
  const mode = process.env.FIXTURE_MODE;
  if (command.type === 'steer') {
   out({id: command.id, type:'response', command:'steer', success:true, data:{disposition:'queued'}});
@@ -211,8 +212,174 @@ function handle(command) {
   out({type:'agent_settled'});
   return;
  }
+ if (mode === 'repair-check') {
+  if (isEditing) {
+   if (name.includes('repair')) fs.writeFileSync('check-ok', 'ok');
+   else fs.writeFileSync('feature.txt', 'implemented\\n');
+  }
+  const text = isEditing ? implementOutcome() : reviewOutcome();
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
+ }
+ if (mode === 'retraction') {
+  if (isEditing && !name.includes('repair')) fs.writeFileSync('feature.txt', 'implemented\\n');
+  let text;
+  if (isEditing) {
+   text = name.includes('repair')
+    ? JSON.stringify({outcome:'complete', summary:'The finding is mistaken: feature.txt already satisfies the requirement, so no change was made.'})
+    : implementOutcome();
+  } else if (name.includes('review')) {
+   const counterFile = path.join(process.env.FIXTURE_ROOT, 'retraction-review-count');
+   const count = (fs.existsSync(counterFile) ? Number(fs.readFileSync(counterFile, 'utf8')) : 0) + 1;
+   fs.writeFileSync(counterFile, String(count));
+   text = count === 1
+    ? JSON.stringify({outcome:'changes_requested', summary:'Suspected missing behavior', findings:[{axis:'spec',severity:'major',location:'feature.txt',description:'Suspected missing behavior'}]})
+    : JSON.stringify({outcome:'pass', summary:'Review passed.', findings:[]});
+  } else {
+   text = reviewOutcome();
+  }
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
+ }
+ if (mode === 'two-failures') {
+  if (isEditing) {
+   if (fs.existsSync('second.txt')) fs.writeFileSync('third.txt', 'third');
+   else if (fs.existsSync('first.txt')) fs.writeFileSync('second.txt', 'second');
+   else fs.writeFileSync('first.txt', 'first');
+  }
+  let text;
+  if (isEditing) {
+   text = implementOutcome();
+  } else if (name.includes('review')) {
+   const counterFile = path.join(process.env.FIXTURE_ROOT, 'two-failures-count');
+   const count = (fs.existsSync(counterFile) ? Number(fs.readFileSync(counterFile, 'utf8')) : 0) + 1;
+   fs.writeFileSync(counterFile, String(count));
+   text = count === 1
+    ? JSON.stringify({outcome:'changes_requested', summary:'First failure', findings:[{axis:'spec',severity:'major',location:'first.txt',description:'FIRST_FAILURE finding'}]})
+    : count === 2
+     ? JSON.stringify({outcome:'changes_requested', summary:'Second failure', findings:[{axis:'spec',severity:'major',location:'second.txt',description:'SECOND_FAILURE finding'}]})
+     : JSON.stringify({outcome:'pass', summary:'Review passed.', findings:[]});
+  } else {
+   text = reviewOutcome();
+  }
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
+ }
+ if (mode === 'manual-repair') {
+  if (isEditing) {
+   if (name.includes('repair')) { console.error('Provider unavailable'); process.exit(1); }
+   fs.writeFileSync('feature.txt', 'implemented\\n');
+   const text = implementOutcome();
+   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+   out({type:'agent_start'});
+   out({type:'message_start', message:{role:'assistant', content:[]}});
+   out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+   out({type:'agent_end', messages:[], willRetry:false});
+   out({type:'agent_settled'});
+   return;
+  }
+  const text = JSON.stringify({outcome:'changes_requested', summary:'Repair the failing behavior', findings:[{axis:'spec',severity:'major',location:'feature.txt',description:'INTERRUPTED_REPAIR finding'}]});
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
+ }
+ if (mode === 'manual-repair-check') {
+  if (isEditing) {
+   if (name.includes('repair')) { fs.writeFileSync('feature.txt', 'implemented\\n'); fs.writeFileSync('check-ok', 'ok'); }
+   else fs.writeFileSync('feature.txt', 'implemented\\n');
+   const text = implementOutcome();
+   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+   out({type:'agent_start'});
+   out({type:'message_start', message:{role:'assistant', content:[]}});
+   out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+   out({type:'agent_end', messages:[], willRetry:false});
+   out({type:'agent_settled'});
+   return;
+  }
+  const text = name.includes('audit') || fs.existsSync('check-ok')
+   ? JSON.stringify({outcome:'pass', summary:'Review passed.', findings:[]})
+   : JSON.stringify({outcome:'changes_requested', summary:'Checks still fail', findings:[{axis:'spec',severity:'major',location:'check-ok',description:'CHECKS_FAILING finding'}]});
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
+ }
+ if (mode === 'manual-review') {
+  if (isEditing) {
+   fs.writeFileSync('feature.txt', 'implemented\\n');
+   const text = implementOutcome();
+   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+   out({type:'agent_start'});
+   out({type:'message_start', message:{role:'assistant', content:[]}});
+   out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+   out({type:'agent_end', messages:[], willRetry:false});
+   out({type:'agent_settled'});
+   return;
+  }
+  console.error('Provider unavailable');
+  process.exit(1);
+ }
+ if (mode === 'stale-failure') {
+  if (isEditing) {
+   if (name.includes('repair')) fs.writeFileSync('fixed.txt', 'fixed');
+   else fs.writeFileSync('feature.txt', 'implemented\\n');
+   const text = implementOutcome();
+   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+   out({type:'agent_start'});
+   out({type:'message_start', message:{role:'assistant', content:[]}});
+   out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+   out({type:'agent_end', messages:[], willRetry:false});
+   out({type:'agent_settled'});
+   return;
+  }
+  if (name.includes('audit')) {
+   const text = JSON.stringify({outcome:'blocked', summary:'Audit cannot run', findings:[], blockers:'Transient audit failure'});
+   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+   out({type:'agent_start'});
+   out({type:'message_start', message:{role:'assistant', content:[]}});
+   out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+   out({type:'agent_end', messages:[], willRetry:false});
+   out({type:'agent_settled'});
+   return;
+  }
+  const counterFile = path.join(process.env.FIXTURE_ROOT, 'stale-failure-review-count');
+  const count = (fs.existsSync(counterFile) ? Number(fs.readFileSync(counterFile, 'utf8')) : 0) + 1;
+  fs.writeFileSync(counterFile, String(count));
+  const text = count === 1
+   ? JSON.stringify({outcome:'changes_requested', summary:'First failure', findings:[{axis:'spec',severity:'major',location:'feature.txt',description:'STALE_FAILURE finding'}]})
+   : JSON.stringify({outcome:'pass', summary:'Review passed.', findings:[]});
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
+ }
  if (mode === 'fixup') {
-  if (isImplement) {
+  if (isEditing) {
    if (fs.existsSync('first.txt')) fs.writeFileSync('second.txt', 'second');
    else fs.writeFileSync('first.txt', 'first');
   }
@@ -220,7 +387,7 @@ function handle(command) {
   out({type:'agent_start'});
   out({type:'message_start', message:{role:'assistant', content:[]}});
   let text;
-  if (isImplement) text = implementOutcome();
+  if (isEditing) text = implementOutcome();
   else if (isParentReview()) text = JSON.stringify({outcome:'pass', summary:'Parent review passed.', findings:[]});
   else {
    const counterFile = path.join(process.env.FIXTURE_ROOT, 'fixup-review-count');
@@ -239,13 +406,13 @@ function handle(command) {
   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
   out({type:'agent_start'});
   out({type:'message_start', message:{role:'assistant', content:[]}});
-  const text = isImplement ? implementOutcome() : reviewOutcome();
+  const text = isEditing ? implementOutcome() : reviewOutcome();
   out({type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}});
   out({type:'agent_end', messages:[], willRetry:false});
   out({type:'agent_settled'});
   return;
  }
- if (mode === 'review-edit' && !isImplement) {
+ if (mode === 'review-edit' && !isEditing) {
   fs.appendFileSync(path.join(process.cwd(), 'feature.txt'), 'tampered');
   const text = JSON.stringify({outcome:'pass', summary:'Review passed.', findings:[]});
   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
@@ -256,21 +423,21 @@ function handle(command) {
   out({type:'agent_settled'});
   return;
  }
- if (mode === 'stall-review' && !isImplement) {
+ if (mode === 'stall-review' && !isEditing) {
   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
   out({type:'agent_start'});
   out({type:'message_start', message:{role:'assistant', content:[]}});
   out({type:'tool_execution_start', toolCallId:'review-stall', toolName:'bash', args:{}});
   return;
  }
- if (mode === 'stall-implement' && isImplement) {
+ if (mode === 'stall-implement' && isEditing) {
   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
   out({type:'agent_start'});
   out({type:'message_start', message:{role:'assistant', content:[]}});
   out({type:'tool_execution_start', toolCallId:'implement-stall', toolName:'bash', args:{}});
   return;
  }
- if (mode === 'stall-after-write' && isImplement) {
+ if (mode === 'stall-after-write' && isEditing) {
   fs.writeFileSync('feature.txt', 'partial\\n');
   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
   out({type:'agent_start'});
@@ -278,7 +445,7 @@ function handle(command) {
   out({type:'tool_execution_start', toolCallId:'implement-stall', toolName:'bash', args:{}});
   return;
  }
- if (mode === 'stall-once' && !isImplement) {
+ if (mode === 'stall-once' && !isEditing) {
   const counterFile = path.join(process.env.FIXTURE_ROOT, 'review-count');
   const count = (fs.existsSync(counterFile) ? Number(fs.readFileSync(counterFile, 'utf8')) : 0) + 1;
   fs.writeFileSync(counterFile, String(count));
@@ -300,13 +467,13 @@ function handle(command) {
    return;
   }
  }
- if (mode === 'fail-review-after-delay' && !isImplement) {
+ if (mode === 'fail-review-after-delay' && !isEditing) {
   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
   out({type:'agent_start'});
   setTimeout(() => { console.error('Provider unavailable'); process.exit(1); }, 300);
   return;
  }
- if (isImplement) {
+ if (isEditing) {
   if (mode === 'signal-exit') process.kill(process.pid, 'SIGTERM');
   if (mode === 'replace-lock') {
    const lock = path.join(path.dirname(path.dirname(session)), 'run.lock');
@@ -339,7 +506,7 @@ function handle(command) {
   if (mode === 'fail') { console.error('Provider unavailable'); process.exit(1); }
   fs.writeFileSync('feature.txt', 'implemented\\n');
  }
- const text = isImplement ? implementOutcome() : reviewOutcome();
+ const text = isEditing ? implementOutcome() : reviewOutcome();
  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
  out({type:'agent_start'});
  out({type:'message_start', message:{role:'assistant', content:[]}});
@@ -874,7 +1041,10 @@ cliTest(
     const runDir = result.stdout.match(/Run directory: (.+)/)![1];
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
     expect(
-      state.sessions.filter((session: { name: string }) => session.name.includes("implement")),
+      state.sessions.filter(
+        (session: { name: string }) =>
+          session.name.includes("implement") || session.name.includes("repair"),
+      ),
     ).toHaveLength(4);
     expect(state.tickets[0].status).toBe("blocked");
     expect(state.tickets[1].status).toBe("pending");
@@ -1084,13 +1254,16 @@ cliTest.each(["reject", "parent-reject"])(
     const runDir = first.stdout.match(/Run directory: (.+)/)![1];
     const before = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
     const implementations = (state: typeof before) =>
-      state.sessions.filter((session: { name: string }) => session.name.includes("implement"))
-        .length;
+      state.sessions.filter(
+        (session: { name: string }) =>
+          session.name.includes("implement") || session.name.includes("repair"),
+      ).length;
     expect((await f.run("resume", runDir)).status).toBe(1);
     const after = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
     expect(implementations(after)).toBe(implementations(before));
     // A human fix can still be verified after the automatic repair budget is gone.
     f.env.FIXTURE_MODE = "pass";
+    writeFileSync(join(before.worktree, "feature.txt"), "Manual fix\n");
     expect((await f.run("resume", runDir)).status).toBe(0);
   },
   30_000,
@@ -1250,7 +1423,7 @@ cliTest(
   30_000,
 );
 
-cliTest.each([1, 2, 3, 4, 5, 6])(
+cliTest.each([1, 2, 3, 4, 5, 6, 7])(
   "refuses incompatible version-%s snapshots before launching workers",
   async (version) => {
     const f = fixture("fail");
@@ -1396,6 +1569,362 @@ cliTest(
     const patch = readFileSync(join(runDir, "review.patch"), "utf8");
     expect(patch).toContain("first.txt");
     expect(patch).toContain("second.txt");
+  },
+  30_000,
+);
+
+cliTest(
+  "repairs findings in the reviewer conversation and audits them independently",
+  async () => {
+    const f = fixture("fixup");
+    const result = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", "true");
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const workers = readWorkers(f.root);
+    const reviews = workers.filter((worker) => worker.name.includes("#11 review"));
+    const repairs = workers.filter((worker) => worker.name.includes("#11 repair"));
+    const audits = workers.filter((worker) => worker.name.includes("#11 audit"));
+    expect(reviews).toHaveLength(2);
+    expect(repairs).toHaveLength(1);
+    expect(audits).toHaveLength(1);
+    // The first assessment is independent: no prior findings or repair notes.
+    expect(reviews[0].prompt).not.toContain("Fix the first attempt");
+    // The repair reopens the settled review conversation with additive editing
+    // tools and repair skills, keeping the reviewer's model and thinking.
+    expect(repairs[0].session).toBe(reviews[0].session);
+    expect(reviews[1].session).not.toBe(reviews[0].session);
+    expect(repairs[0].args[repairs[0].args.indexOf("--model") + 1]).toBe(
+      state.settings.review.model,
+    );
+    expect(repairs[0].args[repairs[0].args.indexOf("--thinking") + 1]).toBe(
+      state.settings.review.thinking,
+    );
+    const tools = repairs[0].args[repairs[0].args.indexOf("--tools") + 1].split(",");
+    expect(tools).toEqual(
+      expect.arrayContaining(["read", "grep", "find", "ls", "bash", "edit", "write"]),
+    );
+    expect(repairs[0].args).toContain("--no-skills");
+    expect(repairs[0].args.some((arg) => arg.endsWith(join("skills", "tdd")))).toBe(true);
+    expect(repairs[0].prompt).toContain("Fix the first attempt");
+    // A fresh independent reviewer assesses the repaired artifact and again
+    // sees no prior findings.
+    expect(reviews[1].prompt).not.toContain("Fix the first attempt");
+    // The audit shares the fresh reviewer's conversation and sees only the
+    // latest failed findings plus the intervening repair explanation.
+    expect(audits[0].session).toBe(reviews[1].session);
+    expect(audits[0].prompt).toContain("Fix the first attempt");
+    expect(audits[0].prompt).toContain("Intervening repair/retraction explanation");
+    expect(state.tickets[0].audit).toMatchObject({ outcome: "pass" });
+    expect(state.tickets[0].review).toMatchObject({ outcome: "pass" });
+    // The review and its audit share one phase-task budget; the authorized
+    // repair started a separate one in the same conversation.
+    const review2 = [...state.sessions]
+      .reverse()
+      .find(
+        (session: { kind: string; ticket?: number }) =>
+          session.kind === "review" && session.ticket === 11,
+      );
+    const repairSession = state.sessions.find(
+      (session: { kind: string; ticket?: number }) =>
+        session.kind === "repair" && session.ticket === 11,
+    );
+    const auditSession = state.sessions.find(
+      (session: { kind: string; ticket?: number }) =>
+        session.kind === "audit" && session.ticket === 11,
+    );
+    expect(auditSession.phaseTask).toBe(review2.phaseTask);
+    expect(repairSession.phaseTask).not.toBe(review2.phaseTask);
+    expect(auditSession.consumedMs).toBeGreaterThanOrEqual(review2.consumedMs);
+  },
+  30_000,
+);
+
+cliTest(
+  "returns failed checks to the last editing conversation and spends one repair round",
+  async () => {
+    const f = fixture("repair-check");
+    const check = `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('check-ok')"`;
+    const result = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", check);
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const workers = readWorkers(f.root);
+    const initial = workers.find((worker) => worker.name.includes("#11 implement"));
+    const repairs = workers.filter((worker) => worker.name.includes("#11 repair"));
+    expect(repairs).toHaveLength(1);
+    // The check-failure repair returned to the implement conversation rather
+    // than starting a fresh editing session.
+    expect(repairs[0].session).toBe(initial!.session);
+    expect(repairs[0].prompt).toContain("Checks failed");
+    expect(state.tickets[0].repairs).toBe(1);
+    expect(state.tickets[0].status).toBe("accepted");
+  },
+  30_000,
+);
+
+cliTest(
+  "records a no-change retraction, spends a repair round, and audits it",
+  async () => {
+    const f = fixture("retraction");
+    const result = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", "true");
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const ticket = state.tickets[0];
+    expect(ticket.repairs).toBe(1);
+    expect(ticket.retraction).toContain("finding is mistaken");
+    // A no-change retraction manufactures no fixup commit.
+    expect(ticket.repairCommits).toBeUndefined();
+    const workers = readWorkers(f.root);
+    expect(workers.filter((worker) => worker.name.includes("#11 repair"))).toHaveLength(1);
+    const audits = workers.filter((worker) => worker.name.includes("#11 audit"));
+    expect(audits).toHaveLength(1);
+    expect(audits[0].prompt).toContain("finding is mistaken");
+    expect(ticket.audit).toMatchObject({ outcome: "pass" });
+  },
+  30_000,
+);
+
+cliTest(
+  "audits only the latest failed review's findings",
+  async () => {
+    const f = fixture("two-failures");
+    const result = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", "true");
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const ticket = state.tickets[0];
+    expect(ticket.repairs).toBe(2);
+    expect(ticket.reviews.map((review: { outcome: string }) => review.outcome)).toEqual([
+      "changes_requested",
+      "changes_requested",
+    ]);
+    expect(ticket.audit).toMatchObject({ outcome: "pass" });
+    const workers = readWorkers(f.root);
+    const rounds = workers.filter((worker) => worker.name.includes("#11 review"));
+    expect(rounds).toHaveLength(3);
+    // The third independent assessment sees neither earlier failure.
+    expect(rounds[2].prompt).not.toContain("FIRST_FAILURE finding");
+    expect(rounds[2].prompt).not.toContain("SECOND_FAILURE finding");
+    // The audit receives only the latest failed findings.
+    const audits = workers.filter((worker) => worker.name.includes("#11 audit"));
+    expect(audits).toHaveLength(1);
+    expect(audits[0].prompt).toContain("SECOND_FAILURE finding");
+    expect(audits[0].prompt).not.toContain("FIRST_FAILURE finding");
+  },
+  30_000,
+);
+
+cliTest(
+  "audits the latest failed review after an intervening passing assessment",
+  async () => {
+    const f = fixture("stale-failure");
+    const first = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", "true");
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const ticket = blocked.tickets[0];
+    // A failed review, a repair, and a passing assessment whose audit was
+    // blocked. The archived pass must not hide the unresolved finding.
+    expect(ticket.review.outcome).toBe("pass");
+    expect(ticket.reviews.map((review: { outcome: string }) => review.outcome)).toEqual([
+      "changes_requested",
+    ]);
+    expect(ticket.audit).toMatchObject({ outcome: "blocked" });
+    // The operator edit archives the passing assessment after the failure.
+    writeFileSync(join(blocked.worktree, "operator.txt"), "Operator edit\n");
+    f.env.FIXTURE_MODE = "pass";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.tickets[0].audit).toMatchObject({ outcome: "pass" });
+    // The resumed audit must target the earlier failed finding, not the pass.
+    const audits = readWorkers(f.root).filter((worker) => worker.name.includes("#11 audit"));
+    expect(audits).toHaveLength(2);
+    expect(audits[1].prompt).toContain("STALE_FAILURE finding");
+  },
+  30_000,
+);
+
+cliTest(
+  "reviews manually fixed work on resume instead of resuming the stale repairer",
+  async () => {
+    const f = fixture("manual-repair");
+    const check = `${JSON.stringify(process.execPath)} -e "require('node:fs').accessSync('feature.txt')"`;
+    const first = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", check);
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(blocked.tickets[0].phase).toBe("repair");
+    const repair = readWorkers(f.root).find((worker) => worker.name.includes("#11 repair"))!;
+    writeFileSync(join(blocked.worktree, "feature.txt"), "Manually fixed\n");
+    f.env.FIXTURE_MODE = "pass";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.tickets[0].status).toBe("accepted");
+    // The interrupted repairer is never reopened; a fresh reviewer assesses the
+    // manual work and only then becomes the repairer if changes are requested.
+    const workers = readWorkers(f.root);
+    const repairs = workers.filter((worker) => worker.name.includes("#11 repair"));
+    const reviews = workers.filter((worker) => worker.name.includes("#11 review"));
+    expect(repairs).toHaveLength(1);
+    expect(reviews).toHaveLength(2);
+    expect(workers.filter((worker) => worker.name.includes("#11 audit"))).toHaveLength(1);
+    expect(reviews[1].session).not.toBe(repair.session);
+    expect(reviews[1].prompt).not.toContain("INTERRUPTED_REPAIR finding");
+    // Ticket #12 later overwrites feature.txt, so inspect the accepted #11 tree.
+    expect(
+      f.git("-C", finished.worktree, "show", `${finished.tickets[0].commit}:feature.txt`),
+    ).toContain("Manually fixed");
+  },
+  30_000,
+);
+
+cliTest(
+  "runs a fresh reviewer before repairing manually fixed work with failing checks",
+  async () => {
+    const f = fixture("manual-repair");
+    const check = `${JSON.stringify(process.execPath)} -e "process.exit(require('node:fs').readFileSync('feature.txt','utf8').includes('implemented') ? 0 : 1)"`;
+    const first = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", check);
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    // The operator fixes the work but the required check still fails.
+    writeFileSync(join(blocked.worktree, "feature.txt"), "Manually fixed\n");
+    f.env.FIXTURE_MODE = "manual-repair-check";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.tickets[0].status).toBe("accepted");
+    const workers = readWorkers(f.root);
+    const reviews = workers.filter((worker) => worker.name.includes("#11 review"));
+    const repairs = workers.filter((worker) => worker.name.includes("#11 repair"));
+    // The resumed review sees the failure evidence and then repairs in its own
+    // conversation; the stale crashed repairer is not reopened.
+    expect(reviews[1].prompt).toContain("Check failure output");
+    expect(repairs).toHaveLength(2);
+    expect(reviews[1].session).toBe(repairs[1].session);
+    expect(finished.tickets[0].repairs).toBe(2);
+  },
+  30_000,
+);
+
+cliTest(
+  "starts a fresh reviewer after a blocked review when checks still fail on manual work",
+  async () => {
+    const f = fixture("blocked-review");
+    const check = `${JSON.stringify(process.execPath)} -e "process.exit(require('node:fs').readFileSync('feature.txt','utf8').includes('implemented') ? 0 : 1)"`;
+    const first = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", check);
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(blocked.tickets[0].phase).toBe("review");
+    expect(blocked.tickets[0].review.outcome).toBe("blocked");
+    // The operator changes the work, but the required check still fails.
+    writeFileSync(join(blocked.worktree, "feature.txt"), "Manually fixed\n");
+    f.env.FIXTURE_MODE = "manual-repair-check";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.tickets[0].status).toBe("accepted");
+    const workers = readWorkers(f.root);
+    const reviews = workers.filter((worker) => worker.name.includes("#11 review"));
+    const repairs = workers.filter((worker) => worker.name.includes("#11 repair"));
+    // The blocked review is never resumed. Manual work gets a fresh reviewer
+    // that sees the failing checks and then repairs in its own conversation.
+    const fresh = reviews.find((worker) => worker.prompt.includes("Check failure output"));
+    expect(fresh).toBeTruthy();
+    expect(fresh!.session).not.toBe(blocked.tickets[0].reviewConversation);
+    expect(repairs.at(-1)!.session).toBe(fresh!.session);
+  },
+  30_000,
+);
+
+cliTest(
+  "starts a fresh reviewer after a crashed review when the operator changed the work",
+  async () => {
+    const f = fixture("manual-review");
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(blocked.tickets[0].phase).toBe("review");
+    expect(blocked.tickets[0].review).toBeUndefined();
+    const interrupted = readWorkers(f.root).find((worker) => worker.name.includes("#11 review"))!;
+    expect(interrupted).toBeTruthy();
+    // The operator changes the work so the required check passes again.
+    writeFileSync(join(blocked.worktree, "feature.txt"), "Manually fixed\n");
+    f.env.FIXTURE_MODE = "pass";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.tickets[0].status).toBe("accepted");
+    const reviews = readWorkers(f.root).filter((worker) => worker.name.includes("#11 review"));
+    // The interrupted review conversation is not reused; a fresh reviewer
+    // assesses the manually changed artifact.
+    expect(reviews).toHaveLength(2);
+    expect(reviews[1].session).not.toBe(interrupted.session);
+  },
+  30_000,
+);
+
+cliTest(
+  "uses dedicated repair guidance and skills while keeping the reviewer model",
+  async () => {
+    const f = fixture("fixup");
+    const dir = join(f.root, "repair-settings");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "repair.md"),
+      `---
+description: Test repairer
+tools: read, bash, edit
+---
+
+CUSTOM REPAIR GUIDANCE.`,
+      "utf8",
+    );
+    const settingsPath = join(dir, "loop-settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ repairAgent: "./repair.md", repairSkills: ["diagnosing-bugs"] }),
+      "utf8",
+    );
+    const result = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.settings.repair).toMatchObject({
+      promptBody: "CUSTOM REPAIR GUIDANCE.",
+      tools: ["read", "bash", "edit"],
+      skills: ["diagnosing-bugs"],
+    });
+    const repair = readWorkers(f.root).find((worker) => worker.name.includes("#11 repair"))!;
+    expect(repair.prompt).toContain("CUSTOM REPAIR GUIDANCE.");
+    expect(repair.args).toContain("--no-skills");
+    expect(repair.args.some((arg) => arg.endsWith(join("skills", "diagnosing-bugs")))).toBe(true);
+    // The custom repair tools are additive to the review conversation's tools.
+    const tools = repair.args[repair.args.indexOf("--tools") + 1].split(",");
+    expect(tools).toEqual(expect.arrayContaining(["read", "grep", "find", "ls", "bash", "edit"]));
+    // The reviewer's model and thinking are not silently switched.
+    expect(repair.args[repair.args.indexOf("--model") + 1]).toBe(state.settings.review.model);
   },
   30_000,
 );
