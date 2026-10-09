@@ -4,7 +4,7 @@ import type { ArtifactIdentity } from "./artifact.ts";
 import type { LoopSettings } from "./settings.ts";
 import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName } from "./worker.ts";
 
-export const RUN_STATE_VERSION = 8;
+export const RUN_STATE_VERSION = 10;
 
 export interface Issue {
   number: number;
@@ -61,6 +61,8 @@ export interface Ticket extends Issue {
   baseline?: string;
   /** Feature anchor commit: the first changed work commit for this child. */
   anchor?: string;
+  /** Who produced the anchor commit: the controller or a verified manual commit. */
+  anchorOrigin?: "controller" | "manual";
   /** Subsequent repair fixups targeting the anchor, oldest first. */
   repairCommits?: string[];
   /** HEAD after the latest child work commit (anchor or a later fixup). */
@@ -69,6 +71,8 @@ export interface Ticket extends Issue {
   commit?: string;
   /** Worktree content tree when the latest editing phase stopped without completing. */
   stoppedTree?: string;
+  /** Latest controller-observed phase artifact, including manual HEADs not recorded as work commits. */
+  resumeArtifact?: ArtifactIdentity;
   /** Unresolved hook outcome that preserved work and must not be auto-committed. */
   hookStop?: HookStop;
   feedback?: string;
@@ -86,6 +90,8 @@ export interface Ticket extends Issue {
   reviewTask?: string;
   /** Artifact identity the pending review/audit was attempted against; detects operator changes across a review stop. */
   reviewAttempt?: ArtifactIdentity;
+  /** Manual work pending review: review it even when required checks fail instead of returning to a stale editor. */
+  reviewOnCheckFailure?: boolean;
   /** Phase-task identity of the editing phase currently being worked. */
   editTask?: string;
   /** Conversation (session file) that hosts the current editing phase task. */

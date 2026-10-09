@@ -30,6 +30,10 @@ export function command(program: string, args: string[], options: CommandOptions
     let outputBytes = 0;
     let failure: string | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let terminated = false;
+    let escalationComplete = false;
+    let finished = false;
+    let settleAfterEscalation: (() => void) | undefined;
     const kill = (signal: NodeJS.Signals) => {
       if (!child.pid) return;
       try {
@@ -38,14 +42,37 @@ export function command(program: string, args: string[], options: CommandOptions
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
     };
+    const groupAlive = () => {
+      if (!child.pid) return false;
+      try {
+        process.kill(-child.pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    };
+    const escalate = () => {
+      clearTimeout(killTimer);
+      killTimer = undefined;
+      kill("SIGKILL");
+      escalationComplete = true;
+      const pending = settleAfterEscalation;
+      settleAfterEscalation = undefined;
+      pending?.();
+    };
+    const terminate = () => {
+      if (terminated) return;
+      terminated = true;
+      kill("SIGTERM");
+      killTimer = setTimeout(escalate, 2_000);
+    };
     const stop = (reason: string) => {
       if (failure) return;
       failure = reason;
-      kill("SIGTERM");
-      killTimer = setTimeout(() => kill("SIGKILL"), 2_000);
+      terminate();
     };
     const interrupt = () => {
-      if (failure) kill("SIGKILL");
+      if (terminated) escalate();
       else stop("Interrupted; work has been preserved");
     };
     process.on("SIGINT", interrupt);
@@ -59,6 +86,21 @@ export function command(program: string, args: string[], options: CommandOptions
       clearTimeout(killTimer);
       process.removeListener("SIGINT", interrupt);
       process.removeListener("SIGTERM", interrupt);
+    };
+    const finish = (settle: () => void) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      const complete = () => {
+        cleanup();
+        settle();
+      };
+      // A closed leader does not prove its descendants are gone. Keep the
+      // escalation and wait for bounded group cleanup before releasing callers.
+      if (!escalationComplete && groupAlive()) {
+        terminate();
+        settleAfterEscalation = complete;
+      } else complete();
     };
     const collect = (data: string, stream: "stdout" | "stderr") => {
       if (options.log) appendFileSync(options.log, data);
@@ -76,12 +118,8 @@ export function command(program: string, args: string[], options: CommandOptions
     child.stdin.on("error", () => {
       /* The child can exit before consuming its prompt. */
     });
-    child.on("error", (error) => {
-      cleanup();
-      reject(error);
-    });
+    child.on("error", (error) => finish(() => reject(error)));
     child.on("close", (code, signal) => {
-      cleanup();
       if (failure || code !== 0 || signal) {
         const exitReason = signal
           ? `${program} terminated by ${signal}`
@@ -90,8 +128,8 @@ export function command(program: string, args: string[], options: CommandOptions
           `${failure ?? exitReason}\n${tailText(stderr, 4000)}${options.log ? `\nLog: ${options.log}` : ""}`,
         );
         if (failure || signal) error.name = "CommandStoppedError";
-        reject(error);
-      } else resolve(stdout.trim());
+        finish(() => reject(error));
+      } else finish(() => resolve(stdout.trim()));
     });
     child.stdin.end(options.input);
   });

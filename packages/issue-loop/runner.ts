@@ -114,9 +114,11 @@ async function unchangedHead(state: RunState, expected: string): Promise<void> {
  */
 async function recordStoppedWork(state: RunState, ticket?: Ticket): Promise<void> {
   try {
-    const tree = await contentTree(state.worktree);
-    if (ticket) ticket.stoppedTree = tree;
-    else state.stoppedTree = tree;
+    const snapshot = await artifactSnapshot(state.worktree);
+    if (ticket) {
+      ticket.stoppedTree = snapshot.worktree;
+      ticket.resumeArtifact = identityOf(snapshot);
+    } else state.stoppedTree = snapshot.worktree;
   } catch {
     // Without a recorded identity, resume treats the phase as interrupted and
     // re-runs the editing worker rather than committing work it cannot attribute.
@@ -480,6 +482,8 @@ async function finishEditing(
     ticket.reviewAttempt = undefined;
     ticket.audit = undefined;
     ticket.stoppedTree = undefined;
+    ticket.resumeArtifact = identityOf(await artifactSnapshot(state.worktree));
+    ticket.reviewOnCheckFailure = undefined;
     save(state);
     return;
   }
@@ -543,6 +547,7 @@ async function authorizeRepair(
   ticket.repairs++;
   ticket.phase = "repair";
   ticket.editTask = `#${ticket.number}-repair-${ticket.repairs}`;
+  ticket.reviewOnCheckFailure = undefined;
   if (source === "review") {
     // Dedicated repair guidance/skills replace the implementation guidance, but
     // the conversation keeps its model, thinking, and cached prefix.
@@ -554,10 +559,14 @@ async function authorizeRepair(
   save(state);
 }
 
-/** Route a failed check or an uncommittable artifact back to the last editing conversation. */
+/** Route unfinished work to its current editor, or the fresh reviewer after a manual handoff. */
 async function reenterEditing(state: RunState, ticket: Ticket, feedback: string): Promise<void> {
   ticket.feedback = feedback;
-  if (editingInterrupted(state, ticket) && ticket.editConversation && ticket.editTask) {
+  if (ticket.reviewOnCheckFailure) {
+    // Manual work superseded the old editor. Even a passing assessment needs
+    // an authorized completion phase before interrupted leftovers can commit.
+    await authorizeRepair(state, ticket, "review");
+  } else if (editingInterrupted(state, ticket) && ticket.editConversation && ticket.editTask) {
     // Execution recovery: resume the same phase task and allowance.
     ticket.phase = ticket.editTask.includes("implement") ? "implement" : "repair";
   } else {
@@ -695,8 +704,10 @@ async function commitPendingWork(
       ticket.repairCommits.push(result.sha);
     } else {
       ticket.anchor = result.sha;
+      ticket.anchorOrigin = "controller";
     }
     ticket.workHead = result.sha;
+    ticket.resumeArtifact = undefined;
   } else {
     if (anchor) {
       state.repairCommits ??= [];
@@ -783,6 +794,8 @@ async function verifyTicket(
     (await commitPendingWork(state, ticket, allowCommit && checks.passed)) ?? checks.log;
   const before = await artifactSnapshot(state.worktree);
   const identity = identityOf(before);
+  ticket.resumeArtifact = identity;
+  save(state);
 
   // A verdict or interrupted attempt tied to a different artifact no longer
   // applies: an operator's manual fix or a hook mutation invalidates it, so
@@ -814,6 +827,16 @@ async function verifyTicket(
   const reviewTask = ticket.reviewTask;
   const conversation = ticket.reviewConversation;
   if (!conversation) throw new Error(`Ticket #${ticket.number} has no review conversation`);
+
+  // A cached pass is only valid evidence while required checks still pass. When
+  // checks now fail, archive it so the assessment re-runs with the failure
+  // evidence: the reviewer corrects itself (bounded) or requests changes, and
+  // an inconsistent pass is never skipped into acceptance.
+  if (ticket.review?.outcome === "pass" && !checks.passed) {
+    archiveReview(ticket);
+    ticket.audit = undefined;
+    save(state);
+  }
 
   if (!ticket.review) {
     // Independent assessment: requirements, cumulative artifact, and check
@@ -875,7 +898,7 @@ async function verifyTicket(
         conversationRole: "review",
         ticket,
         prompt: auditPrompt(failed, ticket.repairNote),
-        checksPassed: true,
+        checksPassed: checks.passed,
       });
       const postAudit = await artifactSnapshot(state.worktree);
       assertArtifactUnchanged(preAudit, postAudit, "Audit");
@@ -978,25 +1001,74 @@ function editingInterrupted(state: RunState, ticket?: Ticket): boolean {
 }
 
 /**
- * Whether the operator changed the artifact after the latest phase stopped. An
- * unchanged interrupted editing phase is execution recovery and resumes its
- * conversation. A changed artifact is manual work and must be checked and
- * freshly reviewed before any further editing instead of being sent back to a
- * stale conversation.
+ * Whether the operator changed the artifact after the latest phase stopped. A
+ * changed artifact is manual work and must be checked and freshly reviewed
+ * before any further editing instead of being sent back to a stale
+ * conversation. A descendant commit the controller never recorded counts even
+ * when the phase completed, as does uncommitted content on a clean committed
+ * artifact; an unchanged interrupted editing phase stays execution recovery.
  */
 async function manualChangeSinceStop(state: RunState, ticket?: Ticket): Promise<boolean> {
+  const recordedHead = ticket ? (ticket.workHead ?? ticket.baseline) : state.baseSha;
+  const snapshot = await artifactSnapshot(state.worktree);
+  // The phase already observed this HEAD, even if no controller commit recorded
+  // it. Its saved files are not new manual work on an unchanged resume.
+  if (ticket?.resumeArtifact)
+    return (
+      snapshot.head !== ticket.resumeArtifact.head ||
+      snapshot.worktree !== ticket.resumeArtifact.tree
+    );
+  if (recordedHead && snapshot.head !== recordedHead) return true;
+  // The most recently stopped editing phase's own saved work is execution
+  // recovery. Compare against that recorded artifact before any older review
+  // identity, so a repair that saved files then crashed resumes its own
+  // conversation instead of being reclassified as manual work and spending a
+  // code-repair round on an execution failure.
   if (editingInterrupted(state, ticket)) {
     const stopped = ticket ? ticket.stoppedTree : state.stoppedTree;
-    if (stopped === undefined) return false;
-    return (await contentTree(state.worktree)) !== stopped;
+    return stopped !== undefined && snapshot.worktree !== stopped;
   }
   // A pending review/audit records the artifact identity it was attempted
   // against; an operator change across that stop is manual work too.
-  if (ticket?.phase !== "review" && ticket?.phase !== "audit") return false;
-  const attempted = ticket.reviewAttempt;
-  if (!attempted) return false;
-  const current = identityOf(await artifactSnapshot(state.worktree));
-  return current.head !== attempted.head || current.tree !== attempted.tree;
+  const attempted = ticket?.reviewAttempt;
+  if (attempted) return snapshot.head !== attempted.head || snapshot.worktree !== attempted.tree;
+  // No interrupted editing phase: any uncommitted content is the operator's.
+  if (!recordedHead) return false;
+  return snapshot.worktree !== (await git(state.worktree, "rev-parse", `${recordedHead}^{tree}`));
+}
+
+/**
+ * Adopt one ticket-scoped manual commit as the child's feature anchor when the
+ * controller never recorded one. The commit's subject and history are left
+ * untouched; only the anchor and its origin are recorded, so later repairs
+ * become standard fixups of the operator's work. More than one commit since the
+ * baseline cannot be attributed to a single anchor, so stop for human input
+ * rather than guess which one future fixups should target.
+ */
+async function adoptManualAnchor(state: RunState, ticket: Ticket): Promise<void> {
+  if (ticket.anchor) return;
+  const baseline = ticket.baseline;
+  if (!baseline) return;
+  const head = await git(state.worktree, "rev-parse", "HEAD");
+  if (head === baseline) return;
+  try {
+    await git(state.worktree, "merge-base", "--is-ancestor", baseline, head);
+  } catch {
+    throw new Error(
+      `Ticket #${ticket.number} HEAD does not descend from its baseline; work is preserved. Restore the baseline history before resuming`,
+    );
+  }
+  const commits = (await git(state.worktree, "rev-list", "--reverse", `${baseline}..${head}`))
+    .split("\n")
+    .filter(Boolean);
+  if (commits.length !== 1)
+    throw new Error(
+      `Ticket #${ticket.number} has ${commits.length} commits since its baseline and no recorded anchor; manual attribution is ambiguous. Leave exactly one ticket-scoped manual commit and resume`,
+    );
+  ticket.anchor = commits[0];
+  ticket.anchorOrigin = "manual";
+  ticket.workHead = commits[0];
+  save(state);
 }
 
 async function resolveTicket(state: RunState, ticket: Ticket): Promise<void> {
@@ -1015,6 +1087,16 @@ async function resolveTicket(state: RunState, ticket: Ticket): Promise<void> {
   // work: it must be checked and freshly reviewed, not handed back to the
   // interrupted editor that could overwrite those fixes.
   const manualChange = await manualChangeSinceStop(state, ticket);
+  await adoptManualAnchor(state, ticket);
+  if (manualChange) {
+    // Persist the review handoff before any worker launches: a reviewer that
+    // fails must not return this manual artifact to the stale editor, and a
+    // failed required check must still reach review rather than a blind repair.
+    ticket.phase = "review";
+    ticket.reviewOnCheckFailure = true;
+    ticket.resumeArtifact = identityOf(await artifactSnapshot(state.worktree));
+    save(state);
+  }
 
   if (ticket.phase === "implement") {
     // A fresh ticket implements first. A resumed initial phase is reviewed as
@@ -1028,8 +1110,10 @@ async function resolveTicket(state: RunState, ticket: Ticket): Promise<void> {
   }
 
   // A manual change is reviewed even when checks fail, so the fresh reviewer can
-  // diagnose the whole artifact and then repair in its own conversation.
-  let reviewOnCheckFailure = manualChange;
+  // diagnose the whole artifact and then repair in its own conversation. The
+  // eligibility is persisted so a reviewer crash cannot downgrade it to a
+  // check-failure return into the stale editing conversation.
+  let reviewOnCheckFailure = manualChange || ticket.reviewOnCheckFailure === true;
   while (true) {
     const allowCommit = await canCommitWork(state, ticket);
     const result = await verifyTicket(
@@ -1227,6 +1311,25 @@ async function publish(state: RunState): Promise<void> {
   console.log(`Pull request: ${state.pr}`);
 }
 
+/** Reject a resume whose HEAD no longer descends from accepted history. */
+async function assertAcceptedAncestry(state: RunState): Promise<void> {
+  const ancestors = [
+    state.head,
+    ...state.tickets
+      .filter((ticket) => ticket.status === "accepted")
+      .map((ticket) => ticket.commit!),
+  ];
+  for (const ancestor of ancestors) {
+    try {
+      await git(state.worktree, "merge-base", "--is-ancestor", ancestor, "HEAD");
+    } catch {
+      throw new Error(
+        "Accepted history was rewritten or is no longer an ancestor of HEAD. Work is preserved; restore the accepted commits or start a new run",
+      );
+    }
+  }
+}
+
 export async function execute(state: RunState): Promise<void> {
   const lock = join(state.runDir, "run.lock");
   let fd: number;
@@ -1286,10 +1389,7 @@ export async function execute(state: RunState): Promise<void> {
     if ((await git(state.worktree, "branch", "--show-current")) !== state.branch)
       throw new Error("Worktree is no longer on the run's feature branch");
     // Explicit resume permits manual commits, but never a rewrite of accepted history.
-    await git(state.worktree, "merge-base", "--is-ancestor", state.head, "HEAD");
-    for (const ticket of state.tickets.filter((item) => item.status === "accepted")) {
-      await git(state.worktree, "merge-base", "--is-ancestor", ticket.commit!, "HEAD");
-    }
+    await assertAcceptedAncestry(state);
     if (
       state.phase === "publish" &&
       ((await git(state.worktree, "rev-parse", "HEAD")) !== state.head ||

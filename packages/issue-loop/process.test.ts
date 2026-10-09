@@ -31,7 +31,8 @@ function runningChild() {
 it("terminates a timed-out command and reports its stderr without waiting for real time", async () => {
   const child = runningChild();
   const listeners = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
-  const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+  const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+    if (signal === 0) throw Object.assign(new Error("No such process"), { code: "ESRCH" });
     queueMicrotask(() => child.emit("close", null, "SIGTERM"));
     return true;
   });
@@ -44,9 +45,75 @@ it("terminates a timed-out command and reports its stderr without waiting for re
   child.stderr.write("still running");
   await vi.advanceTimersByTimeAsync(100);
   await stopped;
-  expect(kill).toHaveBeenCalledExactlyOnceWith(-child.pid, "SIGTERM");
+  expect(kill).toHaveBeenCalledWith(-child.pid, "SIGTERM");
+  expect(kill).not.toHaveBeenCalledWith(-child.pid, "SIGKILL");
   expect(vi.getTimerCount()).toBe(0);
   expect([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")]).toEqual(listeners);
+});
+
+it("waits for descendant cleanup when a timed-out command leader closes first", async () => {
+  const child = runningChild();
+  let groupAlive = true;
+  const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+    if (signal === 0 && !groupAlive)
+      throw Object.assign(new Error("No such process"), { code: "ESRCH" });
+    if (signal === "SIGTERM") queueMicrotask(() => child.emit("close", 0, null));
+    if (signal === "SIGKILL") groupAlive = false;
+    return true;
+  });
+  let settled = false;
+  const result = command("test-command", [], { cwd: ".", timeoutMs: 100 });
+  result.catch(() => {
+    settled = true;
+  });
+  const stopped = expect(result).rejects.toMatchObject({
+    name: "CommandStoppedError",
+    message: "Timed out running test-command\n",
+  });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(1_999);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  await stopped;
+  expect(kill).toHaveBeenCalledWith(-child.pid, "SIGKILL");
+  expect(groupAlive).toBe(false);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("cleans up surviving descendants even when the command leader exits successfully", async () => {
+  const child = runningChild();
+  const listeners = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+  const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+  let settled = false;
+  const result = command("test-command", [], { cwd: ".", timeoutMs: 100 });
+  result.then(() => {
+    settled = true;
+  });
+  child.stdout.write("completed output\n");
+  child.emit("close", 0, null);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(settled).toBe(false);
+  expect(kill).toHaveBeenCalledWith(-child.pid, "SIGTERM");
+  // The command deadline must not turn successful bounded cleanup into a timeout.
+  await vi.advanceTimersByTimeAsync(1_900);
+  await expect(result).resolves.toBe("completed output");
+  expect(kill).toHaveBeenCalledWith(-child.pid, "SIGKILL");
+  expect(vi.getTimerCount()).toBe(0);
+  expect([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")]).toEqual(listeners);
+});
+
+it("escalates immediately on another interrupt while descendant cleanup is pending", async () => {
+  const child = runningChild();
+  const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+  const result = command("test-command", [], { cwd: ".", timeoutMs: 100 });
+  const stopped = expect(result).rejects.toMatchObject({ name: "CommandStoppedError" });
+  await vi.advanceTimersByTimeAsync(100);
+  child.emit("close", 0, null);
+  process.emit("SIGINT");
+  await stopped;
+  expect(kill).toHaveBeenCalledWith(-child.pid, "SIGKILL");
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 it("escalates a stubborn timed-out command to SIGKILL using virtual time", async () => {
