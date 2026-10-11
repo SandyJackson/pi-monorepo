@@ -1,10 +1,10 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { ArtifactIdentity } from "./artifact.ts";
+import type { ArtifactIdentity, CommitIntent } from "./artifact.ts";
 import type { LoopSettings } from "./settings.ts";
 import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName } from "./worker.ts";
 
-export const RUN_STATE_VERSION = 10;
+export const RUN_STATE_VERSION = 11;
 
 export interface Issue {
   number: number;
@@ -158,6 +158,12 @@ export interface RunState {
   repairCommits?: string[];
   sessions: Session[];
   finalRepairs: number;
+  /**
+   * Commit intent persisted before Git runs. On resume it is reconciled from
+   * verified operation identity, lineage, and artifact data so a crash between
+   * Git and state persistence never repeats or loses a commit.
+   */
+  pendingCommit?: CommitIntent;
   phase: "setup" | "tickets" | "final" | "publish" | "done";
   status: "running" | "blocked" | "done";
   currentTicket?: number;

@@ -124,8 +124,12 @@ export function command(program: string, args: string[], options: CommandOptions
         const exitReason = signal
           ? `${program} terminated by ${signal}`
           : `${program} exited ${code}`;
+        const diagnostic = [tailText(stdout, 2000), tailText(stderr, 2000)]
+          .map((text) => text.trim())
+          .filter(Boolean)
+          .join("\n");
         const error = new Error(
-          `${failure ?? exitReason}\n${tailText(stderr, 4000)}${options.log ? `\nLog: ${options.log}` : ""}`,
+          `${failure ?? exitReason}\n${diagnostic}${options.log ? `\nLog: ${options.log}` : ""}`,
         );
         if (failure || signal) error.name = "CommandStoppedError";
         finish(() => reject(error));

@@ -13,15 +13,19 @@ import {
   type ArtifactIdentity,
   artifactSnapshot,
   assertArtifactUnchanged,
+  type CommitIntent,
   commitWork,
   contentTree,
+  HookFailure,
   identityOf,
+  reconcileCommitIntent,
   type WorkCommit,
 } from "./artifact.ts";
 import { getIssue, gh, githubHostFromOrigin } from "./github.ts";
 import { command, git, originUrl } from "./process.ts";
 import {
   type Finding,
+  type HookStop,
   type Review,
   type RunState,
   reviewObservations,
@@ -172,25 +176,21 @@ function newConversationPath(
   );
 }
 
-/**
- * Persist the hook outcome that left work uncommitted. The recovery slice will
- * later route these to repair; until then resume must not reinterpret the
- * leftovers as a completed editing phase's committable work.
- */
-async function recordHookStop(
-  state: RunState,
-  ticket: Ticket | undefined,
-  reason: string,
-): Promise<void> {
+/** The preserved tree for a hook outcome, or undefined when it cannot be read. */
+async function hookStopFor(worktree: string, reason: string): Promise<HookStop | undefined> {
   try {
-    const stop = { reason, tree: await contentTree(state.worktree) };
-    if (ticket) ticket.hookStop = stop;
-    else state.hookStop = stop;
-    save(state);
+    return { reason, tree: await contentTree(worktree) };
   } catch {
     // Without a recorded identity, resume cannot attribute the leftovers; the
-    // caller still fails safely with the original hook error.
+    // caller still fails safely and retains reconciliation state.
+    return undefined;
   }
+}
+
+/** Apply a hook stop to the target without saving; the caller saves once. */
+function applyHookStop(state: RunState, ticket: Ticket | undefined, stop: HookStop): void {
+  if (ticket) ticket.hookStop = stop;
+  else state.hookStop = stop;
 }
 
 /**
@@ -666,12 +666,84 @@ async function runChecks(
 }
 
 /**
+ * Record the recovered or freshly created commit. The first changed commit is
+ * the feature anchor; later ones are standard fixups targeting it. Anchors from
+ * the controller are marked as such; a recovered intent keeps the same shape so
+ * a crash never rewrites recorded history.
+ */
+function recordWorkCommit(
+  state: RunState,
+  ticket: Ticket | undefined,
+  intent: CommitIntent,
+  sha: string,
+): void {
+  if (ticket) {
+    if (intent.fixup) {
+      ticket.repairCommits ??= [];
+      if (!ticket.repairCommits.includes(sha)) ticket.repairCommits.push(sha);
+    } else {
+      ticket.anchor = sha;
+      ticket.anchorOrigin = "controller";
+    }
+    ticket.workHead = sha;
+    ticket.resumeArtifact = undefined;
+  } else if (intent.fixup) {
+    state.repairCommits ??= [];
+    if (!state.repairCommits.includes(sha)) state.repairCommits.push(sha);
+  } else {
+    state.anchor = sha;
+  }
+}
+
+/**
+ * The intent for the next controller commit. Run/step trailers and the parent
+ * HEAD are captured so resume can verify a recovered operation instead of
+ * trusting a trailer or a moved HEAD alone.
+ */
+async function commitIntentFor(
+  state: RunState,
+  ticket: Ticket | undefined,
+  subject: string,
+  expectedTree: string,
+): Promise<CommitIntent> {
+  const anchor = ticket ? ticket.anchor : state.anchor;
+  const step = ticket ? (ticket.editTask ?? ticket.phase ?? "edit") : "parent-integration";
+  return {
+    operation: `${state.name}:${step}`,
+    run: state.name,
+    step,
+    subject,
+    ...(anchor ? { fixup: anchor } : {}),
+    parent: await git(state.worktree, "rev-parse", "HEAD"),
+    expectedTree,
+    ...(ticket ? { ticket: ticket.number } : {}),
+  };
+}
+
+/**
+ * A clean commit hook changed the committed tree, but the resulting tree failed
+ * required checks. This is an ordinary check failure on committed work: it
+ * returns to the last editing session as repair feedback instead of blocking
+ * the run. Hooks ran and were not bypassed.
+ */
+class HookMutationCheckFailure extends Error {
+  constructor(sha: string, detail: string) {
+    super(
+      `Checks failed after a successful hook changed the committed tree at ${sha}; work is preserved. ${detail}`,
+    );
+    this.name = "HookMutationCheckFailure";
+  }
+}
+
+/**
  * Commit a changed editing phase before review. The first changed work becomes
  * the artifact's feature anchor; later changed repairs are standard fixups
  * targeting it. Clean hook mutations are rechecked; dirty or rejected hooks
  * preserve work and stop rather than guessing a reconciliation. A no-op phase
  * creates no commit, and an uncommittable phase leaves its work uncommitted for
- * a guarded HEAD-plus-content-tree review.
+ * a guarded HEAD-plus-content-tree review. An actionable hook rejection or a
+ * failed recheck of a hook-mutated tree is surfaced to the last editing session
+ * as repair feedback; a signing or configuration failure stops for recovery.
  */
 async function commitPendingWork(
   state: RunState,
@@ -685,57 +757,117 @@ async function commitPendingWork(
   // reviewed as HEAD plus the content-tree identity instead of manufacturing a
   // feature/fixup commit merely because the controller resumed.
   if (!allowCommit) return;
-  const anchor = ticket ? ticket.anchor : state.anchor;
   const subject = ticket
     ? `loop: #${ticket.number} ${ticket.title}`
     : `loop: parent #${state.parent.number} integration`;
+  const intent = await commitIntentFor(state, ticket, subject, expectedTree);
+  // Record the intent before Git so a crash between the commit and the state
+  // save can be reconciled on resume instead of repeating the operation.
+  state.pendingCommit = intent;
+  save(state);
   let result: WorkCommit;
+  const log = join(state.runDir, "logs", `commit-${intent.step.replace(/[^\w.-]+/g, "_")}.log`);
   try {
-    result = await commitWork(state.worktree, { subject, fixup: anchor, expectedTree });
+    result = await commitWork(state.worktree, {
+      subject: intent.subject,
+      fixup: intent.fixup,
+      expectedTree,
+      trailers: { "Loop-Run": intent.run, "Loop-Step": intent.step },
+      timeoutMs: state.settings.deadlines.gitMs,
+      log,
+    });
   } catch (error) {
-    // A rejected hook preserves the staged work; record it so an unchanged
-    // resume stops rather than retrying the same commit blindly.
-    await recordHookStop(state, ticket, error instanceof Error ? error.message : String(error));
+    // A hook rejection proves Git did not create the commit only while HEAD
+    // still matches the recorded parent. A stopped command, a post-commit
+    // failure, or a failed artifact probe may have committed already, so retain
+    // the intent for reconciliation instead of discarding a real commit.
+    const head = await git(state.worktree, "rev-parse", "HEAD").catch(() => undefined);
+    if (head === intent.parent) {
+      state.pendingCommit = undefined;
+      save(state);
+    } else {
+      save(state);
+      throw new Error(
+        `Commit outcome is uncertain for ${intent.operation}: ${error instanceof Error ? error.message : String(error)}. Work is preserved; resume will reconcile the operation`,
+      );
+    }
     throw error;
   }
-  if (ticket) {
-    if (anchor) {
-      ticket.repairCommits ??= [];
-      ticket.repairCommits.push(result.sha);
-    } else {
-      ticket.anchor = result.sha;
-      ticket.anchorOrigin = "controller";
-    }
-    ticket.workHead = result.sha;
-    ticket.resumeArtifact = undefined;
-  } else {
-    if (anchor) {
-      state.repairCommits ??= [];
-      state.repairCommits.push(result.sha);
-    } else {
-      state.anchor = result.sha;
-    }
-  }
-  save(state);
-  if (result.dirty) {
-    await recordHookStop(
-      state,
-      ticket,
-      `Git hooks left the worktree dirty after committing ${result.sha}`,
+  // Determine any dirty-hook disposition before the single save so the commit
+  // record and the preserved leftovers persist atomically: a crash cannot leave
+  // a recorded commit whose dirty hook output looks like manual work.
+  const stop = result.dirty
+    ? await hookStopFor(
+        state.worktree,
+        `Git hooks left the worktree dirty after committing ${result.sha}`,
+      )
+    : undefined;
+  if (result.dirty && !stop)
+    throw new Error(
+      `Git hooks left the worktree dirty after committing ${result.sha}, but the preserved tree could not be recorded. Work is preserved; resume to reconcile`,
     );
+  state.pendingCommit = undefined;
+  recordWorkCommit(state, ticket, intent, result.sha);
+  if (stop) applyHookStop(state, ticket, stop);
+  save(state);
+  if (stop)
     throw new Error(
       `Git hooks left the worktree dirty after committing ${result.sha}; work is preserved and automatic reconciliation is not attempted`,
     );
-  }
   if (result.mutated) {
     const recheck = await runChecks(state);
-    if (!recheck.passed)
-      throw new Error(
-        `Checks failed after hooks changed the committed tree at ${result.sha}; work is preserved. ${recheck.error}`,
-      );
+    if (!recheck.passed) throw new HookMutationCheckFailure(result.sha, recheck.error ?? "");
     // Review the tree the hooks actually produced, not the pre-hook log.
     return recheck.log;
   }
+}
+
+/**
+ * Reconcile a commit intent left by a crash between Git and state persistence.
+ * A provable completion is recorded once, an unchanged parent lets the normal
+ * flow retry, and an ambiguous outcome blocks with diagnostics and preserved
+ * work rather than duplicating a commit or accepting an unverified artifact.
+ */
+async function reconcilePendingCommit(state: RunState): Promise<void> {
+  const intent = state.pendingCommit;
+  if (!intent) return;
+  const outcome = await reconcileCommitIntent(state.worktree, intent);
+  if (outcome.kind === "pending") {
+    state.pendingCommit = undefined;
+    save(state);
+    return;
+  }
+  if (outcome.kind === "ambiguous")
+    throw new Error(
+      `Unverified pending commit ${intent.operation}: ${outcome.detail}. Work is preserved; inspect the worktree before resuming`,
+    );
+  const ticket = state.tickets.find((item) => item.number === intent.ticket);
+  // The recovered commit ran hooks before the crash; a successful hook may have
+  // left changes behind. Read the disposition before recording so the commit
+  // and any hook stop persist atomically and a crash cannot lose the stop.
+  const porcelain = await git(state.worktree, "status", "--porcelain").catch(() => undefined);
+  if (porcelain === undefined)
+    throw new Error(
+      `Cannot verify the worktree state of recovered commit ${outcome.sha}. Work is preserved; resume to reconcile`,
+    );
+  const stop = porcelain
+    ? await hookStopFor(
+        state.worktree,
+        `Git hooks left the worktree dirty after recovered commit ${outcome.sha}`,
+      )
+    : undefined;
+  if (porcelain && !stop)
+    throw new Error(
+      `Recovered commit ${outcome.sha} left uncommitted changes but the preserved tree could not be recorded. Work is preserved; resume to reconcile`,
+    );
+  recordWorkCommit(state, ticket, intent, outcome.sha);
+  state.pendingCommit = undefined;
+  if (stop) applyHookStop(state, ticket, stop);
+  save(state);
+  if (stop)
+    throw new Error(
+      `Recovered commit ${outcome.sha} left uncommitted changes; work is preserved and automatic reconciliation is not attempted`,
+    );
 }
 
 function materializeReview(outcome: PhaseOutcome, artifact: ArtifactIdentity): Review {
@@ -766,7 +898,8 @@ function latestFailedReview(ticket: Ticket): Review | undefined {
 type ReviewResult =
   | { kind: "pass" }
   | { kind: "changes_requested" }
-  | { kind: "check_failed"; feedback: string };
+  | { kind: "check_failed"; feedback: string }
+  | { kind: "hook_failed"; feedback: string };
 
 /**
  * Run one child's checks, commit, independent review, and optional
@@ -789,9 +922,19 @@ async function verifyTicket(
   // committed, and the committed anchor/fixup is the exact artifact reviewers
   // inspect. Uncommitted work is reviewed as HEAD plus content tree. Manually
   // changed work with failing checks is reviewed uncommitted and only committed
-  // once a later repair passes checks.
-  const checkLog =
-    (await commitPendingWork(state, ticket, allowCommit && checks.passed)) ?? checks.log;
+  // once a later repair passes checks. An actionable hook rejection returns to
+  // the last editing session as repair feedback; a configuration failure stops.
+  let committed: string | undefined;
+  try {
+    committed = await commitPendingWork(state, ticket, allowCommit && checks.passed);
+  } catch (error) {
+    if (error instanceof HookFailure && !error.configuration)
+      return { kind: "hook_failed", feedback: `Commit hooks rejected the work: ${error.message}` };
+    if (error instanceof HookMutationCheckFailure)
+      return { kind: "check_failed", feedback: error.message };
+    throw error;
+  }
+  const checkLog = committed ?? checks.log;
   const before = await artifactSnapshot(state.worktree);
   const identity = identityOf(before);
   ticket.resumeArtifact = identity;
@@ -935,7 +1078,16 @@ async function verifyParent(
   save(state);
   const checks = await runChecks(state);
   if (!checks.passed) return `Checks failed: ${checks.error}`;
-  const checkLog = (await commitPendingWork(state, undefined, allowCommit)) ?? checks.log;
+  let committed: string | undefined;
+  try {
+    committed = await commitPendingWork(state, undefined, allowCommit);
+  } catch (error) {
+    if (error instanceof HookFailure && !error.configuration)
+      return `Commit hooks rejected the work: ${error.message}`;
+    if (error instanceof HookMutationCheckFailure) return error.message;
+    throw error;
+  }
+  const checkLog = committed ?? checks.log;
   const before = await artifactSnapshot(state.worktree);
   const patchPath = join(state.runDir, "review.patch");
   writeFileSync(
@@ -1390,6 +1542,8 @@ export async function execute(state: RunState): Promise<void> {
       throw new Error("Worktree is no longer on the run's feature branch");
     // Explicit resume permits manual commits, but never a rewrite of accepted history.
     await assertAcceptedAncestry(state);
+    // Reconcile any commit a crash interrupted before its outcome was recorded.
+    await reconcilePendingCommit(state);
     if (
       state.phase === "publish" &&
       ((await git(state.worktree, "rev-parse", "HEAD")) !== state.head ||
