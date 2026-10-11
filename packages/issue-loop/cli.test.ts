@@ -175,6 +175,8 @@ function handle(command) {
  const isImplement = name.includes('implement');
  const isEditing = name.includes('implement') || name.includes('repair');
  const mode = process.env.FIXTURE_MODE;
+ if (isParentReview()) fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'parent-review-order.txt'), fs.existsSync(path.join(process.env.FIXTURE_ROOT,'pr.json')) ? 'after-pr' : 'before-pr');
+ if (mode === 'fail-parent-review' && isParentReview() && command.type === 'prompt') { console.error('Provider unavailable'); process.exit(1); }
  if (command.type === 'steer') {
   out({id: command.id, type:'response', command:'steer', success:true, data:{disposition:'queued'}});
   return;
@@ -723,7 +725,15 @@ cliTest(
     const prArgs = JSON.parse(readFileSync(join(f.root, "pr.json"), "utf8"));
     const baseIndex = prArgs.indexOf("--base");
     expect(prArgs.slice(baseIndex, baseIndex + 2)).toEqual(["--base", "main"]);
-    expect(existsSync(join(f.root, "pr-comments.json"))).toBe(false);
+    // A passing final review with no findings is still posted as an advisory
+    // comment with its verdict, summary, and reviewed artifact.
+    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    expect(comments).toHaveLength(1);
+    expect(comments[0].body).toContain("Final whole-artifact review");
+    expect(comments[0].body).toContain("(pass)");
+    expect(comments[0].body).toContain("Review passed.");
+    expect(comments[0].body).toContain(state.review.head);
+    expect(comments[0].body).toContain(state.review.tree);
   },
   30_000,
 );
@@ -779,6 +789,88 @@ cliTest(
     expect(comments[0].body).toContain("[Spec][Minor] Ticket cleanup");
     expect(comments[0].body).toContain("[Standards][Minor] Parent cleanup");
     expect(comments[0].body).toContain(state.review.tree);
+  },
+  30_000,
+);
+
+cliTest(
+  "creates the PR before the advisory whole-artifact review without parent repairs",
+  async () => {
+    const f = fixture("parent-reject");
+    const result = await f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("done");
+    // The final review is advisory: a material verdict is recorded, not repaired.
+    expect(state.review).toMatchObject({ outcome: "changes_requested" });
+    expect(state.advisoryWarning).toBeUndefined();
+    // The PR existed before the review ran, and no parent editing was authorized.
+    expect(readFileSync(join(f.root, "parent-review-order.txt"), "utf8").trim()).toBe("after-pr");
+    const workers = readWorkers(f.root);
+    expect(
+      workers.some(
+        (worker) =>
+          worker.name.includes("parent implement") || worker.name.includes("parent repair"),
+      ),
+    ).toBe(false);
+    // The advisory comment carries the finding, the reviewed SHA, and its outcome.
+    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    const advisory = comments.find((comment: { body: string }) =>
+      comment.body.includes("Final whole-artifact review"),
+    )!;
+    expect(advisory.body).toContain("Missing acceptance criterion");
+    expect(advisory.body).toContain(state.review.head);
+    expect(advisory.body).toContain("changes_requested");
+    expect(state.advisoryCommentId).toBeGreaterThan(0);
+    // Child history is retained: no squash and no parent commit.
+    const subjects = f.git("-C", state.worktree, "log", "--format=%s", `${state.baseSha}..HEAD`);
+    expect(subjects).toContain("loop: #11 Ticket 11");
+    expect(subjects).not.toContain("loop: parent");
+  },
+  30_000,
+);
+
+cliTest(
+  "finishes with a visible warning when the advisory whole-artifact review is unavailable",
+  async () => {
+    const f = fixture("fail-parent-review");
+    const result = await f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("done");
+    // A failed advisory review never claims a pass and never traps the PR.
+    expect(state.review).toBeUndefined();
+    expect(state.advisoryWarning).toContain("unavailable");
+    expect(state.pr).toBe("https://github.com/test/project/pull/99");
+    expect(existsSync(join(f.root, "pr.json"))).toBe(true);
+    const summary = readFileSync(join(runDir, "summary.md"), "utf8");
+    expect(summary).toContain("unavailable");
+    expect(result.stderr).toContain("Warning");
+  },
+  30_000,
+);
+
+cliTest(
+  "gates PR creation on required checks for the publication artifact",
+  async () => {
+    const f = fixture();
+    const check = `${JSON.stringify(process.execPath)} -e "const fs=require('node:fs');const p=process.env.FIXTURE_ROOT+'/final-check-count';const n=(fs.existsSync(p)?+fs.readFileSync(p):0)+1;fs.writeFileSync(p,String(n));process.exit(n>=3?1:0)"`;
+    const result = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", check);
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("blocked");
+    expect(state.phase).toBe("final");
+    expect(state.lastError).toContain("Required checks failed for the publication artifact");
+    expect(readFileSync(join(f.root, "final-check-count"), "utf8")).toBe("3");
+    // No PR and no advisory review exist for an unverified artifact.
+    expect(existsSync(join(f.root, "pr.json"))).toBe(false);
+    expect(state.review).toBeUndefined();
+    expect(state.tickets.every((ticket: { status: string }) => ticket.status === "accepted")).toBe(
+      true,
+    );
   },
   30_000,
 );
@@ -1229,7 +1321,7 @@ cliTest(
 );
 
 cliTest(
-  "updates the same observations comment after interrupted publication and manual fixes",
+  "updates the same observations comment after an interrupted advisory post",
   async () => {
     const f = fixture("comment-create-fail");
     writeFileSync(
@@ -1240,7 +1332,7 @@ cliTest(
     expect(first.status).toBe(1);
     const runDir = first.stdout.match(/Run directory: (.+)/)![1];
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
-    expect(state.phase).toBe("publish");
+    expect(state.phase).toBe("advisory");
     expect(state.pr).toBe("https://github.com/test/project/pull/99");
     const originalPr = readFileSync(join(runDir, "pr.md"), "utf8");
     const existingComments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
@@ -1249,9 +1341,7 @@ cliTest(
     const forged = { id: 43, body: existingComments[1].body, user: { login: "other-human" } };
     existingComments.push(forged);
     writeFileSync(join(f.root, "pr-comments.json"), JSON.stringify(existingComments));
-    writeFileSync(join(state.worktree, "feature.txt"), "Manual integration fix\n");
     f.env.FIXTURE_MODE = "pass-notes";
-    f.env.FIXTURE_REVIEW_BODY = "[Standards][Minor] Updated parent observation";
     const resumed = await f.run("resume", runDir);
     expect(resumed.status, resumed.stderr).toBe(0);
     const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
@@ -1262,8 +1352,7 @@ cliTest(
     expect(comments[1].id).toBe(commentId);
     expect(comments[1].body).toContain("Human introduction");
     expect(comments[1].body).toContain("Human follow-up");
-    expect(comments[1].body).toContain(f.env.FIXTURE_REVIEW_BODY);
-    expect(comments[1].body).not.toContain("[Standards][Minor] Parent cleanup");
+    expect(comments[1].body).toContain("[Standards][Minor] Parent cleanup");
     expect(comments[1].body).toContain(finished.review.tree);
     expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
     expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
@@ -1374,21 +1463,35 @@ cliTest("rejects a timeout below the CLI minimum before starting workers", async
 });
 
 cliTest(
-  "rechecks manual edits made after a publication failure",
+  "preserves manual edits after a publication failure until the operator commits them",
   async () => {
     const f = fixture("publish-fail");
     const first = await f.start();
     const runDir = first.stdout.match(/Run directory: (.+)/)![1];
     const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
     writeFileSync(join(state.worktree, "feature.txt"), "Manual integration fix\n");
+    // An uncommitted change is not a safe publication artifact: the gate blocks
+    // with the work preserved instead of committing or reviewing it as parent work.
+    const blocked = await f.run("resume", runDir);
+    expect(blocked.status).toBe(1);
+    expect(blocked.stderr).toContain("Uncommitted changes before publication");
+    expect(readFileSync(join(state.worktree, "feature.txt"), "utf8")).toBe(
+      "Manual integration fix\n",
+    );
+    // Once the operator commits it, resume publishes the same artifact.
+    f.git("-C", state.worktree, "add", "-A");
+    f.git("-C", state.worktree, "commit", "-m", "Manual integration fix");
+    const manual = f.git("-C", state.worktree, "rev-parse", "HEAD");
     const resumed = await f.run("resume", runDir);
     expect(resumed.status, resumed.stderr).toBe(0);
     const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.head).toBe(manual);
     expect(
       finished.sessions.filter((session: { name: string }) =>
         session.name.includes("parent review"),
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     expect(readFileSync(join(state.worktree, "feature.txt"), "utf8")).toBe(
       "Manual integration fix\n",
     );
@@ -1396,10 +1499,10 @@ cliTest(
   30_000,
 );
 
-cliTest.each(["reject", "parent-reject"])(
-  "does not replenish an exhausted repair budget on resume (%s)",
-  async (mode) => {
-    const f = fixture(mode);
+cliTest(
+  "does not replenish an exhausted repair budget on resume",
+  async () => {
+    const f = fixture("reject");
     const first = await f.start();
     expect(first.status).toBe(1);
     const runDir = first.stdout.match(/Run directory: (.+)/)![1];
@@ -1574,7 +1677,7 @@ cliTest(
   30_000,
 );
 
-cliTest.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])(
+cliTest.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])(
   "refuses incompatible version-%s snapshots before launching workers",
   async (version) => {
     const f = fixture("fail");

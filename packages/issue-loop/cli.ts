@@ -163,7 +163,6 @@ async function main(): Promise<void> {
     parent,
     tickets,
     sessions: [],
-    finalRepairs: 0,
     phase: "setup",
     status: "running",
   };

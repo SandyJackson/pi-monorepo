@@ -99,7 +99,7 @@ export interface CommitIntent {
   parent: string;
   /** Content tree the new commit is expected to contain. */
   expectedTree: string;
-  /** Ticket number, or undefined for the parent integration commit. */
+  /** Ticket number this controller commit belongs to. */
   ticket?: number;
 }
 

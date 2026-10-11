@@ -4,7 +4,7 @@ import type { ArtifactIdentity, CommitIntent } from "./artifact.ts";
 import type { LoopSettings } from "./settings.ts";
 import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName } from "./worker.ts";
 
-export const RUN_STATE_VERSION = 11;
+export const RUN_STATE_VERSION = 12;
 
 export interface Issue {
   number: number;
@@ -153,18 +153,20 @@ export interface RunState {
   settings: LoopSettings;
   parent: Issue;
   tickets: Ticket[];
-  /** Parent integration anchor and its repair fixups, distinct from child history. */
-  anchor?: string;
-  repairCommits?: string[];
   sessions: Session[];
-  finalRepairs: number;
+  /** Required-check log shown to the advisory reviewer. */
+  finalCheckLog?: string;
+  /** Advisory PR comment id once posted, so resume can reconcile idempotently. */
+  advisoryCommentId?: number;
+  /** Visible warning when the advisory review was unavailable or unfinished. */
+  advisoryWarning?: string;
   /**
    * Commit intent persisted before Git runs. On resume it is reconciled from
    * verified operation identity, lineage, and artifact data so a crash between
    * Git and state persistence never repeats or loses a commit.
    */
   pendingCommit?: CommitIntent;
-  phase: "setup" | "tickets" | "final" | "publish" | "done";
+  phase: "setup" | "tickets" | "final" | "publish" | "advisory" | "done";
   status: "running" | "blocked" | "done";
   currentTicket?: number;
   /** Worktree content tree when the latest parent editing phase stopped without completing. */
@@ -198,34 +200,38 @@ function findingLines(review: Review): string[] {
 
 export function reviewObservations(state: RunState): string[] {
   const observations: string[] = [];
-  const append = (title: string, review: Review | undefined) => {
-    if (review?.outcome !== "pass" || review.findings.length === 0) return;
+  const append = (title: string, review: Review | undefined, advisory = false) => {
+    if (!review) return;
+    // Child notes are historical passing observations. The final whole-artifact
+    // review is advisory: its verdict, summary, and findings are always reported,
+    // even when it passes without findings.
+    if (!advisory && (review.outcome !== "pass" || review.findings.length === 0)) return;
     const body = [review.summary, ...findingLines(review)].filter(Boolean).join("\n");
-    if (!body.trim()) return;
     const fence = "`".repeat(
       (body.match(/`+/g) ?? []).reduce((length, ticks) => Math.max(length, ticks.length + 1), 3),
     );
     observations.push(
-      `### ${title}`,
+      `### ${title}${advisory ? ` (${review.outcome})` : ""}`,
       `Reviewed HEAD: \`${review.head}\`; content tree: \`${review.tree}\`.`,
       "",
-      fence,
-      body,
-      fence,
+      ...(body.trim() ? [fence, body, fence] : []),
       "",
     );
   };
   for (const ticket of state.tickets) append(`#${ticket.number} ${ticket.title}`, ticket.review);
-  append("Parent review", state.review);
+  append("Final whole-artifact review", state.review, true);
   return observations.length
     ? [
         "## Review observations",
         "",
-        "Historical observations from passing reviews; these may have been resolved by later changes.",
+        "Historical observations from reviews; these may have been resolved by later changes.",
         "",
         ...observations,
+        ...(state.advisoryWarning ? [`Warning: ${state.advisoryWarning}`, ""] : []),
       ]
-    : [];
+    : state.advisoryWarning
+      ? ["## Review observations", "", `Warning: ${state.advisoryWarning}`, ""]
+      : [];
 }
 
 export function save(state: RunState): void {
@@ -281,7 +287,7 @@ export function load(runDir: string): RunState {
     !state.settings.recovery ||
     !state.settings.deadlines ||
     !Number.isInteger(state.settings.repairRounds) ||
-    !["setup", "tickets", "final", "publish", "done"].includes(state.phase) ||
+    !["setup", "tickets", "final", "publish", "advisory", "done"].includes(state.phase) ||
     !["running", "blocked", "done"].includes(state.status)
   ) {
     throw new Error(
