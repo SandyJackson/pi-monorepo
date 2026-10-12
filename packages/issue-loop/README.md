@@ -11,7 +11,7 @@ A small local controller for one parent GitHub issue. It implements direct child
 - Requirements live in the parent and ticket bodies. Comments are never fetched or forwarded, so copy approved decisions into the relevant body before starting.
 - A check command that terminates and exits nonzero on failure. No watch mode.
 
-Every role (implement, repair, review) uses your configured Pi model unless `--settings` overrides it. The new worktree loads Pi resources with `--approve`, which trusts project-local resources without bypassing your command permission extension. Ambient extensions are disabled for every worker (`--no-extensions`); only the curated loop skills you select are loaded. Authenticate Pi first so workers never face an interactive login.
+Worker models and thinking levels are resolved per role at start, from the defaults or `--settings`. Fresh implementation conversations use the implement role's model/thinking; fresh child and advisory reviews use the review role's model/thinking; and a repair reopens the originating conversation and preserves its model/thinking. The new worktree loads Pi resources with `--approve`, which trusts project-local resources without bypassing your command permission extension. Ambient extensions are disabled for every worker (`--no-extensions`); only the curated loop skills you select are loaded. Authenticate Pi first so workers never face an interactive login.
 
 Workers run through Pi's supervised RPC mode, so the controller correlates commands, waits for the settled run, and reads the authoritative final message rather than inferring completion from free text. Pi's own provider retries stay enabled and do not consume the controller's repair rounds.
 
@@ -78,7 +78,7 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
 
 Every field is optional. `repairRounds`, `watchdog`, `recovery`, and `deadlines` override individual values; [Supervision, recovery, and budgets](#supervision-recovery-and-budgets) lists the defaults.
 
-Same-conversation repair appends the transition guidance, repair skills, and additive editing tools to the reviewer's existing conversation, so the diagnosis, earlier messages, model/thinking, and initial definitions stay in place. Provider cache reuse is best-effort: where a provider or configuration cannot encode additive tool definitions, the same-session repair still runs but the prefix may miss the cache. See [Verification](#verification) for what offline tests can and cannot show.
+Same-conversation repair appends the transition guidance, repair skills, and additive editing tools to the reviewer's existing conversation, so the diagnosis, earlier messages, model/thinking, and initial definitions stay in place. `repairAgent` supplies repair prompt guidance and additive tools, and `repairSkills` supplies additive skills. The `repairAgent` model and thinking values do not replace the originating conversation's values; a repair never starts on a separately selected model. That inheritance is intentional: it preserves context and keeps the prefix eligible for provider cache reuse. Provider cache reuse is best-effort: where a provider or configuration cannot encode additive tool definitions, the same-session repair still runs but the prefix may miss the cache. See [Verification](#verification) for what offline tests can and cannot show.
 
 Agent files use the agent markdown format: frontmatter with `model`, `thinking`, and `tools`, plus a prompt body that replaces the default role guidance only. `thinking` accepts one of Pi's levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); omitting it keeps Pi's default, while `off` disables thinking. Paths resolve relative to the settings file. The runner still supplies issue context, constraints, patch/check context, and the reviewer's required structured outcome format.
 
@@ -102,7 +102,7 @@ Blessed role files ship with the package and can be referenced from your setting
 
 An absent `tools` field keeps the built-ins (implement: `read,grep,find,ls,bash,edit,write`; review: `read,grep,find,ls`). An explicit list replaces them. A reviewer asking for `bash`, `edit`, or `write` fails at startup.
 
-Resolved models, tools, prompts, and shared text land in `state.json` at start. `resume` reuses that snapshot even if the source files change or disappear. No discovery, inheritance, or template language.
+Resolved models, tools, prompts, and shared text land in `state.json` at start. `resume` reuses that snapshot even if the source files change or disappear. Repairs keep the originating conversation's model/thinking (see above). There is no discovery or template language.
 
 The runner prints its run directory before starting work. It sits beside the source repository:
 
@@ -157,7 +157,7 @@ The effective settings are snapshotted into `state.json` at start. Budgets are s
 | Pi native retries | Pi's own policy | Provider errors Pi retries itself; never charged to the controller |
 | Controller transient retries (`recovery.transientRetries`) | 2, after 5 s then 15 s (`transientBackoffMs`) | A known transient provider failure after Pi reports its retries exhausted |
 | Response corrections | 1 | A malformed or phase-inconsistent outcome |
-| Continuation | 1 per phase task | A checkpoint or `incomplete` outcome |
+| Continuation | 1 per phase task | One `incomplete` outcome per phase task, whether voluntary or returned after a checkpoint |
 
 Watchdog limits (`watchdog`) and controller command deadlines (`deadlines`):
 
@@ -173,7 +173,7 @@ Watchdog limits (`watchdog`) and controller command deadlines (`deadlines`):
 | `setupMs`, `checkMs` | 60 min | Setup and required-check commands (`--timeout` overrides both) |
 | `gitMs` | 60 s | Each Git/GitHub operation |
 
-The watchdog is enforced by the supervised worker: ten minutes without observable model or tool progress (tracked per in-flight tool, so one call cannot hide another), or a single tool running for thirty minutes, requests one structured checkpoint; a sixty-minute phase requests a soft checkpoint. A checkpoint or voluntary `incomplete` outcome grants one same-session continuation; a second incomplete stops the phase. If the worker does not answer within the five-minute checkpoint grace, the controller clears queued messages, aborts, and terminates the process group within the ten-second abort grace and two-second SIGKILL escalation. The 120-minute hard ceiling covers retries and the continuation. Consumed runtime, continuation state, and the checkpoint evidence survive resume and are replayed to the resumed attempt; runtime is flushed on every exit and periodically so a controller crash cannot replenish the allowance.
+The watchdog is enforced by the supervised worker: ten minutes without observable model or tool progress (tracked per in-flight tool, so one call cannot hide another), or a single tool running for thirty minutes, requests one structured checkpoint; a sixty-minute phase requests a soft checkpoint. A checkpoint asks the worker to return a structured outcome and does not itself spend the continuation. An `incomplete` outcome, voluntary or returned at a checkpoint, consumes the one same-session continuation and starts another turn; `complete`, `pass`, or `changes_requested` finishes the phase task normally, and `blocked` stops it. A second `incomplete` stops the phase. If the worker does not answer within the five-minute checkpoint grace, the controller clears queued messages, aborts, and terminates the process group within the ten-second abort grace and two-second SIGKILL escalation. The 120-minute hard ceiling covers retries and the continuation. Consumed runtime, continuation state, and the checkpoint evidence survive resume and are replayed to the resumed attempt; runtime is flushed on every exit and periodically so a controller crash cannot replenish the allowance.
 
 Recovery is bounded and durable. Pi's own provider retries stay enabled and are never charged to the controller. Only after Pi reports its native retries exhausted (`auto_retry_end` with `success: false`) does the controlled worker classify the recorded `finalError` and, for a known transient provider failure, spend one of the `transientRetries` (default 2) after the matching `transientBackoffMs` (default five then fifteen seconds), replaying the recorded failure and warning against repeating a failed command blindly. A cancelled retry, a provider billing/quota limit, and any unrecognized error are not retried. A malformed or phase-inconsistent response, including a `pass` after failed required checks, gets one same-session correction attempt. Transient retries, corrections, the incomplete/stalled continuation, and child repair rounds are separate counters; none of them replenish across resume, and backoff still counts against the hard ceiling. An unclassified exit, user interruption, authentication/configuration failure, or Git invariant violation is never retried.
 
@@ -253,14 +253,15 @@ No parallel tickets, recursive planning, per-ticket PRs, live pane management, d
 
 ## Verification
 
-Run the checks in this order, finishing with the full suite:
+Run the checks cheapest first, so a lint or type error fails in seconds rather than after the two-minute suite:
 
 ```sh
-pnpm exec vitest run packages/issue-loop
-pnpm typecheck
 pnpm lint
+pnpm typecheck
 pnpm exec vitest run
 ```
+
+The full suite includes the issue-loop tests. While iterating, `pnpm exec vitest run packages/issue-loop/cli.test.ts -t "<name>"` runs a single scenario; the whole package is nearly as slow as the full suite.
 
 Tests drive the public `start`/`resume` commands against temporary Git worktrees and fake Pi/GitHub executables: no models, no GitHub mutations, no provider credits. Watchdog, backoff, and grace timing use a virtual clock in the worker tests; CLI tests use short deadlines and synchronize on fixture events rather than long sleeps.
 

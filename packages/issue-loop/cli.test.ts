@@ -226,7 +226,20 @@ function handle(command) {
    if (!fs.existsSync('hook-fixed.txt')) { fs.writeFileSync('hook-fixed.txt', 'fixed\\n'); return answer(implementOutcome()); }
    console.error('Provider unavailable'); process.exit(1);
   }
-  if (name.includes('#12 review')) return answer(count('review-12') === 1 ? changes('INTEGRATED_12 finding') : pass);
+  if (name.includes('#12 review')) {
+   const reviewCount = count('review-12');
+   if (reviewCount === 1) return answer(changes('INTEGRATED_12 finding'));
+   // Second child review: capture the reviewed patch now, before the advisory
+   // parent review overwrites the shared review.patch.
+   const match = command.message.match(/Patch including new files: (.+)/);
+   const patchPath = match ? match[1].trim() : '';
+   const patch = patchPath && fs.existsSync(patchPath) ? fs.readFileSync(patchPath, 'utf8') : '';
+   fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'integrated-manual-review.patch'), patch);
+   if (!patch.includes('manual-12.txt') || !patch.includes('Manually fixed')) {
+    return answer(JSON.stringify({outcome:'changes_requested', summary:'Reviewed patch omits the manual fix', findings:[{axis:'spec',severity:'major',location:'manual-12.txt',description:'The reviewed patch is missing manual-12.txt or its content'}]}));
+   }
+   return answer(pass);
+  }
   if (isParentReview()) return answer(JSON.stringify({outcome:'pass', summary:'Parent review passed.', findings:[{axis:'standards',severity:'minor',location:'review',description:'[Standards][Minor] Parent cleanup'}]}));
   return answer(pass);
  }
@@ -1730,8 +1743,11 @@ cliTest(
     ]);
     const reviews12 = readWorkers(f.root).filter((worker) => worker.name.includes("#12 review"));
     expect(reviews12).toHaveLength(2);
-    expect(reviews12[1].session).not.toBe(hookRepair.session);
+    expect(reviews12[1].session).not.toBe(reviews12[0].session);
     expect(reviews12[1].prompt).not.toContain("INTEGRATED_12 finding");
+    const manualReviewPatch = readFileSync(join(f.root, "integrated-manual-review.patch"), "utf8");
+    expect(manualReviewPatch).toContain("diff --git a/manual-12.txt b/manual-12.txt");
+    expect(manualReviewPatch).toContain("+Manually fixed");
 
     // Run 3 reconciles the posted comment; run 4 changes nothing.
     const third = await f.run("resume", runDir);

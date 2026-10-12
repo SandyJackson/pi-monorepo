@@ -83,7 +83,8 @@ it.runIf(process.env.ISSUE_LOOP_PI_SMOKE === "1")(
       ]);
       expect(code).toBe(0);
     } finally {
-      child.kill("SIGKILL");
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exited.catch(() => undefined);
       rmSync(root, { recursive: true, force: true });
     }
   },
