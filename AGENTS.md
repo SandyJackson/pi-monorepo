@@ -8,12 +8,16 @@ Worktrees are managed with worktrunk load the skill for more information.
 
 ## Checks
 
-Run these to confirm a change, in order:
+Confirm a change cheapest first, so lint and type errors fail in seconds
+rather than after the two-minute test suite:
 
-- `pnpm exec vitest run` (full suite) or scoped, e.g.
-  `pnpm exec vitest run packages/issue-loop/cli.test.ts`
-- `pnpm typecheck`
-- `pnpm lint` (fix with `pnpm lint:fix`)
+1. `pnpm lint` (fix with `pnpm lint:fix`)
+2. `pnpm typecheck`
+3. `pnpm exec vitest run` (full suite)
+
+While iterating, scope Vitest to what you are changing, e.g.
+`pnpm exec vitest run packages/issue-loop/cli.test.ts -t "<test name>"`.
+The full suite already includes every package's tests, so run it once at the end.
 
 Always invoke repo binaries with `pnpm exec`, never `npx`.
 `npx` can resolve unpinned versions (notably biome) that disagree
