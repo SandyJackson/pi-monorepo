@@ -4,7 +4,7 @@ import type { ArtifactIdentity, CommitIntent } from "./artifact.ts";
 import type { LoopSettings } from "./settings.ts";
 import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName } from "./worker.ts";
 
-export const RUN_STATE_VERSION = 12;
+export const RUN_STATE_VERSION = 13;
 
 export interface Issue {
   number: number;
@@ -161,6 +161,25 @@ export interface RunState {
   /** Visible warning when the advisory review was unavailable or unfinished. */
   advisoryWarning?: string;
   /**
+   * Terminal advisory review outcome, independent of the verdict. Once set, a
+   * resume only republishes the recorded observations/warning instead of
+   * starting a fresh review with a new phase-task budget.
+   */
+  advisoryOutcome?: "review" | "unavailable";
+  /**
+   * Login that owns the managed observations comment, persisted before the
+   * first create and never cleared. Reconciliation uses it rather than the
+   * account resuming, so changed authorization stops for recovery instead of
+   * posting a duplicate under the same marker.
+   */
+  advisoryCommentAuthor?: string;
+  /**
+   * The advisory review describes an older SHA than the remote branch tip.
+   * The local review stays coherent for its reviewed SHA; the report labels it
+   * stale instead of claiming the latest branch was reviewed.
+   */
+  advisoryStale?: boolean;
+  /**
    * Commit intent persisted before Git runs. On resume it is reconciled from
    * verified operation identity, lineage, and artifact data so a crash between
    * Git and state persistence never repeats or loses a commit.
@@ -213,6 +232,11 @@ export function reviewObservations(state: RunState): string[] {
     observations.push(
       `### ${title}${advisory ? ` (${review.outcome})` : ""}`,
       `Reviewed HEAD: \`${review.head}\`; content tree: \`${review.tree}\`.`,
+      ...(advisory && state.advisoryStale
+        ? [
+            "**Stale:** the remote branch advanced after this review; these findings describe the reviewed SHA, not the latest remote branch.",
+          ]
+        : []),
       "",
       ...(body.trim() ? [fence, body, fence] : []),
       "",

@@ -75,7 +75,8 @@ let result;
 if (args[0] === 'repo' && args[1] === 'view') result = {nameWithOwner:process.env.GH_REPO && args[2] === '--json' ? process.env.GH_REPO : 'test/project', defaultBranchRef:{name:'main'}};
 else if (args[0] === 'api') {
  const endpoint = args.find(a => a === 'user' || a.startsWith('repos/'));
- if (endpoint === 'user') result = {login:'loop-author'};
+ const login = process.env.FIXTURE_GH_LOGIN || 'loop-author';
+ if (endpoint === 'user') result = {login};
  else if (endpoint.endsWith('/sub_issues')) result = mode === 'empty' ? [[]] : mode.startsWith('parent-order') ? [[issue(12)], [issue(11)]] : [[issue(11)], [issue(12)]];
  else if (endpoint.endsWith('/dependencies/blocked_by')) result = [mode === 'parent-order' ? [] : endpoint.includes('/12/') ? [issue(11)] : mode === 'cycle' ? [issue(12)] : []];
  else if (endpoint.includes('/issues/99/comments') || endpoint.includes('/issues/comments/')) {
@@ -90,7 +91,7 @@ else if (args[0] === 'api') {
      const bodyFile = args[args.indexOf('--field') + 1].slice('body=@'.length);
      const body = fs.readFileSync(bodyFile, 'utf8');
      if (method === 'POST') {
-       result = {id: Math.max(0, ...comments.map(comment => comment.id)) + 1, body, user:{login:'loop-author'}};
+       result = {id: Math.max(0, ...comments.map(comment => comment.id)) + 1, body, user:{login}};
        comments.push(result);
        fs.appendFileSync(path.join(root, 'comments-created.txt'), 'created\\n');
      } else if (method === 'PATCH') {
@@ -99,14 +100,14 @@ else if (args[0] === 'api') {
        result.body = body;
      } else { console.error('Unexpected comment method'); process.exit(2); }
      fs.writeFileSync(file, JSON.stringify(comments));
-     if (mode === 'comment-create-fail' && method === 'POST') {
+     if ((mode === 'comment-create-fail' || mode === 'fail-parent-review-comment-fail') && method === 'POST') {
        console.error('Connection lost after posting comment'); process.exit(1);
      }
    }
  }
  else if (endpoint.endsWith('/comments')) result = mode === 'comments' ? [[{body:'UNTRUSTED_COMMENT_INSTRUCTION'}]] : [[]];
  else result = issue(Number(endpoint.split('/').pop()));
-} else if (args[0] === 'pr' && args[1] === 'list') result = fs.existsSync(path.join(root, 'pr.json')) ? [{url:'https://github.com/test/project/pull/99', state:'OPEN'}] : [];
+} else if (args[0] === 'pr' && args[1] === 'list') result = mode === 'pr-ambiguous' ? [{url:'https://github.com/test/project/pull/99', state:'OPEN'},{url:'https://github.com/test/project/pull/100', state:'OPEN'}] : fs.existsSync(path.join(root, 'pr.json')) ? [{url:'https://github.com/test/project/pull/99', state:'OPEN'}] : [];
 else if (args[0] === 'pr' && args[1] === 'create') {
  fs.writeFileSync(path.join(root, 'pr.json'), JSON.stringify(args));
  fs.appendFileSync(path.join(root, 'pr-created.txt'), 'created\\n');
@@ -176,7 +177,7 @@ function handle(command) {
  const isEditing = name.includes('implement') || name.includes('repair');
  const mode = process.env.FIXTURE_MODE;
  if (isParentReview()) fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'parent-review-order.txt'), fs.existsSync(path.join(process.env.FIXTURE_ROOT,'pr.json')) ? 'after-pr' : 'before-pr');
- if (mode === 'fail-parent-review' && isParentReview() && command.type === 'prompt') { console.error('Provider unavailable'); process.exit(1); }
+ if ((mode === 'fail-parent-review' || mode === 'fail-parent-review-comment-fail') && isParentReview() && command.type === 'prompt') { console.error('Provider unavailable'); process.exit(1); }
  if (command.type === 'steer') {
   out({id: command.id, type:'response', command:'steer', success:true, data:{disposition:'queued'}});
   return;
@@ -961,6 +962,21 @@ function readWorkers(root: string): { name: string; args: string[]; prompt: stri
 }
 
 /**
+ * Push one new commit to the remote feature branch only, leaving the run
+ * worktree untouched, and return the new remote tip. Simulates another agent
+ * or human advancing the PR while the loop still holds a coherent local review.
+ */
+function advanceRemote(f: ReturnType<typeof fixture>, branch: string): string {
+  const clone = join(f.root, "remote-advance");
+  f.git("clone", "--branch", branch, join(f.root, "remote.git"), clone);
+  writeFileSync(join(clone, "remote-advance.txt"), "Remote-only change\n");
+  f.git("-C", clone, "add", "remote-advance.txt");
+  f.git("-C", clone, "commit", "-m", "Remote-only advancement");
+  f.git("-C", clone, "push", "origin", branch);
+  return f.git("-C", clone, "rev-parse", "HEAD");
+}
+
+/**
  * Run a real `start` and kill the controller from a post-commit hook after Git
  * has created the commit but before the run records it, then let the detached
  * Git process release the worktree index lock. This is an interruption window,
@@ -1391,6 +1407,281 @@ cliTest(
 );
 
 cliTest(
+  "reports a completed advisory review for its SHA after a later local edit",
+  async () => {
+    const f = fixture("comment-create-fail");
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(blocked.phase).toBe("advisory");
+    expect(blocked.review).toBeTruthy();
+    // The review was guarded while it ran; an unpushed edit afterwards does not
+    // change the published SHA it describes.
+    writeFileSync(join(blocked.worktree, "feature.txt"), "local follow-up\n");
+    f.env.FIXTURE_MODE = "pass-notes";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.review).toEqual(blocked.review);
+    expect(finished.advisoryWarning).toBeUndefined();
+    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    const advisory = comments.find((comment: { body: string }) =>
+      comment.body.includes("Final whole-artifact review"),
+    );
+    expect(advisory.body).toContain(blocked.review.head);
+    expect(advisory.body).toContain("[Standards][Minor] Parent cleanup");
+    expect(readFileSync(join(blocked.worktree, "feature.txt"), "utf8")).toBe("local follow-up\n");
+  },
+  30_000,
+);
+
+cliTest(
+  "keeps a coherent local review and marks it stale when only the remote branch advanced",
+  async () => {
+    const f = fixture("comment-create-fail");
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    const reviewedHead = blocked.review.head;
+    // Another actor advances the PR branch; the run worktree stays untouched.
+    const remoteHead = advanceRemote(f, blocked.branch);
+    expect(remoteHead).not.toBe(reviewedHead);
+    f.env.FIXTURE_MODE = "pass-notes";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    // The local review remains coherent and is reported against its reviewed SHA.
+    expect(finished.review.head).toBe(reviewedHead);
+    expect(finished.advisoryStale).toBe(true);
+    expect(finished.advisoryWarning).toContain("stale");
+    // No second review runs, and a repeat resume does not duplicate the comment.
+    expect(
+      readWorkers(f.root).filter((worker) => worker.name.includes("parent review")),
+    ).toHaveLength(1);
+    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    const advisory = comments.find((comment: { body: string }) =>
+      comment.body.includes("Final whole-artifact review"),
+    );
+    expect(advisory.body).toContain(reviewedHead);
+    expect(advisory.body).toContain("Stale");
+    expect((await f.run("resume", runDir)).status).toBe(0);
+    expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
+  },
+  30_000,
+);
+
+cliTest(
+  "blocks on duplicate review-observations markers from the authenticated author",
+  async () => {
+    const f = fixture("comment-create-fail");
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    const authored = comments.find(
+      (comment: { user: { login: string } }) => comment.user.login === "loop-author",
+    );
+    comments.push({ id: 77, body: authored.body, user: { login: "loop-author" } });
+    writeFileSync(join(f.root, "pr-comments.json"), JSON.stringify(comments));
+    f.env.FIXTURE_MODE = "pass-notes";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status).toBe(1);
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain("Ambiguous or invalid review observations comment");
+    // The ambiguous marker is never reconciled by creating a third comment.
+    expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
+  },
+  30_000,
+);
+
+cliTest(
+  "blocks on ambiguous existing PRs instead of creating another",
+  async () => {
+    const f = fixture("pr-ambiguous");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain("Ambiguous existing PRs");
+    expect(state.pr).toBeUndefined();
+    expect(existsSync(join(f.root, "pr-created.txt"))).toBe(false);
+  },
+  30_000,
+);
+
+cliTest(
+  "keeps the comment owner after a successful post so an account change cannot duplicate it",
+  async () => {
+    const f = fixture("pass-notes");
+    const first = await f.start();
+    expect(first.status, first.stderr).toBe(0);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const posted = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(posted.advisoryCommentAuthor).toBe("loop-author");
+    expect(posted.advisoryCommentId).toBeGreaterThan(0);
+    // Simulate a crash after the comment state was saved but before the run was
+    // marked done.
+    const crashed = { ...posted, status: "blocked", phase: "advisory" };
+    writeFileSync(join(runDir, "state.json"), JSON.stringify(crashed));
+    const before = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    f.env.FIXTURE_GH_LOGIN = "other-author";
+    const otherAccount = await f.run("resume", runDir);
+    expect(otherAccount.status).toBe(1);
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(blocked.lastError).toContain("owned by loop-author");
+    expect(blocked.lastError).toContain("other-author");
+    expect(JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"))).toEqual(before);
+    // The original account updates the recorded comment instead of posting again.
+    delete f.env.FIXTURE_GH_LOGIN;
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
+  },
+  30_000,
+);
+
+cliTest(
+  "blocks instead of posting again when the recorded comment is missing",
+  async () => {
+    const f = fixture("pass-notes");
+    const first = await f.start();
+    expect(first.status, first.stderr).toBe(0);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const posted = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    writeFileSync(
+      join(runDir, "state.json"),
+      JSON.stringify({ ...posted, status: "blocked", phase: "advisory" }),
+    );
+    writeFileSync(join(f.root, "pr-comments.json"), "[]");
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status).toBe(1);
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain(
+      `Recorded review observations comment ${posted.advisoryCommentId}`,
+    );
+    expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
+  },
+  30_000,
+);
+
+cliTest(
+  "resumes only the warning after an unavailable advisory review and failed warning publication",
+  async () => {
+    const f = fixture("fail-parent-review-comment-fail");
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(blocked.phase).toBe("advisory");
+    expect(blocked.review).toBeUndefined();
+    expect(blocked.advisoryOutcome).toBe("unavailable");
+    const reviewers = readWorkers(f.root).filter((worker) =>
+      worker.name.includes("parent review"),
+    ).length;
+    // A provider that would now pass must not be asked for a fresh review: the
+    // terminal outcome stands and resume only republishes the recorded warning.
+    f.env.FIXTURE_MODE = "pass-notes";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.review).toBeUndefined();
+    expect(
+      readWorkers(f.root).filter((worker) => worker.name.includes("parent review")),
+    ).toHaveLength(reviewers);
+    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    const advisory = comments.find((comment: { body: string }) =>
+      comment.body.includes("Warning:"),
+    );
+    expect(advisory.body).toContain("unavailable");
+    expect(advisory.body).not.toContain("Parent cleanup");
+    expect((await f.run("resume", runDir)).status).toBe(0);
+    expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
+  },
+  30_000,
+);
+
+cliTest(
+  "blocks instead of duplicating when the authenticated author changed after an interrupted comment post",
+  async () => {
+    const f = fixture("comment-create-fail");
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    // The owner is persisted before the create, even though its id never was.
+    expect(blocked.advisoryCommentAuthor).toBe("loop-author");
+    expect(blocked.advisoryCommentId).toBeUndefined();
+    const before = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    f.env.FIXTURE_MODE = "pass-notes";
+    f.env.FIXTURE_GH_LOGIN = "other-author";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status).toBe(1);
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.lastError).toContain("loop-author");
+    expect(state.lastError).toContain("other-author");
+    expect(JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"))).toEqual(before);
+    expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
+  },
+  30_000,
+);
+
+cliTest(
+  "propagates an interruption during the remote branch lookup instead of completing",
+  async () => {
+    const f = fixture("comment-create-fail");
+    const first = await f.start();
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const before = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(
+      join(f.root, "bin", "git"),
+      `#!/bin/sh\nif [ "$1" = "ls-remote" ]; then\n  touch "$FIXTURE_ROOT/ls-remote-started"\n  sleep 60\n  exit 0\nfi\nexec ${JSON.stringify(realGit)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    f.env.FIXTURE_MODE = "pass-notes";
+    const child = spawn(process.execPath, [cli, "resume", runDir], {
+      env: f.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stdout.resume();
+    child.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+    const closed = new Promise<void>((resolve) => child.on("close", () => resolve()));
+    try {
+      const marker = join(f.root, "ls-remote-started");
+      for (let i = 0; i < 200 && !existsSync(marker); i++) await delay(50);
+      expect(existsSync(marker)).toBe(true);
+      child.kill("SIGINT");
+      await Promise.race([
+        closed,
+        delay(5000).then(() => {
+          throw new Error("Controller did not stop after interrupt");
+        }),
+      ]);
+    } finally {
+      child.kill("SIGKILL");
+      await closed;
+    }
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    // The interruption preserves a resumable stop instead of finishing the run
+    // and mutating the PR after the remote read was aborted.
+    expect(state.status).toBe("blocked");
+    expect(state.phase).toBe("advisory");
+    expect(stderr).toContain("Interrupted; work has been preserved");
+    expect(JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"))).toEqual(before);
+  },
+  30_000,
+);
+
+cliTest(
   "reports a dependency cycle without starting a worker or publishing",
   async () => {
     const f = fixture("cycle");
@@ -1677,7 +1968,7 @@ cliTest(
   30_000,
 );
 
-cliTest.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])(
+cliTest.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])(
   "refuses incompatible version-%s snapshots before launching workers",
   async (version) => {
     const f = fixture("fail");
@@ -3316,8 +3607,10 @@ function writeWatchdogSettings(root: string, silenceMs = 100): string {
         toolMs: 100_000,
         softCheckpointMs: 100_000,
         hardCeilingMs: 100_000,
-        checkpointGraceMs: 100,
-        abortGraceMs: 100,
+        // Wide enough that a loaded, concurrent suite can deliver the checkpoint
+        // steer and settle the abort before the worker is terminated.
+        checkpointGraceMs: 500,
+        abortGraceMs: 500,
         sigkillEscalationMs: 100,
       },
       recovery: { transientRetries: 2, transientBackoffMs: [1, 1] },

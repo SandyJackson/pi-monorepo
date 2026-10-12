@@ -1021,45 +1021,98 @@ async function verifyTicket(
   return { kind: "pass" };
 }
 
+/** Whether an error is the controller's own interrupt signal rather than a command failure. */
+function isInterruption(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Interrupted; work has been preserved");
+}
+
+/** Resolve the remote branch tip for this run, or undefined when it cannot be read. */
+async function remoteBranchHead(state: RunState): Promise<string | undefined> {
+  try {
+    const output = await command("git", ["ls-remote", "origin", `refs/heads/${state.branch}`], {
+      cwd: state.worktree,
+      timeoutMs: state.settings.deadlines.gitMs,
+    });
+    const [sha] = output.split(/\s+/);
+    return /^[a-f0-9]{40}$/.test(sha) ? sha : undefined;
+  } catch (error) {
+    // An interrupt must stop the run with work preserved, not be mistaken for a
+    // remote read failure that then lets the controller post and claim done.
+    if (isInterruption(error)) throw error;
+    // Any other remote read failure must not fabricate a staleness claim; the
+    // review stays coherent for its reviewed SHA and the run finishes normally.
+    return undefined;
+  }
+}
+
 /**
  * Publish the PR, then run a fresh read-only whole-artifact review as advisory
  * feedback. The review never authorizes edits or blocks completion: a material
  * verdict is reported on the PR, and an unavailable/unfinished review finishes
  * with a visible warning rather than a claimed pass.
+ *
+ * The assessment is guarded against the existing worktree: a local change during
+ * the review invalidates it instead of being presented as a coherent read of a
+ * SHA, while a coherent review whose remote branch advanced is reported against
+ * its reviewed SHA with an explicit stale warning. A recorded review was guarded
+ * when it completed and describes its own SHA, so later local edits (which are
+ * never pushed here) do not invalidate it on resume.
  */
 async function advisoryReview(state: RunState): Promise<void> {
   const host = githubHostFromOrigin(state.origin);
   try {
-    if (!state.review) {
-      const route = parentReviewRoute(state);
+    if (!state.review && !state.advisoryOutcome) {
+      // No verdict yet: the worktree must still be the published artifact, so a
+      // local edit cannot be reviewed and reported as the PR's SHA. A terminal
+      // outcome skips this entirely: resume only republishes the recorded report.
       const before = await artifactSnapshot(state.worktree);
-      const patchPath = join(state.runDir, "review.patch");
-      writeFileSync(
-        patchPath,
-        await git(state.worktree, "diff", "--binary", state.baseSha, before.worktree, "--"),
-        { mode: 0o600 },
-      );
-      const outcome = await runPhaseTask(state, {
-        kind: "review",
-        phase: "review",
-        phaseTask: route.phaseTask,
-        conversation: route.conversation,
-        conversationRole: "review",
-        ticket: undefined,
-        prompt: reviewPrompt(
-          state,
-          undefined,
+      const publishedTree = await git(state.worktree, "rev-parse", `${state.head}^{tree}`);
+      if (before.head !== state.head || before.worktree !== publishedTree) {
+        state.advisoryOutcome = "unavailable";
+        state.advisoryWarning = `Final whole-artifact review unavailable: the worktree changed after publication of ${state.head}; no coherent whole-artifact assessment was posted`;
+        save(state);
+      } else {
+        const route = parentReviewRoute(state);
+        const patchPath = join(state.runDir, "review.patch");
+        writeFileSync(
           patchPath,
-          state.finalCheckLog ?? "Required checks passed",
-        ),
-      });
-      const after = await artifactSnapshot(state.worktree);
-      assertArtifactUnchanged(before, after, "Final review");
-      state.review = materializeReview(outcome, identityOf(before));
-      save(state);
+          await git(state.worktree, "diff", "--binary", state.baseSha, before.worktree, "--"),
+          { mode: 0o600 },
+        );
+        const outcome = await runPhaseTask(state, {
+          kind: "review",
+          phase: "review",
+          phaseTask: route.phaseTask,
+          conversation: route.conversation,
+          conversationRole: "review",
+          ticket: undefined,
+          prompt: reviewPrompt(
+            state,
+            undefined,
+            patchPath,
+            state.finalCheckLog ?? "Required checks passed",
+          ),
+        });
+        const after = await artifactSnapshot(state.worktree);
+        assertArtifactUnchanged(before, after, "Final review");
+        state.review = materializeReview(outcome, identityOf(before));
+        state.advisoryOutcome = "review";
+        save(state);
+      }
+    }
+    if (state.review && !state.advisoryStale) {
+      const remote = await remoteBranchHead(state);
+      if (remote && remote !== state.review.head) {
+        // The local review is coherent for its SHA; label the report stale
+        // rather than claiming the advanced branch was reviewed.
+        state.advisoryStale = true;
+        state.advisoryWarning = `Final whole-artifact review is stale: it describes ${state.review.head}, but the remote branch ${state.branch} advanced to ${remote}`;
+        save(state);
+      }
     }
     if (
       state.review &&
+      !state.advisoryWarning &&
       (state.review.outcome === "incomplete" || state.review.outcome === "blocked")
     ) {
       state.advisoryWarning = `Final whole-artifact review ${state.review.outcome}: ${state.review.summary}`;
@@ -1068,10 +1121,10 @@ async function advisoryReview(state: RunState): Promise<void> {
   } catch (error) {
     // A controller interrupt is not an advisory failure: preserve the run state
     // and let the caller record a blocked run instead of claiming completion.
-    if (error instanceof Error && error.message.includes("Interrupted; work has been preserved"))
-      throw error;
+    if (isInterruption(error)) throw error;
     // Advisory execution failure never traps the PR: preserve the diagnostics,
     // record a visible warning, and finish without claiming a pass.
+    state.advisoryOutcome = "unavailable";
     state.advisoryWarning = `Final whole-artifact review unavailable: ${
       error instanceof Error ? error.message : String(error)
     }`;
@@ -1303,13 +1356,21 @@ async function publishReviewObservations(state: RunState, host: string | undefin
   const viewer = JSON.parse(await gh(state.repo, host, "api", "user")) as { login: string };
   if (typeof viewer?.login !== "string" || !viewer.login)
     throw new Error("Cannot identify the review observations author");
+  // Reconcile against the identity that owns the managed comment, not the
+  // account resuming: changed authorization must stop for recovery rather than
+  // creating a duplicate under the same marker.
+  const author = state.advisoryCommentAuthor ?? viewer.login;
+  if (author !== viewer.login)
+    throw new Error(
+      `Review observations comment is owned by ${author}, but this resume is authenticated as ${viewer.login}. Refusing to post a duplicate; resume as ${author}`,
+    );
   const start = `<!-- issue-loop-review-observations:${state.name}:start -->`;
   const end = `<!-- issue-loop-review-observations:${state.name}:end -->`;
   const comments = (
     pages.flat() as { id: number; body: string; user?: { login: string } }[]
   ).filter(
     (comment) =>
-      comment?.user?.login === viewer.login &&
+      comment?.user?.login === author &&
       typeof comment.body === "string" &&
       comment.body.includes(start),
   );
@@ -1318,6 +1379,10 @@ async function publishReviewObservations(state: RunState, host: string | undefin
     (comments.length && (!Number.isSafeInteger(comments[0].id) || comments[0].id <= 0))
   )
     throw new Error("Ambiguous or invalid review observations comment; inspect before resuming");
+  if (state.advisoryCommentId !== undefined && comments[0]?.id !== state.advisoryCommentId)
+    throw new Error(
+      `Recorded review observations comment ${state.advisoryCommentId} is missing or no longer marked; inspect before resuming`,
+    );
   const observations = reviewObservations(state);
   if (!observations.length && !comments.length) return;
   let content = [
@@ -1341,6 +1406,12 @@ async function publishReviewObservations(state: RunState, host: string | undefin
   }
   const body = join(state.runDir, "review-observations.md");
   writeFileSync(body, content, { mode: 0o600 });
+  // Persist the owner before the irreversible comment create so a crash can
+  // reconcile it from the stable marker and owner instead of posting a duplicate.
+  if (!state.advisoryCommentAuthor) {
+    state.advisoryCommentAuthor = author;
+    save(state);
+  }
   const posted = await gh(
     state.repo,
     host,
@@ -1351,13 +1422,13 @@ async function publishReviewObservations(state: RunState, host: string | undefin
     "--field",
     `body=@${body}`,
   );
-  // Persist the advisory comment identity so a resume can reconcile publication
-  // without guessing which comment it owns.
+  // Record the advisory comment identity so a resume reconciles the same
+  // comment without guessing which one it owns.
   const commentId = comments[0]?.id ?? (JSON.parse(posted) as { id?: unknown }).id;
   if (typeof commentId === "number" && Number.isSafeInteger(commentId) && commentId > 0) {
     state.advisoryCommentId = commentId;
-    save(state);
   }
+  save(state);
 }
 
 async function publish(state: RunState): Promise<void> {
