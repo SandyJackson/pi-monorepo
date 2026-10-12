@@ -11,9 +11,17 @@ A small local controller for one parent GitHub issue. It implements direct child
 - Requirements live in the parent and ticket bodies. Comments are never fetched or forwarded, so copy approved decisions into the relevant body before starting.
 - A check command that terminates and exits nonzero on failure. No watch mode.
 
-Both roles use your configured Pi model unless `--settings` overrides it. The new worktree loads Pi resources with `--approve`, which trusts project-local resources without bypassing your command permission extension. Ambient extensions are disabled for every worker (`--no-extensions`); only the curated loop skills you select are loaded. Authenticate Pi first so workers never face an interactive login.
+Every role (implement, repair, review) uses your configured Pi model unless `--settings` overrides it. The new worktree loads Pi resources with `--approve`, which trusts project-local resources without bypassing your command permission extension. Ambient extensions are disabled for every worker (`--no-extensions`); only the curated loop skills you select are loaded. Authenticate Pi first so workers never face an interactive login.
 
 Workers run through Pi's supervised RPC mode, so the controller correlates commands, waits for the settled run, and reads the authoritative final message rather than inferring completion from free text. Pi's own provider retries stay enabled and do not consume the controller's repair rounds.
+
+## Operator workflow
+
+1. `start` a run against a parent issue. The controller prints its run directory and works through the children on one feature branch.
+2. Follow `summary.md` or the console. Each child is implemented, checked, committed, and independently reviewed. Findings are repaired in the reviewer's conversation, then a fresh reviewer assesses the result.
+3. If the run stops, read `summary.md`, fix or finish the work in the run worktree, and `resume` (see [Resume after a failure or manual fix](#resume-after-a-failure-or-manual-fix)).
+4. Once every child is accepted and the required checks pass, the controller pushes the branch, opens one PR, and posts an advisory whole-artifact review as a PR comment.
+5. Review the PR yourself. It keeps each child's feature commit and `fixup!` repairs. Squashing, autosquashing, merging, and any further changes are yours to decide; the controller never merges, rebases, or repairs the PR.
 
 ## Start
 
@@ -68,11 +76,9 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
 }
 ```
 
-Every field is optional. `repairRounds` (default 3) bounds child code-repair rounds. `watchdog`, `recovery`, and `deadlines` override individual values. The watchdog is enforced by the supervised worker: ten minutes without observable model or tool progress (tracked per in-flight tool, so one call cannot hide another), or a single tool running for thirty minutes, requests one structured checkpoint; a sixty-minute phase requests a soft checkpoint. A checkpoint or voluntary `incomplete` outcome grants one same-session continuation; a second incomplete stops the phase. If the worker does not answer within the five-minute checkpoint grace, the controller clears queued messages, aborts, and terminates the process group within the ten-second abort grace and two-second SIGKILL escalation. The 120-minute hard ceiling covers retries and the continuation. Consumed runtime, continuation state, and the checkpoint evidence survive resume and are replayed to the resumed attempt; runtime is flushed on every exit and periodically so a controller crash cannot replenish the allowance.
+Every field is optional. `repairRounds`, `watchdog`, `recovery`, and `deadlines` override individual values; [Supervision, recovery, and budgets](#supervision-recovery-and-budgets) lists the defaults.
 
-Recovery is bounded and durable. Pi's own provider retries stay enabled and are never charged to the controller. Only after Pi reports its native retries exhausted (`auto_retry_end` with `success: false`) does the controlled worker classify the recorded `finalError` and, for a known transient provider failure, spend one of the `transientRetries` (default 2) after the matching `transientBackoffMs` (default five then fifteen seconds), replaying the recorded failure and warning against repeating a failed command blindly. A cancelled retry, a provider billing/quota limit, and any unrecognized error are not retried. A malformed or phase-inconsistent response, including a `pass` after failed required checks, gets one same-session correction attempt. Transient retries, corrections, the incomplete/stalled continuation, and child repair rounds are separate counters; none of them replenish across resume, and backoff still counts against the hard ceiling. An unclassified exit, user interruption, authentication/configuration failure, or Git invariant violation is never retried.
-
-Same-conversation repair appends the transition guidance, repair skills, and additive editing tools to the reviewer's existing conversation, so the diagnosis, earlier messages, model/thinking, and initial definitions stay in place. Provider cache reuse is best-effort: where a provider or configuration cannot encode additive tool definitions, the same-session repair still runs but the prefix may miss the cache. Offline tests verify the construction and session reuse, not live cache hits.
+Same-conversation repair appends the transition guidance, repair skills, and additive editing tools to the reviewer's existing conversation, so the diagnosis, earlier messages, model/thinking, and initial definitions stay in place. Provider cache reuse is best-effort: where a provider or configuration cannot encode additive tool definitions, the same-session repair still runs but the prefix may miss the cache. See [Verification](#verification) for what offline tests can and cannot show.
 
 Agent files use the agent markdown format: frontmatter with `model`, `thinking`, and `tools`, plus a prompt body that replaces the default role guidance only. `thinking` accepts one of Pi's levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); omitting it keeps Pi's default, while `off` disables thinking. Paths resolve relative to the settings file. The runner still supplies issue context, constraints, patch/check context, and the reviewer's required structured outcome format.
 
@@ -122,9 +128,54 @@ The original checkout is untouched and its uncommitted work excluded. The featur
 4. When that assessment passes and the child has an earlier `changes_requested` verdict, the controller runs one read-only audit in the same reviewer conversation and the same phase-task budget. The audit receives only the latest failed verdict's findings and the intervening repair/retraction explanation, and must pass on the unchanged artifact before acceptance. A `changes_requested` verdict persists the findings, then closes the settled review process and reopens the same session with the dedicated repair guidance/skills and additive editing tools. The repair keeps the conversation's model, thinking, and cached prefix; a fresh independent reviewer then assesses the changed artifact. A failed required check returns to the last editing conversation and spends one code-repair round. A no-change retraction records its explanation, spends one round, and is reviewed independently. At most three configurable code-repair rounds per child (including check failures and retractions), then the child stops with the findings preserved.
 5. Record the accepted SHA separately from the work commits, and retain each earlier artifact-linked verdict alongside the latest so a repair cannot erase the assessment it answered. The reviewer never edits, and the controller guards the branch, HEAD, index, and worktree (including relevant untracked files) before and after review, so a changed artifact can never be accepted with an old verdict.
 6. Publication gate. Once every child is accepted, the controller runs the configured checks against the aggregate artifact and refuses to publish an uncommitted or failing worktree. A failed gate blocks with the work preserved; the controller never commits parent integration work or introduces parent fixup anchors.
-7. Push only the feature branch and open one PR with its unsquashed feature/fixup history. Only after the PR exists does a fresh read-only reviewer assess the parent requirements, every child, and the whole cumulative artifact. The advisory verdict is posted as a marked PR comment with its findings, summary, and reviewed HEAD/content-tree IDs. A local worktree change during the review invalidates it and posts an unavailable-review warning instead of presenting a mixed-version read as current. A completed review describes its reviewed SHA, so a later unpushed local edit does not invalidate it. A remote-only branch advance leaves the local review coherent for its reviewed SHA but marks the comment stale with a visible warning. The PR is reconciled from its branch, and the comment from its marker, its recorded ID, and the owning login persisted before the first post, so a re-run reuses the same PR and comment and an account change stops for recovery instead of posting a duplicate. Passing ticket observations from earlier reviews also appear there as historical notes, not a reconciled outstanding-issues list; later changes may resolve them. Reviewer text never goes into the PR description, where closing keywords could affect issue closure. Material findings do not trigger automatic parent repairs or block completion. If the advisory review is unavailable, incomplete, or blocked after its watchdog/recovery policy is exhausted, the run finishes with a visible warning and preserved logs rather than a claimed pass. Publication retries reuse the PR and update the owning author's managed observations section. The PR description, other authors' comments, and human text outside the section are preserved. Ambiguous or damaged section markers stop publication for inspection.
+7. Push only the feature branch and open one PR with its unsquashed feature/fixup history. Only after the PR exists does a fresh read-only reviewer assess the parent requirements, every child, and the whole cumulative artifact. The advisory verdict is posted as a marked PR comment with its findings, summary, and reviewed HEAD/content-tree IDs. Passing ticket observations from earlier reviews also appear in the comment as historical notes, not a reconciled outstanding-issues list; later changes may resolve them. Reviewer text never goes into the PR description, where closing keywords could affect issue closure. Material findings do not trigger automatic parent repairs or block completion. Publication retries reuse the PR and update the owning author's managed observations section. The PR description, other authors' comments, and human text outside the section are preserved. Ambiguous or damaged section markers stop publication for inspection. Warnings, staleness, and resume behavior are described in [Advisory warnings and staleness](#advisory-warnings-and-staleness).
+
+### Phase outcomes
+
+Workers must end each phase with a structured outcome that is valid for that phase:
+
+| Phase | Outcome | Effect |
+|---|---|---|
+| Implement, repair | `complete` | Checks run, then the work commit. |
+| Implement, repair | `incomplete` | One same-session continuation; a second stops the phase. |
+| Implement, repair | `blocked` | The child stops with the blockers recorded. |
+| Review, audit | `pass` | No critical or major finding. Accepts the child, after the audit when an earlier verdict requested changes. |
+| Review, audit | `changes_requested` | At least one critical or major finding. The same conversation becomes the repair. |
+| Review, audit | `incomplete` / `blocked` | One continuation for `incomplete`; otherwise the child stops. |
+
+A malformed outcome, one that is not valid for the phase, or a `pass` after failed required checks gets one same-session correction.
 
 The controller never merges. Issues stay open until a human merges the final PR, whose body references the parent and accepted children for closing. Internal dependencies resolve through acceptance on the run's branch, not GitHub closure. External blockers must be closed with their implementation already in the pinned base. The runner never rebases. If tickets remain but none can run, it stops instead of declaring victory.
+
+## Supervision, recovery, and budgets
+
+The effective settings are snapshotted into `state.json` at start. Budgets are separate and none of them replenish across resume:
+
+| Budget | Default | Spent on |
+|---|---|---|
+| Code-repair rounds (`repairRounds`) | 3 per child | Repairs after `changes_requested`, failed required checks, actionable hook failures, and no-change retractions |
+| Pi native retries | Pi's own policy | Provider errors Pi retries itself; never charged to the controller |
+| Controller transient retries (`recovery.transientRetries`) | 2, after 5 s then 15 s (`transientBackoffMs`) | A known transient provider failure after Pi reports its retries exhausted |
+| Response corrections | 1 | A malformed or phase-inconsistent outcome |
+| Continuation | 1 per phase task | A checkpoint or `incomplete` outcome |
+
+Watchdog limits (`watchdog`) and controller command deadlines (`deadlines`):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `silenceMs` | 10 min | No observable model or tool progress requests a checkpoint |
+| `toolMs` | 30 min | One tool call running this long requests a checkpoint |
+| `softCheckpointMs` | 60 min | A productive phase this long requests a soft checkpoint |
+| `checkpointGraceMs` | 5 min | Time to answer a checkpoint before abort |
+| `hardCeilingMs` | 120 min | Whole phase task, including retries, backoff, and the continuation |
+| `abortGraceMs` | 10 s | Time to settle after abort before the process group is terminated |
+| `sigkillEscalationMs` | 2 s | SIGTERM to SIGKILL escalation |
+| `setupMs`, `checkMs` | 60 min | Setup and required-check commands (`--timeout` overrides both) |
+| `gitMs` | 60 s | Each Git/GitHub operation |
+
+The watchdog is enforced by the supervised worker: ten minutes without observable model or tool progress (tracked per in-flight tool, so one call cannot hide another), or a single tool running for thirty minutes, requests one structured checkpoint; a sixty-minute phase requests a soft checkpoint. A checkpoint or voluntary `incomplete` outcome grants one same-session continuation; a second incomplete stops the phase. If the worker does not answer within the five-minute checkpoint grace, the controller clears queued messages, aborts, and terminates the process group within the ten-second abort grace and two-second SIGKILL escalation. The 120-minute hard ceiling covers retries and the continuation. Consumed runtime, continuation state, and the checkpoint evidence survive resume and are replayed to the resumed attempt; runtime is flushed on every exit and periodically so a controller crash cannot replenish the allowance.
+
+Recovery is bounded and durable. Pi's own provider retries stay enabled and are never charged to the controller. Only after Pi reports its native retries exhausted (`auto_retry_end` with `success: false`) does the controlled worker classify the recorded `finalError` and, for a known transient provider failure, spend one of the `transientRetries` (default 2) after the matching `transientBackoffMs` (default five then fifteen seconds), replaying the recorded failure and warning against repeating a failed command blindly. A cancelled retry, a provider billing/quota limit, and any unrecognized error are not retried. A malformed or phase-inconsistent response, including a `pass` after failed required checks, gets one same-session correction attempt. Transient retries, corrections, the incomplete/stalled continuation, and child repair rounds are separate counters; none of them replenish across resume, and backoff still counts against the hard ceiling. An unclassified exit, user interruption, authentication/configuration failure, or Git invariant violation is never retried.
 
 ## Resume after a failure or manual fix
 
@@ -136,15 +187,40 @@ Fix manually **in the run's worktree**, never in the original checkout. Then:
 pnpm issue-loop resume /absolute/path/to/.pi-issue-loops/project-123-<timestamp>-<id>
 ```
 
-Resume checks and reviews the current ticket's files before launching another implementer. It keeps your edits, stays on the branch, skips accepted tickets, and never assumes your fix is right. Manual commits are fine mid-ticket or mid-review if they descend from accepted history. They get reviewed too. A single manual commit that the controller never recorded becomes the child's feature anchor with its origin recorded, so later repairs are standard fixups of your commit and its subject and history are left untouched. Several manual commits since the baseline have no unambiguous anchor: the run stops for you to leave exactly one ticket-scoped commit rather than guessing which one future fixups should target. Never rewrite accepted commits or switch branches; a resume that no longer descends from accepted history stops with the work preserved.
+Resume keeps your edits, stays on the branch, skips accepted tickets, and never assumes your fix is right:
 
-Budgets persist, so resuming an exhausted ticket buys no fresh repairs. Fix the rest by hand and resume again. Timeouts, provider failures, blocked reviews, and invalid verdicts stop at once. If publication failed and you then edit the worktree, resume rechecks before publishing; commit the change in the run worktree so the publication artifact is clean, because an uncommitted tree is refused rather than turned into a controller commit. If the PR already exists from before a connection failure, resume reuses it. Resuming a completed run just reports the PR.
+- Uncommitted files or commits on the current ticket are checked, then assessed by a fresh reviewer with the whole changed artifact and any check failure, even when checks still fail. That reviewer becomes the repairer if it requests changes; the stale editor is never reopened.
+- An interrupted phase with no operator change resumes its own conversation and phase task, keeping consumed runtime and every budget. A repair that saved files and then failed is execution recovery, not another repair round.
+- A cached passing review is revalidated against the current required checks before acceptance.
+- A commit interrupted between Git and the state save is reconciled from its parent lineage, content tree, and `Loop-Run`/`Loop-Step` trailers. A provable commit is recorded once; an ambiguous one stops with diagnostics and the work preserved.
+
+Budgets persist, so resuming an exhausted ticket buys no fresh repairs. Fix the rest by hand and resume again. Exhausted budgets, unrecognized provider failures, `blocked` outcomes, and a failed correction stop the run. If publication failed and you then edit the worktree, resume rechecks before publishing; commit the change in the run worktree so the publication artifact is clean, because an uncommitted tree is refused rather than turned into a controller commit. Resuming a completed run just reports the PR.
 
 `state.json` rules. `summary.md` is generated from it, not a plan you can edit. Never hand-edit statuses, reset counters, or move the run directory. GitHub edits do not flow into an existing snapshot.
 
-Version 13 persists the login that owns the observations comment before the first post and never clears it, and reconciles against that owner and the recorded comment ID, so a resume authenticated as a different account, or one whose recorded comment is missing, stops for operator recovery instead of posting a duplicate. It records a terminal advisory outcome independently of the verdict: once a review is unavailable, resume only republishes the recorded warning instead of starting a fresh review with a new budget, and a controller interrupt during the remote-branch lookup preserves a resumable stop rather than finishing and mutating the PR. A coherent local review whose remote branch advanced is marked stale with a visible warning. It never presents a mixed-version read as current-artifact approval, and repeat resumes reuse the same PR and comment. Version 12 publishes before the final review and makes that review advisory. A publication gate runs the required checks on the aggregate artifact and refuses an uncommitted worktree before any PR exists; the controller no longer performs parent integration work or introduces parent fixup anchors. After the PR is created, one fresh read-only reviewer assesses the parent requirements, every child, and the whole cumulative artifact, and its findings/summary plus reviewed SHA are posted in the marked PR comment. A material verdict is reported without triggering a parent repair, and an unavailable, incomplete, or blocked advisory review finishes the run with a visible warning instead of a claimed pass. Version 11 persists the pending commit intent before Git and records stable `Loop-Run`/`Loop-Step` trailers on feature/fixup commits. It returns recognized code/test/lint hook failures to the last editing conversation as repair feedback (spending a code-repair round), including a failed recheck of a hook-mutated committed tree, while signing/identity/configuration failures and unrecognized or tooling diagnostics preserve the staged work and stop for recovery. On resume it reconciles a crash between Git and state persistence from the verified parent lineage, expected content tree, and trailers: a provable commit is recovered once without duplication, an unchanged parent is retried by the normal flow, and an ambiguous outcome blocks with diagnostics and preserved work. Version 10 records the controller-observed HEAD and content tree at manual-review handoff and phase stops. An unchanged interrupted repair after a manual descendant commit resumes its existing conversation and phase task, preserving repair and recovery budgets. Later operator file changes or a new HEAD still trigger fresh review, even if the new commit has the same content tree. If that review passes but interrupted leftovers still need a completed editing phase, completion uses the fresh reviewer conversation and consumes a repair round; it never reopens the stale editor or bypasses the repair limit. Version 9 adds verified manual commits: a single ticket-scoped manual commit with no recorded controller anchor is adopted as the child's feature anchor with its origin recorded, its subject and history untouched, and later repairs as standard fixups of it; several such commits stop for human attribution, and a resume that no longer descends from accepted history stops with the work preserved. Manual work is checked and freshly reviewed even when a required check fails, and that review handoff is persisted before the reviewer launches, so a crashed reviewer recovers in its own conversation rather than returning the work to the stale editor; a cached passing assessment is revalidated against the current required checks before acceptance, so a later failing check cannot be skipped into acceptance: the reviewer corrects itself within one bounded correction or requests changes, and persistent inconsistency blocks the child; a repair that saved files and then failed is execution recovery and resumes its own conversation without spending a repair round. Version 8 adds same-conversation repairs: a fresh reviewer's first assessment is independent of prior findings, a passing assessment is confirmed by a same-session latest-findings audit, a `changes_requested` verdict reopens the settled review session with dedicated repair guidance/skills and additive editing tools, and failed checks return to the last editing conversation. Review plus audit share one phase-task budget while an authorized repair starts a separate one. Version 7 added child work history: a feature anchor and standard repair fixups, distinct from the accepted SHA, a guarded review artifact identity that covers the branch, HEAD, index, and worktree, retained artifact-linked verdicts, and the worktree identity an interrupted editing phase stopped at so resume never commits unverified leftovers. Version 6 added the controller recovery budget (`recovery.transientRetries` and `transientBackoffMs`) and the durable transient-retry/correction counters alongside the RPC worker contract, phase outcomes, structured findings, and the settings snapshot (repair role, repair rounds, watchdog policy, and controller deadlines). Version 5 recorded the worker contract without the recovery budget. Version 4 recorded the reviewed artifact with the `verdict`/`body` contract. Version 3 snapshotted the incompatible `verdict`/`findings` instructions. Version 2 predates `--settings`. Version 1 mixed comments into requirements without provenance. None of the old versions resume. Preserve any work, reread the issue bodies, and start fresh. Never bump the version field by hand.
-
 A kill or crash can leave `run.lock` behind. The runner will not guess whether an orphan worker is still writing. Check the recorded controller PID and any Pi/check processes, stop them, inspect the worktree, delete that run's lock, and resume. Normal failures clear the lock themselves.
+
+### Manual commits
+
+Manual commits are fine mid-ticket or mid-review if they descend from accepted history; they get reviewed too. A single manual commit that the controller never recorded becomes the child's feature anchor with its origin recorded, so later repairs are standard fixups of your commit and its subject and history are left untouched. Several manual commits since the baseline have no unambiguous anchor: the run stops for you to leave exactly one ticket-scoped commit rather than guessing which one future fixups should target. Never rewrite accepted commits or switch branches; a resume that no longer descends from accepted history stops with the work preserved.
+
+### Hook failures
+
+Git hooks always run and are never bypassed. A clean hook mutation is rechecked before review. A recognized code, test, lint, or formatting failure (including a failed recheck) returns to the last editing conversation as repair feedback and spends a code-repair round. A signing, identity, or configuration failure, a tooling or unrecognized failure, and a hook that leaves the worktree dirty all preserve the staged work and stop. Fix the cause in the run worktree or your Git configuration, then resume. A dirty hook's leftovers are never turned into a fixup, so an unchanged resume stops again.
+
+### Advisory warnings and staleness
+
+The advisory review never blocks the PR, but the run reports a `Warning:` on stderr, in `summary.md`, and in the PR comment when:
+
+- the review was unavailable: execution failed after bounded recovery, or the worktree changed after publication or during the review. No assessment is presented for a mixed-version read.
+- the review finished `incomplete` or `blocked`.
+- the remote branch advanced past the reviewed SHA. The findings stay attached to the SHA they describe and are labelled stale.
+
+These outcomes persist. Resume republishes the recorded warning or findings instead of running another review. The PR is found again by its branch, and the comment by its hidden marker, recorded ID, and owning login; an account change or a missing recorded comment stops rather than posting a duplicate.
+
+### Old run state
+
+Run state is versioned and older versions never resume. `resume` refuses an older `state.json` before taking the run lock or launching a worker, and leaves the state file, worktree, branch, and sessions exactly as they were. Preserve any work from that worktree, reread the issue bodies, and start a new run. Never bump the version field by hand.
 
 ## Find or reopen worker sessions
 
@@ -165,7 +241,7 @@ pi --session-dir /path/to/run/sessions --resume
 pi --session /path/to/run/sessions/1-124-implement.jsonl
 ```
 
-A session file may be missing if Pi died before its first persisted response. The log and planned name still identify the attempt. Touch sessions only while the controller is stopped. Automatic continuation always starts fresh with the saved requirements and latest findings.
+A session file may be missing if Pi died before its first persisted response. The log and planned name still identify the attempt. Touch sessions only while the controller is stopped. Implementation and every independent review start a fresh session. A repair is a new Pi process on its reviewer's session file, with the repair guidance and editing tools added, and an interrupted phase resumes its own session. Manual changes always get a fresh reviewer rather than the stale editor.
 
 ## Trust and deliberate limits
 
@@ -177,9 +253,23 @@ No parallel tickets, recursive planning, per-ticket PRs, live pane management, d
 
 ## Verification
 
+Run the checks in this order, finishing with the full suite:
+
 ```sh
-pnpm exec vitest run packages/issue-loop/cli.test.ts
+pnpm exec vitest run packages/issue-loop
 pnpm typecheck
+pnpm lint
+pnpm exec vitest run
 ```
 
-Tests drive the public start/resume commands against temporary Git worktrees and fake Pi/GitHub executables. No models, no GitHub mutations. Model quality and a first live run still want human supervision.
+Tests drive the public `start`/`resume` commands against temporary Git worktrees and fake Pi/GitHub executables: no models, no GitHub mutations, no provider credits. Watchdog, backoff, and grace timing use a virtual clock in the worker tests; CLI tests use short deadlines and synchronize on fixture events rather than long sleeps.
+
+An opt-in offline smoke checks the installed Pi:
+
+```sh
+ISSUE_LOOP_PI_SMOKE=1 pnpm exec vitest run packages/issue-loop/pi.smoke.test.ts
+```
+
+It runs the controller's version preflight, starts Pi in worker RPC mode with extensions and skills disabled, checks correlated LF-framed `get_state`/`get_messages` responses for the requested session path and name, and requires a clean exit when stdin closes. It sends no prompt, so no model or provider is called. It is skipped by default because the result depends on the local Pi install.
+
+Limits: fixture and offline tests verify same-session construction and reuse, not provider cache hits; cache reuse depends on the provider and is best-effort. No paid end-to-end smoke is included or authorized. Model quality and a first live run still want human supervision.

@@ -100,7 +100,7 @@ else if (args[0] === 'api') {
        result.body = body;
      } else { console.error('Unexpected comment method'); process.exit(2); }
      fs.writeFileSync(file, JSON.stringify(comments));
-     if ((mode === 'comment-create-fail' || mode === 'fail-parent-review-comment-fail') && method === 'POST') {
+     if ((mode === 'comment-create-fail' || mode === 'fail-parent-review-comment-fail' || mode === 'integrated') && method === 'POST') {
        console.error('Connection lost after posting comment'); process.exit(1);
      }
    }
@@ -191,6 +191,45 @@ function handle(command) {
   process.exit(0);
  }
  if (command.type === 'prompt') promptCount++;
+ if (mode === 'integrated') {
+  // One scripted run through recovery, repair/audit, hook repair, and manual work.
+  const reply = (events) => {
+   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+   out({type:'agent_start'});
+   out({type:'message_start', message:{role:'assistant', content:[]}});
+   for (const event of events) out(event);
+   out({type:'agent_end', messages:[], willRetry:false});
+   out({type:'agent_settled'});
+  };
+  const answer = text => reply([{type:'message_end', message:{role:'assistant', content:[{type:'text', text}]}}]);
+  const pass = JSON.stringify({outcome:'pass', summary:'Review passed.', findings:[]});
+  const changes = description => JSON.stringify({outcome:'changes_requested', summary:description, findings:[{axis:'spec',severity:'major',location:'feature.txt',description}]});
+  const count = key => {
+   const file = path.join(process.env.FIXTURE_ROOT, 'integrated-' + key);
+   const next = (fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0) + 1;
+   fs.writeFileSync(file, String(next));
+   return next;
+  };
+  if (name.includes('#11 implement')) {
+   if (promptCount === 1) return reply([
+    {type:'message_end', message:{role:'assistant', content:[{type:'text', text:'provider failed'}], stopReason:'error', errorMessage:'529 overloaded'}},
+    {type:'auto_retry_start', attempt:1, maxAttempts:3, delayMs:10, errorMessage:'529 overloaded'},
+    {type:'auto_retry_end', success:false, attempt:3, finalError:'529 overloaded'},
+   ]);
+   fs.writeFileSync('feature.txt', 'implemented\\n');
+   return answer(implementOutcome());
+  }
+  if (name.includes('#11 review')) return answer(count('review-11') === 1 ? changes('INTEGRATED_11 finding') : pass);
+  if (name.includes('#11 repair')) { fs.writeFileSync('fix-11.txt', 'fixed\\n'); return answer(implementOutcome()); }
+  if (name.includes('#12 implement')) { fs.writeFileSync('ticket-12.txt', 'implemented\\n'); return answer(implementOutcome()); }
+  if (name.includes('#12 repair')) {
+   if (!fs.existsSync('hook-fixed.txt')) { fs.writeFileSync('hook-fixed.txt', 'fixed\\n'); return answer(implementOutcome()); }
+   console.error('Provider unavailable'); process.exit(1);
+  }
+  if (name.includes('#12 review')) return answer(count('review-12') === 1 ? changes('INTEGRATED_12 finding') : pass);
+  if (isParentReview()) return answer(JSON.stringify({outcome:'pass', summary:'Parent review passed.', findings:[{axis:'standards',severity:'minor',location:'review',description:'[Standards][Minor] Parent cleanup'}]}));
+  return answer(pass);
+ }
  if (isImplement && (mode === 'recover-transient' || mode === 'recover-exhausted' || mode === 'recover-correction')) {
   out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
   out({type:'agent_start'});
@@ -1631,6 +1670,118 @@ cliTest(
 );
 
 cliTest(
+  "runs one loop through recovery, repairs, hooks, manual work, publication, and resume",
+  async () => {
+    const f = fixture("integrated");
+    const hooks = join(f.repo, ".git", "hooks");
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(
+      join(hooks, "pre-commit"),
+      `#!/bin/sh\nif [ -f ticket-12.txt ] && [ ! -f hook-fixed.txt ]; then\n  echo "ticket-12.txt:1:1 error: INTEGRATED_LINT" >&2\n  exit 1\nfi\n`,
+      { mode: 0o755 },
+    );
+    const settingsPath = writeWatchdogSettings(f.root, 100_000);
+    const start = [
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settingsPath,
+    ];
+
+    // Run 1: #11 recovers a transient failure and is repaired in the review
+    // conversation; #12 repairs a hook failure, then its review repair crashes.
+    const first = await f.run(...start);
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    const stopped = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(stopped.status).toBe("blocked");
+    const [ticket11, ticket12] = stopped.tickets;
+    expect(ticket11.status).toBe("accepted");
+    expect(ticket11.repairs).toBe(1);
+    expect(ticket12.status).toBe("blocked");
+    expect(ticket12.phase).toBe("repair");
+    const implement11 = stopped.sessions.find((session: { name: string }) =>
+      session.name.includes("#11 implement"),
+    );
+    expect(implement11.transientRetries).toBe(1);
+    const workers = readWorkers(f.root);
+    const review11 = workers.find((worker) => worker.name.includes("#11 review"))!;
+    const repair11 = workers.find((worker) => worker.name.includes("#11 repair"))!;
+    expect(repair11.session).toBe(review11.session);
+    expect(workers.filter((worker) => worker.name.includes("#11 audit"))).toHaveLength(1);
+    const hookRepair = workers.find((worker) => worker.name.includes("#12 repair"))!;
+    expect(hookRepair.prompt).toContain("INTEGRATED_LINT");
+
+    // Run 2: the operator finishes #12 by hand. A fresh reviewer assesses it,
+    // the PR is published, and the advisory comment post loses its response.
+    writeFileSync(join(stopped.worktree, "manual-12.txt"), "Manually fixed\n");
+    const second = await f.run("resume", runDir);
+    expect(second.status).toBe(1);
+    const posted = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(posted.phase).toBe("advisory");
+    expect(posted.tickets.map((ticket: { status: string }) => ticket.status)).toEqual([
+      "accepted",
+      "accepted",
+    ]);
+    const reviews12 = readWorkers(f.root).filter((worker) => worker.name.includes("#12 review"));
+    expect(reviews12).toHaveLength(2);
+    expect(reviews12[1].session).not.toBe(hookRepair.session);
+    expect(reviews12[1].prompt).not.toContain("INTEGRATED_12 finding");
+
+    // Run 3 reconciles the posted comment; run 4 changes nothing.
+    const third = await f.run("resume", runDir);
+    expect(third.status, third.stderr).toBe(0);
+    const fourth = await f.run("resume", runDir);
+    expect(fourth.status).toBe(0);
+    expect(fourth.stdout).toContain("Already complete");
+
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    expect(finished.advisoryWarning).toBeUndefined();
+    expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
+    expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
+    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
+    expect(comments).toHaveLength(1);
+    expect(comments[0].body).toContain("[Standards][Minor] Parent cleanup");
+    expect(comments[0].body).toContain(finished.review.head);
+    expect(
+      readWorkers(f.root).filter((worker) => worker.name.includes("parent review")),
+    ).toHaveLength(1);
+    // Unsquashed child history is left for the human to squash or merge: the
+    // hook repair joins #12's feature commit and the manual fix is its fixup.
+    expect(
+      f.git(
+        "-C",
+        finished.worktree,
+        "log",
+        "--reverse",
+        "--format=%s",
+        `${finished.baseSha}..HEAD`,
+      ),
+    ).toBe(
+      [
+        "loop: #11 Ticket 11",
+        "fixup! loop: #11 Ticket 11",
+        "loop: #12 Ticket 12",
+        "fixup! loop: #12 Ticket 12",
+      ].join("\n"),
+    );
+    const files = (commit: string) =>
+      f.git("-C", finished.worktree, "show", "--name-only", "--format=", commit).split("\n");
+    expect(files(finished.tickets[1].anchor)).toEqual(
+      expect.arrayContaining(["hook-fixed.txt", "ticket-12.txt"]),
+    );
+    expect(files("HEAD")).toContain("manual-12.txt");
+  },
+  60_000,
+);
+
+cliTest(
   "propagates an interruption during the remote branch lookup instead of completing",
   async () => {
     const f = fixture("comment-create-fail");
@@ -1979,10 +2130,15 @@ cliTest.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])(
     state.version = version;
     state.parent.body += "\n\n## Issue comments\n\nUNTRUSTED_COMMENT_INSTRUCTION";
     writeFileSync(statePath, JSON.stringify(state));
+    const head = f.git("-C", state.worktree, "rev-parse", "HEAD");
     const result = await f.run("resume", runDir);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("older snapshots may include issue comments");
     expect(readFileSync(join(f.root, "workers.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
+    // The rejected run's state and worktree are left exactly as they were.
+    expect(readFileSync(statePath, "utf8")).toBe(JSON.stringify(state));
+    expect(f.git("-C", state.worktree, "rev-parse", "HEAD")).toBe(head);
+    expect(existsSync(join(runDir, "run.lock"))).toBe(false);
   },
   30_000,
 );
