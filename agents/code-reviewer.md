@@ -2,7 +2,7 @@
 description: Independent code review following the workspace code-review skill
 display_name: Code Reviewer
 tools: read, grep, find, ls, bash, subagent
-model: openai-codex/gpt-5.6-sol
+model: openai-codex/gpt-6.1-sol
 thinking: high
 timeout: 90
 ---
