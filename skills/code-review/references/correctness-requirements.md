@@ -1,6 +1,6 @@
 # Correctness and requirements
 
-**Requirements.** Report: (a) requirements the spec asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for (scope creep); (c) requirements that look implemented but where the implementation looks wrong. Quote the spec line for each finding. A vague spec ("build me X") gets the smallest version that does the core job. Treat spec silence as a reason to inspect existing usage and contracts, not as permission for broken behaviour. Questions based only on guessed expectations remain questions.
+**Requirements.** Report: (a) requirements the spec asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for (scope creep); (c) requirements that look implemented but where the implementation looks wrong. Quote the spec line for each finding. A vague spec ("build me X") gets the smallest version that does the core job. For behavior the spec is silent on, judge by what a reasonable person using this software would expect: a reasonable person's expectation is a requirement, and a spec's silence is not permission. Grade such findings by their effect on that person, not by whether the spec mentions the trigger. A finding that rests on such an expectation says so: state the expectation you assumed.
 
 **Bug:** wrong result, crash, missed edge case (empty, zero, last item, rounding, time zones), a caller broken by the change, a fix applied in one caller while the shared function stays broken.
 

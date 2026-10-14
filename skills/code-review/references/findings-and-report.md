@@ -1,12 +1,5 @@
 # Findings and report
 
-## Understand first
-
-- Read the diff, then the code it touches: callers of every changed function, the functions it calls, the tests, the README.
-- Trace the real flow: where data comes in, what is stored, what goes out.
-- A change can break code it does not touch. When a signature, return value or behavior changes, grep every caller.
-- Find the expected load in the repo (README, deploy config): one person running a script, or many users and processes at once. Judge scale against that, and say which load you assumed.
-
 ## Flag gate
 
 Flag an issue only when all of these hold. "The commit" and "the PR" mean the review target.
@@ -42,7 +35,7 @@ A concern you cannot confirm is a **review question**: say what evidence would s
 - The comment's tone should be matter-of-fact and not accusatory or overly positive.
 - Keep the line range as short as possible for interpreting the issue.
 
-Each finding has a priority, a `file:line` location, the trigger, the impact, the fix and its evidence.
+Each finding has a priority, a `file:line` location, the trigger, the impact, the fix and its evidence. When it rests on an assumption, such as what a reasonable person would expect where the spec is silent, it names the assumption.
 
 | Priority | Meaning |
 | --- | --- |
