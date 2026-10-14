@@ -10,7 +10,7 @@ it("ships prompt templates through the aggregate package", () => {
   expect(manifest.pi.prompts).toEqual(["./prompts"]);
 });
 
-it("resolves code-review to the workspace skill while the mirror remains", () => {
+it("resolves code-review to the workspace skill", () => {
   const { skills } = loadSkills({
     cwd: ROOT,
     skillPaths: manifest.pi.skills,
