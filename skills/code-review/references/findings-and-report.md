@@ -2,18 +2,14 @@
 
 ## Flag gate
 
-Flag an issue only when all of these hold. "The commit" and "the PR" mean the review target.
+Flag an issue only when all of these hold.
 
-1. It meaningfully impacts the accuracy, performance, security, or maintainability of the code.
-2. The bug is discrete and actionable (i.e. not a general issue with the codebase or a combination of multiple issues).
-3. Fixing the bug does not demand a level of rigor that is not present in the rest of the codebase (e.g. one doesn't need very detailed comments and input validation in a repository of one-off scripts in personal projects).
-4. The bug was introduced in the commit (pre-existing bugs should not be flagged).
-5. The author of the original PR would likely fix the issue if they were made aware of it.
-6. The bug does not rely on unstated assumptions about the codebase or author's intent.
-7. It is not enough to speculate that a change may disrupt another part of the codebase, to be considered a bug, one must identify the other parts of the code that are provably affected.
-8. The bug is clearly not just an intentional change by the original author.
-
-Output all findings that the original author would fix if they knew about it. If there is no finding that a person would definitely love to see and fix, prefer outputting no findings. Do not stop at the first qualifying finding.
+- It affects correctness, security, performance, or maintainability in a meaningful way.
+- It is discrete and actionable.
+- Fixing the bug does not demand rigor not present in the rest of the codebase (e.g. one doesn't need very detailed comments and input validation in a repository of one-off scripts in personal projects).
+- It was introduced by the reviewed change.
+- The affected scenario or call path can be demonstrated from the code.
+- The author would probably fix it if they knew about it.
 
 Ignore trivial style unless it obscures meaning or violates documented standards. A documented repository standard overrides the generic heuristics in these references; cite it for any finding it supports.
 
@@ -29,20 +25,18 @@ A concern you cannot confirm is a **review question**: say what evidence would s
 ## Writing a finding
 
 - The comment should be clear about why the issue is a bug.
-- The comment should appropriately communicate the severity of the issue. It should not claim that an issue is more severe than it actually is.
 - The comment should be brief. The body should be at most 1 paragraph.
-- The comment should clearly and explicitly communicate the scenarios, environments, or inputs that are necessary for the bug to arise. The comment should immediately indicate that the issue's severity depends on these factors.
-- The comment's tone should be matter-of-fact and not accusatory or overly positive.
+- The comment should clearly and explicitly communicate the scenarios, environments, or inputs that are necessary for the bug to arise.
 - Keep the line range as short as possible for interpreting the issue.
 
 Each finding has a priority, a `file:line` location, the trigger, the impact, the fix and its evidence. When it rests on an assumption, such as what a reasonable person would expect where the spec is silent, it names the assumption.
 
 | Priority | Meaning |
 | --- | --- |
-| P0 | Drop everything to fix. Blocking release, operations, or major usage. Only use for universal issues that do not depend on any assumptions about the inputs. |
-| P1 | Must fix before merge: a reachable case causes incorrect behaviour, exposure, data loss or a broken contract. |
-| P2 | Worth fixing, not blocking: a lesser defect, or risky logic with no test. |
-| P3 | Optional: a small speed-up or a shorter form. Keep brief. |
+| P0 | universal release blocker or critical failure. |
+| P1 | urgent defect that should be fixed next.|
+| P2 | ordinary defect that should be fixed.|
+| P3 | low-impact issue that is still worth fixing.|
 
 Evidence is **reproduced** (a command or experiment showed it) or **traced in code** (the execution path proves it). Keep checks you ran separate from checks you recommend.
 
@@ -54,9 +48,9 @@ Axis reviewers return candidates, not a report. Give each an ID (`tests-1`) plus
 
 Validate every candidate yourself against the code at head, using the flag gate and check-before-you-report. Merge duplicates by root cause, keeping every contributing ID. Filter with these:
 
-- **Nitpick gravity.** Reviewers tend to fill their review. If they don't find critical issues, they'll inflate nits to fill the space. If a reviewer's findings are all nits and style preferences, the code is probably fine. Say so.
+- **Nitpick gravity.** Reviewers tend to fill their review. If they don't find critical issues, they'll inflate nits to fill the space. If a reviewer's findings are all nits and style preferences, the code is probably fine.
 - **Hypothetical vs. actual.** "What if someone passes null here?" is only a finding if the caller can actually pass null. Trace the call site. If the input is validated upstream or the type system prevents it, dismiss the finding.
-- **"I would have done it differently."** This is the most common false positive in code review. A finding that amounts to "I prefer a different approach" is not a bug, not a design flaw, and not actionable unless the reviewer shows a concrete problem with the current approach. Dismiss these, and say why.
+- **"I would have done it differently."** This is a common false positive. A finding that amounts to "I prefer a different approach" is not a bug, not a design flaw, and not actionable unless the reviewer shows a concrete problem with the current approach. Dismiss these.
 - **Missing context.** Watch for findings on code the author didn't write or modify, and for patterns flagged that are consistent with the rest of the codebase.
 - **When reviewers are right.** Be especially careful about dismissing security findings and correctness bugs. These deserve more scrutiny even when they come from a single reviewer.
 
@@ -75,4 +69,4 @@ Done when every candidate is a finding, a review question or a dismissal, and ev
 
 Nothing found: `What this change does:`, then `Looks good. Ship.` and the coverage note. Missing coverage is never a clean review.
 
-Save the report to `.scratch/reviews/<YYYY-MM-DD>-<branch>-<head7>-<mode>.md` in the checkout the review was started from, creating the directory if needed. Take the branch from `git branch --show-current` (`detached` if empty), with `/` and other non-filename characters replaced by `-`. If the file exists, add the time before `.md`. Write it with bash, then return the same Markdown as your final message. If saving fails, say so and still return the report.
+Save the report to `.scratch/reviews/<branch>-<head7>-<mode>-<YYYY-MM-DD>.md` in the checkout the review was started from, creating the directory if needed. Take the branch from `git branch --show-current` (`detached` if empty), with `/` and other non-filename characters replaced by `-`. If the file exists, add the time before `.md`. Write it with bash, then return the same Markdown as your final message. If saving fails, say so and still return the report.

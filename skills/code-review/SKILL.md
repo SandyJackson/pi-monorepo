@@ -17,7 +17,7 @@ If you are the `code-reviewer` agent and your instruction carries pinned `base=`
 | `mode=full`, no axis | Review orchestrator | [orchestrator.md](orchestrator.md) |
 | `mode=quick` | Quick reviewer | [quick-reviewer.md](quick-reviewer.md) |
 
-Anyone else is the router: read [router.md](router.md). The router pins the target and dispatches a fresh reviewer; the agent that implemented a change never reviews it. For a final pass over your own work, use `self-review`.
+Anyone else is the router: read [router.md](router.md). If you just implemented the code yourself you **cannot** be the reviewer and must be the router. The router pins the target and dispatches a fresh reviewer; the agent that implemented a change never reviews it. For a final pass over your own work, use `self-review`.
 
 ## Understand first
 

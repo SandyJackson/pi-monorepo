@@ -33,7 +33,7 @@ Use the user's `quick` or `full`. Otherwise choose:
 - **quick** for documentation, configuration or a contained change in one area.
 - **full** for behaviour spanning modules, trust boundaries, persistence or concurrency.
 
-Risk outranks size: a one-line permissions change is full. When unsure, choose full. Tell the user the mode and why, and pass it as `reason=`.
+Risk outranks size. When unsure, choose full. Tell the user the mode and why, and pass it as `reason=`.
 
 ## 4. Dispatch
 
