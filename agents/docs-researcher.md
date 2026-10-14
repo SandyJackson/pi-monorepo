@@ -105,7 +105,7 @@ Structure your findings as:
 
 ## Quality Guidelines
 
-- **Deslop**: Talk like a human, use the /deslop skill
+- Use /unslop to remove AI tells from the written findings.
 - **Accuracy**: Always quote sources accurately and provide direct links
 - **Relevance**: Focus on information that directly addresses the user's query
 - **Currency**: Note publication dates and version information when relevant
