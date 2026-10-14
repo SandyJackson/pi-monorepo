@@ -1,66 +1,40 @@
-# Agent Discovery
+# Agent discovery
 
-Pi discovers agents from the `agents/` directory in the agent directory (typically `~/.config/pi/agent/agents/` or `~/.pi/agent/agents/`).
+The workspace's `herdr-subagent` extension discovers callable agents from the aggregate package's `agents/` directory, located relative to the extension. Installing the aggregate package makes these workspace agents available without copying them into Pi's user agent directory. Discovery from arbitrary installed packages is outside this extension's scope.
 
-## How Pi Discovers Agents
+## Precedence and trust
 
-1. Pi looks for `.md` files in the `agents/` directory
-2. Each `.md` file is parsed for YAML frontmatter containing:
-   - `description` - Agent description
-   - `display_name` - Display name
-   - `tools` - Tool allowlist
-   - `model` - Model override
-   - `extensions` - Required extensions
-3. The body of the markdown file is used as the system prompt
+When names collide, precedence is **project > user > workspace**:
 
-## Manual Copy Instructions
+- Project agents come from the nearest ancestor `.pi/agents/` directory containing valid definitions, starting at the parent session's working directory. They are available only when that project is trusted.
+- User agents come from `agents/` under Pi's agent directory, typically `~/.config/pi/agent/agents/`. They can override workspace agents.
+- Workspace agents come from this aggregate package's `agents/` directory.
 
-To use agents from this workspace in your Pi installation:
+Untrusted projects retain workspace and user agents. The callable agent catalog is a session-scoped snapshot. File changes take effect at the next session lifecycle refresh, such as `/reload`. A delegated task's working directory does not change the catalog.
 
-### Option 1: Copy Individual Agents
+Call `subagent` with no arguments to list the catalog. Listings and tool descriptions omit source labels and use the same definitions as delegation.
 
-```bash
-# Copy a specific agent
-cp /path/to/pi-monorepo/agents/code-reviewer.md ~/.config/pi/agent/agents/
+## Remove previously copied agents
 
-# Copy all agents
-cp /path/to/pi-monorepo/agents/*.md ~/.config/pi/agent/agents/
-```
+If you previously copied workspace agents into Pi's user agent directory, compare those files with this package's [`agents/`](../agents/) directory and delete the old copies from the user directory. Keep deliberately customised user agents that should override the package versions. Old copies otherwise continue to win over updated workspace agents.
 
-### Option 2: Symlink (for development)
+If the user agent directory is a symlink to this workspace's `agents/` directory, remove the symlink itself, preserving its target and any unrelated user agents. Then restart Pi or run `/reload` and call `subagent` with no arguments to verify discovery.
 
-```bash
-# Symlink the entire agents directory
-ln -sf /path/to/pi-monorepo/agents ~/.config/pi/agent/agents
-```
+## Agent file format
 
-### Option 3: Use Pi's Package System
-
-If using a Pi package, agents are discovered from the package's `agents/` directory.
-
-## Agent File Format
-
-Each agent file is a markdown file with YAML frontmatter:
+Discovery reads `.md` files with YAML frontmatter and a non-empty `description`. The name comes from `name`, or from the filename when `name` is absent. The body supplies the child's system prompt guidance.
 
 ```markdown
 ---
-description: Agent description
-display_name: Agent Name
+name: example
+description: Explain existing code
 tools: read, grep, find, ls, bash
-model: openai-codex/gpt-5.6-sol
-extensions:
-  - bash-permission
+model: provider/model
+thinking: high
+timeout: 90
 ---
 
-System prompt content goes here...
+Explain the requested code without editing it.
 ```
 
-## Available Agents
-
-| Agent | Description |
-|-------|-------------|
-| code-reviewer | Read-only code/PR review |
-| codebase-analyser | Explains how existing code works |
-| docs-researcher | Researches current documentation |
-| explain | Explains concepts and tradeoffs |
-| refactor | Refactors existing code for clarity |
+`tools` is an optional comma-separated string or YAML list of tool names. `model` is an optional model override. `thinking` is passed to visible subagents as `--thinking`; omit it to use Pi's default. `timeout` is an optional positive integer number of minutes setting the agent's default delegation timeout: the `subagent` call's `timeout` overrides it, an agent without one uses the 60-minute default, and an invalid value stops discovery with an error naming the file. See the package's [`agents/`](../agents/) directory for the available workspace definitions.

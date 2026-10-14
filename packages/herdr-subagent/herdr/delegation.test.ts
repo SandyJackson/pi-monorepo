@@ -699,4 +699,35 @@ describe("herdr/delegation — cancellation and timeout", () => {
     expect(results[0].outcome.status).toBe("completed");
     expect(startAttempts).toBe(3);
   });
+
+  it("applies each task's own timeout instead of the delegation default", async () => {
+    const herdr = createDelegatedHerdr({ splitPaneIds: ["pane-2"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const polls = recordRpc(herdr, "agent.get", (params) => ({
+      target: String(params.target),
+      at: Date.now(),
+    }));
+
+    // A delegation default far longer than either task's own timeout: a task
+    // that ignored its timeout would still be observing when this run ends.
+    const delegation = delegate(
+      herdr,
+      [
+        { ...taskRecord(1, "First"), timeoutMs: 1000 },
+        { ...taskRecord(2, "Second", "beta"), timeoutMs: 3000 },
+      ],
+      { rpc: polls.rpc, timeoutMs: 60_000 },
+    );
+    for (let i = 0; i < 80; i++) await vi.advanceTimersByTimeAsync(800);
+
+    const results = await delegation;
+    expect(results.map((result) => result.outcome.status)).toEqual(["timed_out", "timed_out"]);
+
+    // Both panes report "working" throughout, so each observation polls to its
+    // own deadline and stops there.
+    const pollsFor = (target: string) => polls.records.filter((record) => record.target === target);
+    const observedFor = (target: string) => pollsFor(target).at(-1)!.at - pollsFor(target)[0].at;
+    expect(observedFor("root-pane")).toBe(1000);
+    expect(observedFor("pane-2")).toBe(3000);
+  });
 });

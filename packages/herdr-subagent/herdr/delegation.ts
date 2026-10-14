@@ -16,7 +16,11 @@ import {
 // ---------------------------------------------------------------------------
 
 /** A delegated task carrying its canonical one-based delegation-scoped number. */
-export type DelegatedTaskRecord = DelegatedTask & { taskNumber: number };
+export type DelegatedTaskRecord = DelegatedTask & {
+  taskNumber: number;
+  /** Effective timeout for this task, overriding the delegation default. */
+  timeoutMs?: number;
+};
 
 /** The single terminal outcome of one delegated task, paired with its record. */
 export interface DelegatedTaskExecution {
@@ -322,7 +326,7 @@ export async function executeHerdrDelegation(
     // expected to resolve with an outcome, but a defect must not reject the
     // whole delegation.
     const promise = observeTurn({
-      timeoutMs,
+      timeoutMs: tasks[index].timeoutMs ?? timeoutMs,
       signal,
       onProgress: (line) => onProgress?.({ taskNumber, line }),
     })

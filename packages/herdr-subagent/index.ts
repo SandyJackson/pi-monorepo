@@ -4,7 +4,12 @@ import type {
   ExtensionContext,
   SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { discoverProjectAgents, discoverUserAgents, mergeAgentLists } from "./agents.ts";
+import {
+  discoverProjectAgents,
+  discoverUserAgents,
+  discoverWorkspaceAgents,
+  mergeAgentLists,
+} from "./agents.ts";
 import { executeHerdrDelegation, herdrDelegationEnvironment } from "./herdr/delegation.ts";
 import { DELEGATED_TASK_FILE_FLAG, DELEGATED_TASK_PLACEHOLDER } from "./herdr/session.ts";
 import { createSubagentTool } from "./subagent-tool.ts";
@@ -44,6 +49,7 @@ export default function (pi: ExtensionAPI): void {
     const agents = mergeAgentLists(
       discoverUserAgents(),
       includeProjectAgents ? discoverProjectAgents(parentCwd) : [],
+      discoverWorkspaceAgents(),
     );
 
     pi.registerTool(

@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentConfig } from "./agents.js";
+import { type AgentConfig, discoverProjectAgents } from "./agents.js";
 import type { DelegatedTaskOutcome } from "./herdr/session.js";
 import { createSubagentTool, type ExecuteDelegation } from "./subagent-tool.js";
 
@@ -16,10 +16,10 @@ const alphaAgent: AgentConfig = {
   filePath: "/agents/alpha.md",
 };
 
-function createTool() {
+function createTool(agents: AgentConfig[] = [alphaAgent]) {
   const executeDelegation = vi.fn<ExecuteDelegation>();
   const tool = createSubagentTool({
-    agents: [alphaAgent],
+    agents,
     parentCwd: "/parent",
     includeProjectAgents: false,
     executeDelegation,
@@ -47,6 +47,77 @@ async function withSessionFile(
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
+
+describe("agent frontmatter timeout", () => {
+  it.each(["0", "-1", "1.5", "nope", "true", "null", '"90"', "[]", "{}"])(
+    "rejects invalid timeout %s with the agent file and requirement",
+    async (timeout) => {
+      await withSessionFile([], async (sessionPath) => {
+        const root = path.dirname(sessionPath);
+        const agentsDir = path.join(root, ".pi", "agents");
+        fs.mkdirSync(agentsDir, { recursive: true });
+        const agentPath = path.join(agentsDir, "alpha.md");
+        fs.writeFileSync(
+          agentPath,
+          `---\nname: alpha\ndescription: Alpha\ntimeout: ${timeout}\n---\n`,
+        );
+        expect(() => discoverProjectAgents(root)).toThrow(
+          `${agentPath}: frontmatter \`timeout\` must be a positive integer number of minutes`,
+        );
+      });
+    },
+  );
+});
+
+describe("subagent timeout precedence", () => {
+  it.each([
+    { callTimeout: undefined, expectedMinutes: [90, 1, 60] },
+    { callTimeout: 2, expectedMinutes: [2, 2, 2] },
+  ])(
+    "uses call timeout $callTimeout before each agent default",
+    async ({ callTimeout, expectedMinutes }) => {
+      await withSessionFile([], async (sessionPath) => {
+        const root = path.dirname(sessionPath);
+        const agentsDir = path.join(root, ".pi", "agents");
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, "reviewer.md"),
+          "---\nname: reviewer\ndescription: Reviewer\ntimeout: 90\n---\n",
+        );
+        fs.writeFileSync(
+          path.join(agentsDir, "quick.md"),
+          "---\nname: quick\ndescription: Quick\ntimeout: 1\n---\n",
+        );
+        const { tool, executeDelegation } = createTool([
+          ...discoverProjectAgents(root),
+          alphaAgent,
+        ]);
+        executeDelegation.mockImplementation(async (tasks) =>
+          tasks.map((task) => ({
+            task,
+            outcome: { status: "timed_out", session },
+          })),
+        );
+
+        const result = await executeTool(tool, {
+          tasks: ["reviewer", "quick", "alpha"].map((agent) => ({ agent, instruction: "Review" })),
+          timeout: callTimeout,
+        });
+
+        expect(executeDelegation.mock.calls[0][0].map((task) => task.timeoutMs)).toEqual(
+          callTimeout === undefined ? [5_400_000, 60_000, 3_600_000] : [120_000, 120_000, 120_000],
+        );
+        const text = result.content[0].type === "text" ? result.content[0].text : "";
+        expectedMinutes.forEach((minutes, index) => {
+          const agent = ["reviewer", "quick", "alpha"][index];
+          expect(text).toContain(
+            `### Task ${index + 1} — ${agent} — timed out\n\nThe delegated turn timed out after ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`,
+          );
+        });
+      });
+    },
+  );
+});
 
 describe("subagent request schema", () => {
   it("accepts only the strict current request and task shape", () => {
@@ -372,9 +443,9 @@ describe("subagent task validation", () => {
         instruction: "Review",
         cwd: " ./raw cwd ",
         config: alphaAgent,
+        timeoutMs: 120_000,
       },
     ]);
-    expect(executeDelegation.mock.calls[0][1]).toMatchObject({ timeoutMs: 120_000 });
     expect(result.content[0]).toMatchObject({ type: "text" });
     const text = result.content[0].type === "text" ? result.content[0].text : "";
     expect(text).toContain("Delegation: 1/3 tasks completed");

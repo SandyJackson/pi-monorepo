@@ -66,72 +66,84 @@ async function launchAndObserve(
 }
 
 describe("herdr/session — launch invariants", () => {
-  it("preserves argv order and passes a long sanitized task through private startup input", async () => {
-    let capturedArgs: unknown = null;
-    const herdr = createScriptedHerdr((req) => {
-      const std = standardLaunchResponse(req);
-      if (std) return std;
-      if (req.method === "agent.start") {
-        capturedArgs = req.params;
-        return { result: { pane_id: "p1" } };
-      }
-      if (req.method === "agent.get") return { result: { agent: { agent_status: "working" } } };
-      return { result: {} };
-    });
+  it.each([undefined, "high"])(
+    "preserves argv order and passes a long sanitized task through private startup input with thinking %s",
+    async (thinking) => {
+      let capturedArgs: unknown = null;
+      const herdr = createScriptedHerdr((req) => {
+        const std = standardLaunchResponse(req);
+        if (std) return std;
+        if (req.method === "agent.start") {
+          capturedArgs = req.params;
+          return { result: { pane_id: "p1" } };
+        }
+        if (req.method === "agent.get") return { result: { agent: { agent_status: "working" } } };
+        return { result: {} };
+      });
 
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    const controller = new AbortController();
-    const taskWithControls = "--hello '世界'\n\t\x00world\x1f\x7f!".repeat(1000);
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: mirrors launch sanitization
-    const sanitizedTask = taskWithControls.replace(/[\x00-\x1f\x7f]/g, " ");
-    const session = launchAndObserve(
-      {
-        rpc: herdr.rpcCall,
-        targetPaneId: "target-pane",
-        task: {
-          agent: "alpha",
-          instruction: taskWithControls,
-          cwd: "/tmp/project",
-          config: {
-            name: "alpha",
-            systemPromptBody: "prompt body",
-            model: "openai/gpt-5",
-            tools: ["read", "write"],
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      const controller = new AbortController();
+      const taskWithControls = "--hello '世界'\n\t\x00world\x1f\x7f!".repeat(1000);
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: mirrors launch sanitization
+      const sanitizedTask = taskWithControls.replace(/[\x00-\x1f\x7f]/g, " ");
+      const session = launchAndObserve(
+        {
+          rpc: herdr.rpcCall,
+          targetPaneId: "target-pane",
+          task: {
+            agent: "alpha",
+            instruction: taskWithControls,
+            cwd: "/tmp/project",
+            config: {
+              name: "alpha",
+              systemPromptBody: "prompt body",
+              model: "openai/gpt-5",
+              thinking,
+              tools: ["read", "write"],
+            },
           },
+          signal: controller.signal,
         },
-        signal: controller.signal,
-      },
-      { timeoutMs: 2000 },
-    );
+        { timeoutMs: 2000 },
+      );
 
-    await vi.advanceTimersByTimeAsync(0);
-    expect(capturedArgs).toMatchObject({
-      name: expect.stringMatching(/^sa-/),
-      args: expect.arrayContaining(["--model", "openai/gpt-5", "--tools", "read,write"]),
-    });
-    const args = (capturedArgs as { args: string[] }).args;
-    // Order: --name label, --model ..., --tools ..., system prompt, task file, placeholder
-    const nameIdx = args.indexOf("--name");
-    const modelIdx = args.indexOf("--model");
-    const toolsIdx = args.indexOf("--tools");
-    const promptIdx = args.indexOf("--append-system-prompt");
-    const taskFlagIdx = args.indexOf(`--${DELEGATED_TASK_FILE_FLAG}`);
-    expect(nameIdx).toBeLessThan(modelIdx);
-    expect(modelIdx).toBeLessThan(toolsIdx);
-    expect(toolsIdx).toBeLessThan(promptIdx);
-    expect(promptIdx).toBeLessThan(taskFlagIdx);
-    const taskFile = taskFileFromArgs(args);
-    expect(fs.readFileSync(taskFile, "utf8")).toBe(sanitizedTask);
-    expect(path.dirname(taskFile)).toBe(path.dirname(args[promptIdx + 1]));
-    expect(args[taskFlagIdx + 2]).toBe(DELEGATED_TASK_PLACEHOLDER);
-    expect(Buffer.byteLength(args.join(" "))).toBeLessThan(800);
-    expect(args[promptIdx + 1]).toMatch(/pi-subagent-/);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(capturedArgs).toMatchObject({
+        name: expect.stringMatching(/^sa-/),
+        args: expect.arrayContaining(["--model", "openai/gpt-5", "--tools", "read,write"]),
+      });
+      const args = (capturedArgs as { args: string[] }).args;
+      // Order: name, model, optional thinking, tools, system prompt, task file, placeholder
+      const nameIdx = args.indexOf("--name");
+      const modelIdx = args.indexOf("--model");
+      const toolsIdx = args.indexOf("--tools");
+      const promptIdx = args.indexOf("--append-system-prompt");
+      const taskFlagIdx = args.indexOf(`--${DELEGATED_TASK_FILE_FLAG}`);
+      expect(nameIdx).toBeLessThan(modelIdx);
+      expect(modelIdx).toBeLessThan(toolsIdx);
+      if (thinking) {
+        const thinkingIdx = args.indexOf("--thinking");
+        expect(args[thinkingIdx + 1]).toBe("high");
+        expect(modelIdx).toBeLessThan(thinkingIdx);
+        expect(thinkingIdx).toBeLessThan(toolsIdx);
+      } else {
+        expect(args).not.toContain("--thinking");
+      }
+      expect(toolsIdx).toBeLessThan(promptIdx);
+      expect(promptIdx).toBeLessThan(taskFlagIdx);
+      const taskFile = taskFileFromArgs(args);
+      expect(fs.readFileSync(taskFile, "utf8")).toBe(sanitizedTask);
+      expect(path.dirname(taskFile)).toBe(path.dirname(args[promptIdx + 1]));
+      expect(args[taskFlagIdx + 2]).toBe(DELEGATED_TASK_PLACEHOLDER);
+      expect(Buffer.byteLength(args.join(" "))).toBeLessThan(800);
+      expect(args[promptIdx + 1]).toMatch(/pi-subagent-/);
 
-    controller.abort();
-    await session;
-    // Fire the pending prompt-fallback timer so teardown leaves nothing behind.
-    await vi.advanceTimersByTimeAsync(60_000);
-  });
+      controller.abort();
+      await session;
+      // Fire the pending prompt-fallback timer so teardown leaves nothing behind.
+      await vi.advanceTimersByTimeAsync(60_000);
+    },
+  );
 
   it("caps label at 32 and retries name collisions up to 100", async () => {
     let startCalls = 0;

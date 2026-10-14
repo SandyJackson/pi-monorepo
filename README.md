@@ -25,10 +25,6 @@ pnpm install
 pi install /absolute/path/to/pi-monorepo
 ```
 
-Agents need a manual copy:
-
-```bash
-cp /absolute/path/to/pi-monorepo/agents/*.md ~/.config/pi/agent/agents/
-```
+Workspace agents are discovered directly by herdr-subagent. If you previously copied them into Pi's user agent directory, follow [Remove previously copied agents](./docs/agent-discovery.md#remove-previously-copied-agents) so stale copies stop overriding the package versions.
 
 After changing code, run `pnpm install` if dependencies changed, then `/reload` in Pi to pick it up.

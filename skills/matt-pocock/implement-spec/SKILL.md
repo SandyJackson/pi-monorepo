@@ -33,7 +33,7 @@ Communication to and from subagents should be sparse. Communicate primarily thro
 
 6. If this changes the **frontier** of available tickets, kick off more **implementer subagents** to work on the new tickets. This allows for maximum concurrency.
 
-7. Once all tickets are complete, call the Skill tool with `code-review` on the integration branch. Fix all issues raised by the code review in a single **implementer subagent**.
+7. Once all tickets are complete, invoke the workspace `code-review` on the integration branch, passing `spec=<reference>` with the spec path or issue reference read in step 1. Follow the skill's argument format. Its router dispatches a fresh reviewer without asking the user for the spec. Fix actionable findings in a single **implementer subagent**. Done when the review has returned and actionable findings are fixed or reported unresolved; keep review questions and incomplete coverage visible.
 
 8. If a draft PR exists, mark it ready for review. Otherwise, resolve each ticket the way the issue tracker closes work, and report the integration branch.
 

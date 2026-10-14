@@ -27,6 +27,7 @@ export type DelegatedTaskOutcome =
 interface AgentConfigForSession {
   name: string;
   model?: string;
+  thinking?: string;
   tools?: string[];
   systemPromptBody: string;
 }
@@ -221,6 +222,7 @@ function createPromptLease(body: string, instruction: string): PromptLease {
 function buildAgentArguments(task: DelegatedTask, promptArgs: string[]): string[] {
   const argv: string[] = [];
   if (task.config.model) argv.push("--model", task.config.model);
+  if (task.config.thinking) argv.push("--thinking", task.config.thinking);
   if (task.config.tools !== undefined && task.config.tools.length > 0) {
     argv.push("--tools", task.config.tools.join(","));
   }

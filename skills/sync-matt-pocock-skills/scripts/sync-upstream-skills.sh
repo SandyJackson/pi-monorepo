@@ -50,6 +50,11 @@ trap 'rm -rf "$TMP"' EXIT
 git archive "$REMOTE/main" skills | tar -x -C "$TMP"
 UP="$TMP"
 
+# Workspace-owned review replaces this upstream skill.
+excluded_skill() {
+  [ "$1" = "code-review" ]
+}
+
 # Upstream skill name -> category dir (first match wins)
 category_for() {
   for cat in engineering productivity; do
@@ -76,6 +81,10 @@ if [ "$APPLY" = 1 ]; then
   fi
 
   for s in "${todo[@]}"; do
+    if excluded_skill "$s"; then
+      echo "skip $s: workspace-owned skill"
+      continue
+    fi
     cat=$(category_for "$s") || { echo "skip $s: not found upstream" >&2; continue; }
     rm -rf "$TARGET/$s"
     mkdir -p "$TARGET/$s"
@@ -86,6 +95,7 @@ if [ "$APPLY" = 1 ]; then
   # Full mirror: drop local skills that no longer exist upstream.
   if [ "${#SELECTED[@]}" -eq 0 ]; then
     for s in "${LOCAL_SKILLS[@]}"; do
+      excluded_skill "$s" && continue
       if ! category_for "$s" >/dev/null; then
         echo "removed $TARGET/$s (dropped upstream)"
         rm -rf "$TARGET/$s"
@@ -113,6 +123,7 @@ changed=0; added_new=0; same=0
 
 echo "## Changed" >> "$summary"
 for s in "${UPSTREAM_SKILLS[@]}"; do
+  excluded_skill "$s" && continue
   cat=$(category_for "$s")
   if ! git cat-file -e "HEAD:$TARGET/$s/SKILL.md" 2>/dev/null; then
     echo "- **$s** (upstream \`skills/$cat/$s\`) — NEW, not in local repo" >> "$summary"
@@ -140,6 +151,7 @@ echo >> "$summary"
 echo "## Local-only (no upstream counterpart — leave alone unless the user says otherwise)" >> "$summary"
 local_only=0
 for s in "${LOCAL_SKILLS[@]}"; do
+  excluded_skill "$s" && continue
   if ! category_for "$s" >/dev/null; then
     echo "- $s" >> "$summary"
     local_only=$((local_only + 1))
@@ -151,6 +163,7 @@ echo >> "$summary"
 echo "## Up to date" >> "$summary"
 [ "$same" -eq 0 ] && echo "- (none)" >> "$summary"
 for s in "${UPSTREAM_SKILLS[@]}"; do
+  excluded_skill "$s" && continue
   cat=$(category_for "$s")
   if git cat-file -e "HEAD:$TARGET/$s/SKILL.md" 2>/dev/null; then
     n=$(git diff "HEAD:$TARGET/$s" "$REMOTE/main:skills/$cat/$s" -- . ':(exclude)agents' \

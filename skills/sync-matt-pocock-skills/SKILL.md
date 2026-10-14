@@ -1,6 +1,6 @@
 ---
 name: sync-matt-pocock-skills
-description: Review and adopt updates from mattpocock/skills into skills/matt-pocock — fetch, diff each skill, summarize changes with pros/cons and a recommendation, then adopt only what the user approves.
+description: Review upstream Matt Pocock skill updates and adopt the approved changes.
 disable-model-invocation: true
 ---
 
@@ -8,14 +8,14 @@ disable-model-invocation: true
 
 Check `skills/matt-pocock/` against its upstream (`mattpocock/skills`), report what changed, adopt what the user approves. The script does the mechanical work; the review and every adoption decision are yours and the user's.
 
-The directory is a **mirror**: its content should match upstream exactly, so the next review diffs clean. Skills you write yourself live at `skills/<name>`, never inside the mirror.
+The directory mirrors upstream content so the next review diffs clean. Workspace-owned skills live at `skills/<name>`. The upstream `code-review` is excluded from review proposals and every apply mode, including named `--apply code-review` and full `--apply`. Use the workspace-owned `code-review` and `self-review` instead. [ADR-0009](../../docs/adr/0009-workspace-owned-code-review.md) records this exception to the mirror policy.
 
 ## The script
 
 `scripts/sync-upstream-skills.sh` (run from the repo root; it maps upstream `skills/engineering|productivity/<skill>` to local `skills/matt-pocock/<skill>`):
 
 - **Review mode** (no args): fetches the upstream remote and writes `.scratch/skills-sync/` — `SUMMARY.md` (per-skill: changed with +added/−removed counts, new upstream, local-only, up to date) plus one diff file per changed skill. New upstream skills get their `SKILL.md` as `<skill>.new.md`. Touches nothing else.
-- **`--apply [skill ...]`**: mirrors the named skills from upstream. With no names, mirrors everything and deletes local skills upstream dropped. Stages nothing; you commit.
+- **`--apply [skill ...]`**: mirrors the named skills from upstream. With no names, mirrors all eligible skills and deletes eligible local skills upstream dropped. Stages nothing; you commit.
 
 Both modes refuse to run with uncommitted changes under `skills/matt-pocock/`. Commit or stash first.
 
@@ -25,7 +25,7 @@ Both modes refuse to run with uncommitted changes under `skills/matt-pocock/`. C
 
 Run the script in review mode.
 
-Done when: `SUMMARY.md` exists and accounts for every upstream skill as changed, new, local-only, or up to date.
+Done when: `SUMMARY.md` exists and accounts for every eligible skill as changed, new, local-only, or up to date.
 
 ### 2. Read and classify
 

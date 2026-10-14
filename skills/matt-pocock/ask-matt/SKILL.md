@@ -25,7 +25,9 @@ The route most work travels. You have an idea and want it built.
      - **`/implement-spec`** for the whole spec in one run. It reads the tickets as a **task graph**, runs implementer subagents across the ready **frontier** in parallel, and lands everything on one **integration branch**. Reach for it when you'd rather orchestrate the build than drive each ticket yourself.
    - **No** → **`/implement`** right here, in the same context window.
 
-   Either way, the code gets built by driving **`/tdd`** (one red-green slice at a time) and closes out with **`/code-review`**, a two-axis review (Standards + Spec) of the diff. `/implement` runs both per ticket; `/implement-spec`'s implementers each drive `/tdd`, and it runs one `/code-review` over the integration branch. Reach for **`/tdd`** on its own when you just want to build a concrete behaviour test-first without a full spec, and **`/code-review`** on its own whenever you want to review a branch or PR against a fixed point.
+   Build with **`/tdd`**, one red-green slice at a time, then run **`/self-review`** in the implementing agent's context to check and fix its own changes. `/implement` uses both per ticket. `/implement-spec`'s implementers drive `/tdd` and self-review, then the orchestrator invokes **`/code-review`** over the integration branch with its spec reference.
+
+   For independent, read-only review by a fresh agent, use **`/code-review`** or **`/review`**. Quick mode uses one reviewer for all relevant axes; full mode delegates axes and validates their findings. Choose a mode explicitly or let the router choose from the change's size and risk. Reach for **`/tdd`** alone for a concrete behaviour test-first, **`/self-review`** for cleanup before reporting done, or **`/code-review`** for independent review of a branch or commit range.
 
    When the work goes up as a pull request, **`/pr`** shapes the body: the smallest visual that shows the change, before/after evidence that it works, and a one-way or two-way door call. It's model-invoked, so the agent reaches for it whenever it writes a PR.
 
