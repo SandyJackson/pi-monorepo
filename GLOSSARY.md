@@ -68,6 +68,39 @@ A named Pi session performing implementation or review for a loop run. It is dis
 
 **Loop skill**:
 A skill vendored in the loop's curated directory and selectable by short name. It is distinct from workspace and user skills loaded through Pi discovery.
+
+## Code review
+
+**Self-review**:
+The implementing agent's check of its own change, including cleanup and fixes. It is distinct from independent code review.
+
+**Code review**:
+An independent, read-only examination of a change by a fresh agent that did not implement it. It produces findings, questions and coverage, and is distinct from the issue loop's ticket-acceptance review.
+
+**Review mode**:
+The review's allocation of work. Quick uses one reviewer for all relevant axes; full uses an orchestrator and separate axis reviewers.
+
+**Review target**:
+The pinned base and head commits whose final comparison is reviewed. An explicitly requested uncommitted review is a live checkout delta, identified as an exception to the pinned target.
+
+**Review axis**:
+One review perspective with a shared method: correctness and requirements, security and resilience, design and maintainability, or tests and verification.
+
+**Review orchestrator**:
+The full-mode reviewer that delegates axes, validates their candidates and synthesises the final report.
+
+**Axis reviewer**:
+A reviewer assigned one axis that returns candidates without further delegation.
+
+**Finding**:
+A discrete, actionable defect introduced by the change that passes the flag gate and validation. It carries a consequence-based priority and reproduced or code-traced evidence.
+
+**Review question**:
+An unresolved concern or request for context, kept separate from findings because its evidence is unverified.
+
+**Coverage note**:
+The report's record of the target, mode, axes, checks and limits, including skipped or incomplete work and its reasons.
+
 ## Worktree switching
 
 **Worktrunk extension**:

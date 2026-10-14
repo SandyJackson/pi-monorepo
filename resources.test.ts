@@ -1,9 +1,25 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { loadSkills, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 const ROOT = import.meta.dirname;
+const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
+
+it("ships prompt templates through the aggregate package", () => {
+  expect(manifest.pi.prompts).toEqual(["./prompts"]);
+});
+
+it("resolves code-review to the workspace skill while the mirror remains", () => {
+  const { skills } = loadSkills({
+    cwd: ROOT,
+    skillPaths: manifest.pi.skills,
+    includeDefaults: false,
+  });
+  expect(skills.find((skill) => skill.name === "code-review")?.filePath).toBe(
+    path.join(ROOT, "skills/code-review/SKILL.md"),
+  );
+});
 
 function findSkillFiles(directory: string): string[] {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -15,6 +31,13 @@ function findSkillFiles(directory: string): string[] {
 }
 
 const skills = findSkillFiles(path.join(ROOT, "skills"));
+const promptsDirectory = path.join(ROOT, "prompts");
+const prompts = fs.existsSync(promptsDirectory)
+  ? fs
+      .readdirSync(promptsDirectory)
+      .filter((name) => !name.startsWith(".") && name.endsWith(".md"))
+      .map((name) => path.join(promptsDirectory, name))
+  : [];
 const agents = fs
   .readdirSync(path.join(ROOT, "agents"))
   .filter((name) => !name.startsWith(".") && name.endsWith(".md"))
@@ -23,6 +46,7 @@ const agents = fs
 for (const [kind, files] of [
   ["Skills", skills],
   ["Agents", agents],
+  ["Prompt templates", prompts],
 ] as const) {
   describe(`${kind} inventory`, () => {
     it("discovers resources", () => {
