@@ -33,20 +33,20 @@ Finish with one reference or `none`; awaiting a user answer is not permission to
 
 ## 3. Choose the mode
 
-Accept an explicit mode. Otherwise inspect the change's file list, size and commit descriptions: choose quick for documentation, configuration or a contained low-risk change in one area; choose full for behaviour spanning modules, trust boundaries, persistence or concurrency. Record the reason as `mode_reason=` and announce the choice.
+Accept an explicit quick or full mode and record that it was requested. Otherwise inspect the change's file list, diff size and commit descriptions, including untracked files for live review. Recommend and choose quick for small, low-risk documentation, configuration or contained single-area changes. Choose full for behaviour spanning modules, trust boundaries, persistence or concurrency. Risk takes precedence over line count; configuration that changes permissions is not automatically low-risk. If metadata leaves the risk unclear, choose full and state that uncertainty.
 
-Full mode and `axis=` delegation are reserved for #47. If selected, stop before dispatch and offer an explicit quick review with its coverage limits. Continue only if the user chooses quick; do not silently downgrade.
+Record a target-specific reason as `mode_reason=` and announce the choice. Finish when mode and reason are recorded; a recommendation needs no extra confirmation.
 
 ## 4. Dispatch
 
 Use the harness's delegation facility to start one fresh `code-reviewer`, with the invoking checkout as its working directory and no implementing conversation carried into it. Its instruction must begin with the skill invocation on one line:
 
 ```text
-/skill:code-review mode=quick base=<base-id> head=<head-id> spec=<encoded-reference> uncommitted=false checkout=<encoded-absolute-path> branch=<encoded-label> mode_reason=<encoded-reason>
+/skill:code-review mode=<quick-or-full> base=<base-id> head=<head-id> spec=<encoded-reference> uncommitted=false checkout=<encoded-absolute-path> branch=<encoded-label> mode_reason=<encoded-reason>
 ```
 
 For live review, change `uncommitted` to true. Use the agent definition's model, thinking level and default timeout. Wait for its report and return it with the saved path. If dispatch fails or times out, report that independent review did not complete, rather than reviewing the code yourself.
 
-Where subagents are unavailable, give the user the resolved instruction and ask them to run it in a fresh reviewer session with the `code-reviewer` definition and this skill loaded. Where only nested subagents are unavailable, this router can still delegate a quick reviewer because quick never dispatches. #47 will let full orchestration run in the invoking session in that environment.
+Where subagents are unavailable, give the user the resolved instruction and ask them to run it in a fresh reviewer session with the `code-reviewer` definition and this skill loaded, using a harness that supports axis delegation for full mode. Where only nested subagents are unavailable, delegate quick mode normally. For full mode, finish routing here and read [orchestrator.md](orchestrator.md) in this invoking session with the resolved arguments. Use the `code-reviewer` definition's model, thinking level and timeout budget for orchestration and dispatch fresh axis reviewers directly. State this fallback in coverage; prior implementation knowledge is not evidence for a finding.
 
 Finish when the reviewer has returned a report or the dispatch failure has been reported. Publication, approval and merging remain the user's decisions.
