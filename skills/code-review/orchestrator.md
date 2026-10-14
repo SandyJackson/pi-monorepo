@@ -6,7 +6,7 @@ Run a full review: dispatch one axis reviewer per selected axis, then validate t
 2. **Dispatch.** Start one fresh `code-reviewer` per selected axis, all in parallel, each with the review worktree as its working directory (the user's checkout for `uncommitted=true`). Pass your arguments unchanged plus `axis=<name>` and `review_worktree=<path>`, on one line:
 
    ```text
-   /skill:code-review mode=full base=<base> head=<head> spec=<spec> reason="<reason>" axis=<name> review_worktree=<path>
+   /skill:code-review mode=full base=<base> head=<head> spec="<spec>" reason="<reason>" axis=<name> review_worktree=<path>
    ```
 
    Give each a timeout of a third of your own (30 minutes against the default 90) to leave time for synthesis. Record each axis as finished, failed or timed out; use partial results, marked partial. A failed axis leaves the review incomplete, not failed.

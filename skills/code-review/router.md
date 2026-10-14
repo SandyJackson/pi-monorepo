@@ -40,7 +40,7 @@ Risk outranks size. When unsure, choose full. Tell the user the mode and why, an
 Start one fresh `code-reviewer` with this checkout as its working directory and nothing from your conversation. The instruction is one line, starting:
 
 ```text
-/skill:code-review mode=<mode> base=<base> head=<head> spec=<spec> reason="<reason>"
+/skill:code-review mode=<mode> base=<base> head=<head> spec="<spec>" reason="<reason>"
 ```
 
 Add `uncommitted=true` when it applies. Wait for the report and return it with its saved path. If the reviewer fails or times out, say the independent review did not complete.
