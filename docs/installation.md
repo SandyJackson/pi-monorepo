@@ -81,22 +81,9 @@ pi install npm:pi-web-access
 
 ## Agent Setup
 
-Pi discovers agents from the `agents/` directory in the agent config directory
-(typically `~/.config/pi/agent/agents/`).
+Installing the aggregate package makes workspace agents callable through `herdr-subagent` directly from the package. No copy step is required.
 
-Workspace agents must be manually copied into that directory:
-
-```bash
-# Copy all agents from the workspace
-cp /path/to/pi-monorepo/agents/*.md ~/.config/pi/agent/agents/
-
-# Or copy a specific agent
-cp /path/to/pi-monorepo/agents/code-reviewer.md ~/.config/pi/agent/agents/
-```
-
-After copying, restart Pi or run `/reload` to pick up new agents.
-
-See [agent-discovery.md](./agent-discovery.md) for details on the agent file format and discovery mechanism.
+For migration from manually copied agents, follow [Remove previously copied agents](./agent-discovery.md#remove-previously-copied-agents). Delete those stale copies from Pi's user agent directory or they will keep overriding the package versions. That guide also covers deliberate user overrides and directory symlinks.
 
 ## Package Manager Configuration
 
@@ -116,7 +103,7 @@ The workspace exposes these resources through its `package.json`:
 |---|---|---|
 | Extensions | `pi.extensions` array | 5 child packages (bash-permission, herdr-subagent, herdr-bridge, session-auto-name, herdr-contract) |
 | Skills | `pi.skills` array | `skills/` directory with 23 skills |
-| Agents | `agents/` directory | 5 agent markdown files (manual copy required) |
+| Agents | `agents/` directory | Workspace definitions discovered by herdr-subagent |
 | Documentation | `docs/` directory | Bash policy, agent discovery, installation guide |
 
 ## Cutover from Old Runtime
@@ -124,7 +111,7 @@ The workspace exposes these resources through its `package.json`:
 If migrating from a previous dotfiles-based installation:
 
 1. **Install the workspace** using one of the methods above
-2. **Copy agents** to `~/.config/pi/agent/agents/`
+2. Follow [Remove previously copied agents](./agent-discovery.md#remove-previously-copied-agents) to remove stale workspace copies from the user agent directory.
 3. **Remove migrated resources** from the old location:
    - Delete `~/.config/pi/agent/extensions/bash-permission/`
    - Delete `~/.config/pi/agent/extensions/herdr-subagent/`

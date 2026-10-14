@@ -97,7 +97,7 @@ A Pi installation that loads the Pi workspace from a local working tree so sourc
 A Pi installation created from the workspace's GitHub package source, allowing a new machine to clone, install, and update the Pi resources through Pi's package manager.
 
 **Workspace agent**:
-An agent definition owned by the Pi workspace and synchronized into Pi's existing global agent directory for runtime discovery. It is distinct from project-local agents; when names collide, project agents override workspace agents, which override user agents.
+An agent definition owned by the Pi workspace and discovered directly from the aggregate package. It is distinct from user and project-local agents; when names collide, precedence is project > user > workspace.
 
 **Callable agent catalog**:
-The session-scoped snapshot of agent definitions available for subagent delegation. It combines global discovery with trusted project-local overrides and refreshes with Pi's session lifecycle.
+The session-scoped snapshot of agent definitions available for subagent delegation. It combines workspace and user agents with trusted project-local overrides and refreshes with Pi's session lifecycle.

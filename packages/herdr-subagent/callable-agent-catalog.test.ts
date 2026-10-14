@@ -9,7 +9,12 @@ import type {
   SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { discoverProjectAgents, discoverUserAgents, mergeAgentLists } from "./agents.js";
+import {
+  discoverProjectAgents,
+  discoverUserAgents,
+  discoverWorkspaceAgents,
+  mergeAgentLists,
+} from "./agents.js";
 import { DELEGATED_TASK_FILE_FLAG, DELEGATED_TASK_PLACEHOLDER } from "./herdr/session.js";
 import extension from "./index.js";
 
@@ -145,8 +150,11 @@ async function executeTool(
 }
 
 describe("agent discovery", () => {
-  it("preserves parsing, nearest-project traversal, and project precedence", () => {
+  it("preserves parsing and nearest-project traversal with project > user > workspace precedence", () => {
     writeAgent(userAgentsDir, "shared.md", "shared", "user definition");
+    writeAgent(userAgentsDir, "reviewer.md", "code-reviewer", "user reviewer");
+    writeAgent(projectAgentsDir, "reviewer.md", "code-reviewer", "project reviewer");
+    writeAgent(userAgentsDir, "explain.md", "explain", "user explainer");
     writeAgent(userAgentsDir, "uppercase.md", "Shared", "case-sensitive definition");
     writeAgent(userAgentsDir, "user.md", "user", "user only");
     fs.writeFileSync(path.join(userAgentsDir, "malformed.md"), "---\nname: malformed\n");
@@ -169,14 +177,31 @@ describe("agent discovery", () => {
     // Deterministic unreadable-file fixture: only unreadable.md rejects reads
     // with an EACCES-like error; every other path goes to the real fs.
     unreadableFixture.path = path.resolve(unreadablePath);
-    const merged = mergeAgentLists(discoverUserAgents(), discoverProjectAgents(nestedDir));
+    const workspaceAgents = discoverWorkspaceAgents();
+    expect(workspaceAgents.find(({ name }) => name === "code-reviewer")).toMatchObject({
+      source: "workspace",
+      filePath: path.resolve(import.meta.dirname, "../../agents/code-reviewer.md"),
+    });
+    const merged = mergeAgentLists(
+      discoverUserAgents(),
+      discoverProjectAgents(nestedDir),
+      workspaceAgents,
+    );
     unreadableFixture.path = null;
 
-    expect(merged.map(({ name }) => name).sort()).toEqual(
-      ["configured", "shared", "Shared", "user"].sort(),
-    );
+    expect(
+      merged
+        .filter(({ source }) => source !== "workspace")
+        .map(({ name }) => name)
+        .sort(),
+    ).toEqual(["code-reviewer", "explain", "configured", "shared", "Shared", "user"].sort());
     expect(merged.some(({ name }) => name === "unreadable")).toBe(false);
     expect(merged.find(({ name }) => name === "shared")?.description).toBe("project definition");
+    expect(merged.find(({ name }) => name === "code-reviewer")?.description).toBe(
+      "project reviewer",
+    );
+    expect(merged.find(({ name }) => name === "explain")?.description).toBe("user explainer");
+    expect(merged.find(({ name }) => name === "codebase-analyser")?.source).toBe("workspace");
     expect(merged.find(({ name }) => name === "configured")).toMatchObject({
       tools: ["read", "bash"],
       model: "provider/model",
@@ -295,15 +320,33 @@ describe("callable agent catalog lifecycle", () => {
   it("never exposes project agents when the project is untrusted", async () => {
     writeAgent(userAgentsDir, "user.md", "user", "global definition");
     writeAgent(projectAgentsDir, "project.md", "project", "local definition");
+    writeAgent(userAgentsDir, "reviewer.md", "code-reviewer", "user reviewer");
+    writeAgent(projectAgentsDir, "reviewer.md", "code-reviewer", "project reviewer");
     const harness = createExtensionHarness(false);
     harness.startSession();
     const tool = harness.tools.at(-1);
     if (!tool) throw new Error("subagent tool was not registered");
 
     expect(tool.description).toContain("user — global definition");
+    expect(tool.description).toContain("codebase-analyser —");
+    expect(tool.description).toContain("code-reviewer — user reviewer");
+    expect(tool.description).not.toContain("project reviewer");
     expect(tool.description).not.toContain("project — local definition");
     const listing = await executeTool(tool, {});
     expect(listing.content[0].text).toContain("user — global definition");
+    expect(listing.content[0].text).toContain("codebase-analyser —");
+    expect(listing.content[0].text).toContain("code-reviewer — user reviewer");
+    expect(listing.content[0].text).not.toContain("project reviewer");
+    const herdrEnv = process.env.HERDR_ENV;
+    delete process.env.HERDR_ENV;
+    try {
+      await expect(
+        executeTool(tool, { tasks: [{ agent: "codebase-analyser", instruction: "Explain" }] }),
+      ).rejects.toThrow("requires this pi to run inside Herdr");
+    } finally {
+      if (herdrEnv === undefined) delete process.env.HERDR_ENV;
+      else process.env.HERDR_ENV = herdrEnv;
+    }
     expect(listing.content[0].text).not.toContain("project — local definition");
   });
 });

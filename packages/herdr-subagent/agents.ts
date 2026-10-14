@@ -1,8 +1,8 @@
 /**
  * agents.ts — Agent discovery and frontmatter parsing for herdr-subagent.
  *
- * Discovers user-level agents from Pi's agent directory and, when scope
- * permits, project-level agents from `.pi/agents/` walking up from cwd.
+ * Discovers workspace agents from the aggregate package, user agents from
+ * Pi's agent directory, and trusted project agents from `.pi/agents/`.
  *
  * Uses Pi's built-in `parseFrontmatter` for correct YAML frontmatter parsing.
  */
@@ -128,8 +128,8 @@ export interface AgentConfig {
   timeout?: number;
   /** Body text after frontmatter (appended as system prompt in child pane). */
   systemPromptBody: string;
-  /** Whether the agent was loaded from the user or project directory. */
-  source: "user" | "project";
+  /** Whether the agent was loaded from the workspace, user, or project directory. */
+  source: "workspace" | "user" | "project";
   /** Absolute path to the directory containing the agent file. */
   sourceDir: string;
   /** Absolute path to the agent file. */
@@ -143,7 +143,7 @@ export interface AgentConfig {
 const AGENTS_DIR_NAME = "agents";
 
 /** Load agent definitions from a single directory. */
-function loadFromDir(dirPath: string, source: "user" | "project"): AgentConfig[] {
+function loadFromDir(dirPath: string, source: AgentConfig["source"]): AgentConfig[] {
   const agents: AgentConfig[] = [];
 
   let entries: string[];
@@ -217,6 +217,11 @@ function isDirectory(p: string): boolean {
 // Public API
 // ---------------------------------------------------------------------------
 
+/** Discover workspace agents bundled in the aggregate package containing this extension. */
+export function discoverWorkspaceAgents(): AgentConfig[] {
+  return loadFromDir(path.resolve(import.meta.dirname, "../../agents"), "workspace");
+}
+
 /**
  * Discover user-level agents from Pi's global agent directory
  * (`~/.config/pi/agent/agents/`).
@@ -277,14 +282,16 @@ export function resolveAgent(
 }
 
 /**
- * Merge user and project agent lists, with project agents overriding user
- * agents of the same name. Returns a flat, de-duplicated array.
+ * Merge agent lists with project > user > workspace precedence.
+ * Returns a flat, de-duplicated array.
  */
 export function mergeAgentLists(
   userAgents: AgentConfig[],
   projectAgents: AgentConfig[],
+  workspaceAgents: AgentConfig[] = [],
 ): AgentConfig[] {
   const map = new Map<string, AgentConfig>();
+  for (const agent of workspaceAgents) map.set(agent.name, agent);
   for (const agent of userAgents) map.set(agent.name, agent);
   for (const agent of projectAgents) map.set(agent.name, agent);
   return Array.from(map.values()).sort((leftAgent, rightAgent) =>
