@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { command } from "./process.ts";
+import { command, git } from "./process.ts";
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
 
@@ -134,4 +134,36 @@ it("escalates a stubborn timed-out command to SIGKILL using virtual time", async
   await stopped;
   expect(kill).toHaveBeenNthCalledWith(2, -child.pid, "SIGKILL");
   expect(vi.getTimerCount()).toBe(0);
+});
+
+it("git keeps a supplied deadline longer than the 60 second default", async () => {
+  const child = runningChild();
+  const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+    if (signal === 0) throw Object.assign(new Error("No such process"), { code: "ESRCH" });
+    queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+    return true;
+  });
+  const stopped = expect(git({ cwd: ".", timeoutMs: 120_000 }, "status")).rejects.toMatchObject({
+    name: "CommandStoppedError",
+    message: "Timed out running git\n",
+  });
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(kill).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(60_000);
+  await stopped;
+  expect(kill).toHaveBeenCalledWith(-child.pid, "SIGTERM");
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("git passes a string directory as the working directory with the default deadline", async () => {
+  const child = runningChild();
+  vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+    if (signal === 0) throw Object.assign(new Error("No such process"), { code: "ESRCH" });
+    return true;
+  });
+  const result = git("/repo", "rev-parse", "HEAD");
+  child.stdout.write("abc\n");
+  child.emit("close", 0, null);
+  await expect(result).resolves.toBe("abc");
+  expect(vi.mocked(spawn).mock.calls[0]?.[2]).toMatchObject({ cwd: "/repo" });
 });

@@ -22,7 +22,7 @@ import {
   type WorkCommit,
 } from "./artifact.ts";
 import { getIssue, gh, githubHostFromOrigin } from "./github.ts";
-import { command, git, originUrl } from "./process.ts";
+import { type CommandContext, command, git, originUrl } from "./process.ts";
 import {
   type Finding,
   type HookStop,
@@ -101,10 +101,19 @@ function requirements(state: RunState, ticket?: Ticket, includeFeedback = true):
   ].join("\n\n");
 }
 
+/**
+ * Controller Git/GitHub context for a state-owned worktree or source repository.
+ * Every such command carries the run's snapshotted `deadlines.gitMs`, so steering
+ * cannot extend it and resume uses the original allowance.
+ */
+function gitContext(state: RunState, cwd: string = state.worktree): CommandContext {
+  return { cwd, timeoutMs: state.settings.deadlines.gitMs };
+}
+
 async function unchangedHead(state: RunState, expected: string): Promise<void> {
   if (
-    (await git(state.worktree, "branch", "--show-current")) !== state.branch ||
-    (await git(state.worktree, "rev-parse", "HEAD")) !== expected
+    (await git(gitContext(state), "branch", "--show-current")) !== state.branch ||
+    (await git(gitContext(state), "rev-parse", "HEAD")) !== expected
   ) {
     throw new Error(
       "Branch or HEAD changed outside the controller. Work is preserved; inspect before resuming",
@@ -118,7 +127,7 @@ async function unchangedHead(state: RunState, expected: string): Promise<void> {
  */
 async function recordStoppedWork(state: RunState, ticket?: Ticket): Promise<void> {
   try {
-    const snapshot = await artifactSnapshot(state.worktree);
+    const snapshot = await artifactSnapshot(gitContext(state));
     if (ticket) {
       ticket.stoppedTree = snapshot.worktree;
       ticket.resumeArtifact = identityOf(snapshot);
@@ -177,9 +186,9 @@ function newConversationPath(
 }
 
 /** The preserved tree for a hook outcome, or undefined when it cannot be read. */
-async function hookStopFor(worktree: string, reason: string): Promise<HookStop | undefined> {
+async function hookStopFor(context: CommandContext, reason: string): Promise<HookStop | undefined> {
   try {
-    return { reason, tree: await contentTree(worktree) };
+    return { reason, tree: await contentTree(context) };
   } catch {
     // Without a recorded identity, resume cannot attribute the leftovers; the
     // caller still fails safely and retains reconciliation state.
@@ -202,10 +211,10 @@ function applyHookStop(state: RunState, ticket: Ticket | undefined, stop: HookSt
 async function unresolvedHookStop(state: RunState, ticket?: Ticket): Promise<string | undefined> {
   const stop = ticket ? ticket.hookStop : state.hookStop;
   if (!stop) return undefined;
-  const tree = await contentTree(state.worktree);
+  const tree = await contentTree(gitContext(state));
   // Resolved once nothing is pending, or a manual fix/new editing phase changed
   // the preserved content. Otherwise the leftovers stay refused.
-  if ((await git(state.worktree, "status", "--porcelain")) === "" || tree !== stop.tree) {
+  if ((await git(gitContext(state), "status", "--porcelain")) === "" || tree !== stop.tree) {
     if (ticket) ticket.hookStop = undefined;
     else state.hookStop = undefined;
     save(state);
@@ -223,10 +232,10 @@ async function unresolvedHookStop(state: RunState, ticket?: Ticket): Promise<str
  * that ran before it reported complete.
  */
 async function canCommitWork(state: RunState, ticket?: Ticket): Promise<boolean> {
-  const tree = await contentTree(state.worktree);
+  const tree = await contentTree(gitContext(state));
   const stop = ticket ? ticket.hookStop : state.hookStop;
   if (stop && tree === stop.tree) return false;
-  if (tree === (await git(state.worktree, "rev-parse", "HEAD^{tree}"))) return true;
+  if (tree === (await git(gitContext(state), "rev-parse", "HEAD^{tree}"))) return true;
   const latest = latestEditingSession(state, ticket);
   if (!latest || latest.outcome === "complete") return true;
   const stopped = ticket ? ticket.stoppedTree : state.stoppedTree;
@@ -290,7 +299,7 @@ async function runPhaseTask(state: RunState, options: PhaseTaskOptions): Promise
   state.sessions.push(session);
   save(state);
   console.log(session.name);
-  const head = await git(state.worktree, "rev-parse", "HEAD");
+  const head = await git(gitContext(state), "rev-parse", "HEAD");
   const args = [
     "--mode",
     "rpc",
@@ -473,7 +482,7 @@ async function finishEditing(
 ): Promise<void> {
   if (outcome.outcome === "complete") {
     if (kind === "repair") {
-      const after = await contentTree(state.worktree);
+      const after = await contentTree(gitContext(state));
       ticket.retraction = after === before ? outcome.summary : undefined;
       ticket.repairNote = appendNote(ticket.repairNote, outcome.summary);
     }
@@ -482,7 +491,7 @@ async function finishEditing(
     ticket.reviewAttempt = undefined;
     ticket.audit = undefined;
     ticket.stoppedTree = undefined;
-    ticket.resumeArtifact = identityOf(await artifactSnapshot(state.worktree));
+    ticket.resumeArtifact = identityOf(await artifactSnapshot(gitContext(state)));
     ticket.reviewOnCheckFailure = undefined;
     save(state);
     return;
@@ -508,7 +517,7 @@ async function editingPhase(
     throw new Error(`Ticket #${ticket.number} has no editing conversation to resume`);
   ticket.phase = kind;
   save(state);
-  const before = kind === "repair" ? await contentTree(state.worktree) : undefined;
+  const before = kind === "repair" ? await contentTree(gitContext(state)) : undefined;
   const outcome = await runPhaseTask(state, {
     kind,
     phase: "editing",
@@ -612,7 +621,7 @@ function formatFindings(review: Review): string {
 async function runChecks(
   state: RunState,
 ): Promise<{ passed: boolean; log: string; error?: string }> {
-  const head = await git(state.worktree, "rev-parse", "HEAD");
+  const head = await git(gitContext(state), "rev-parse", "HEAD");
   const log = join(state.runDir, "logs", `checks-${Date.now()}.log`);
   console.log(`Checks: ${state.check}`);
   try {
@@ -666,7 +675,7 @@ async function commitIntentFor(
     step,
     subject,
     ...(anchor ? { fixup: anchor } : {}),
-    parent: await git(state.worktree, "rev-parse", "HEAD"),
+    parent: await git(gitContext(state), "rev-parse", "HEAD"),
     expectedTree,
     ticket: ticket.number,
   };
@@ -702,9 +711,9 @@ async function commitPendingWork(
   ticket: Ticket,
   allowCommit: boolean,
 ): Promise<string | undefined> {
-  await git(state.worktree, "add", "-A");
-  const expectedTree = await git(state.worktree, "write-tree");
-  if (expectedTree === (await git(state.worktree, "rev-parse", "HEAD^{tree}"))) return;
+  await git(gitContext(state), "add", "-A");
+  const expectedTree = await git(gitContext(state), "write-tree");
+  if (expectedTree === (await git(gitContext(state), "rev-parse", "HEAD^{tree}"))) return;
   // An incomplete editing phase's saved files stay uncommitted; they are
   // reviewed as HEAD plus the content-tree identity instead of manufacturing a
   // feature/fixup commit merely because the controller resumed.
@@ -718,12 +727,11 @@ async function commitPendingWork(
   let result: WorkCommit;
   const log = join(state.runDir, "logs", `commit-${intent.step.replace(/[^\w.-]+/g, "_")}.log`);
   try {
-    result = await commitWork(state.worktree, {
+    result = await commitWork(gitContext(state), {
       subject: intent.subject,
       fixup: intent.fixup,
       expectedTree,
       trailers: { "Loop-Run": intent.run, "Loop-Step": intent.step },
-      timeoutMs: state.settings.deadlines.gitMs,
       log,
     });
   } catch (error) {
@@ -731,7 +739,7 @@ async function commitPendingWork(
     // still matches the recorded parent. A stopped command, a post-commit
     // failure, or a failed artifact probe may have committed already, so retain
     // the intent for reconciliation instead of discarding a real commit.
-    const head = await git(state.worktree, "rev-parse", "HEAD").catch(() => undefined);
+    const head = await git(gitContext(state), "rev-parse", "HEAD").catch(() => undefined);
     if (head === intent.parent) {
       state.pendingCommit = undefined;
       save(state);
@@ -748,7 +756,7 @@ async function commitPendingWork(
   // a recorded commit whose dirty hook output looks like manual work.
   const stop = result.dirty
     ? await hookStopFor(
-        state.worktree,
+        gitContext(state),
         `Git hooks left the worktree dirty after committing ${result.sha}`,
       )
     : undefined;
@@ -781,7 +789,7 @@ async function commitPendingWork(
 async function reconcilePendingCommit(state: RunState): Promise<void> {
   const intent = state.pendingCommit;
   if (!intent) return;
-  const outcome = await reconcileCommitIntent(state.worktree, intent);
+  const outcome = await reconcileCommitIntent(gitContext(state), intent);
   if (outcome.kind === "pending") {
     state.pendingCommit = undefined;
     save(state);
@@ -799,14 +807,14 @@ async function reconcilePendingCommit(state: RunState): Promise<void> {
   // The recovered commit ran hooks before the crash; a successful hook may have
   // left changes behind. Read the disposition before recording so the commit
   // and any hook stop persist atomically and a crash cannot lose the stop.
-  const porcelain = await git(state.worktree, "status", "--porcelain").catch(() => undefined);
+  const porcelain = await git(gitContext(state), "status", "--porcelain").catch(() => undefined);
   if (porcelain === undefined)
     throw new Error(
       `Cannot verify the worktree state of recovered commit ${outcome.sha}. Work is preserved; resume to reconcile`,
     );
   const stop = porcelain
     ? await hookStopFor(
-        state.worktree,
+        gitContext(state),
         `Git hooks left the worktree dirty after recovered commit ${outcome.sha}`,
       )
     : undefined;
@@ -889,7 +897,7 @@ async function verifyTicket(
     throw error;
   }
   const checkLog = committed ?? checks.log;
-  const before = await artifactSnapshot(state.worktree);
+  const before = await artifactSnapshot(gitContext(state));
   const identity = identityOf(before);
   ticket.resumeArtifact = identity;
   save(state);
@@ -943,7 +951,7 @@ async function verifyTicket(
     const patchPath = join(state.runDir, "review.patch");
     writeFileSync(
       patchPath,
-      await git(state.worktree, "diff", "--binary", baseline, before.worktree, "--"),
+      await git(gitContext(state), "diff", "--binary", baseline, before.worktree, "--"),
       { mode: 0o600 },
     );
     const outcome = await runPhaseTask(state, {
@@ -956,7 +964,7 @@ async function verifyTicket(
       prompt: reviewPrompt(state, ticket, patchPath, checkLog, checks.passed),
       checksPassed: checks.passed,
     });
-    const after = await artifactSnapshot(state.worktree);
+    const after = await artifactSnapshot(gitContext(state));
     assertArtifactUnchanged(before, after, "Review");
     ticket.review = materializeReview(outcome, identityOf(before));
     save(state);
@@ -979,7 +987,7 @@ async function verifyTicket(
   const failed = allowCommit ? latestFailedReview(ticket) : undefined;
   if (failed) {
     if (!ticket.audit) {
-      const preAudit = await artifactSnapshot(state.worktree);
+      const preAudit = await artifactSnapshot(gitContext(state));
       if (identityOf(preAudit).head !== review.head || identityOf(preAudit).tree !== review.tree)
         throw new Error(
           "The artifact changed after the review pass; refusing the findings audit. Inspect and resume",
@@ -997,7 +1005,7 @@ async function verifyTicket(
         prompt: auditPrompt(failed, ticket.repairNote),
         checksPassed: checks.passed,
       });
-      const postAudit = await artifactSnapshot(state.worktree);
+      const postAudit = await artifactSnapshot(gitContext(state));
       assertArtifactUnchanged(preAudit, postAudit, "Audit");
       ticket.audit = materializeReview(outcome, identityOf(preAudit));
       ticket.phase = "review";
@@ -1029,10 +1037,11 @@ function isInterruption(error: unknown): boolean {
 /** Resolve the remote branch tip for this run, or undefined when it cannot be read. */
 async function remoteBranchHead(state: RunState): Promise<string | undefined> {
   try {
-    const output = await command("git", ["ls-remote", "origin", `refs/heads/${state.branch}`], {
-      cwd: state.worktree,
-      timeoutMs: state.settings.deadlines.gitMs,
-    });
+    const output = await command(
+      "git",
+      ["ls-remote", "origin", `refs/heads/${state.branch}`],
+      gitContext(state),
+    );
     const [sha] = output.split(/\s+/);
     return /^[a-f0-9]{40}$/.test(sha) ? sha : undefined;
   } catch (error) {
@@ -1065,8 +1074,8 @@ async function advisoryReview(state: RunState): Promise<void> {
       // No verdict yet: the worktree must still be the published artifact, so a
       // local edit cannot be reviewed and reported as the PR's SHA. A terminal
       // outcome skips this entirely: resume only republishes the recorded report.
-      const before = await artifactSnapshot(state.worktree);
-      const publishedTree = await git(state.worktree, "rev-parse", `${state.head}^{tree}`);
+      const before = await artifactSnapshot(gitContext(state));
+      const publishedTree = await git(gitContext(state), "rev-parse", `${state.head}^{tree}`);
       if (before.head !== state.head || before.worktree !== publishedTree) {
         state.advisoryOutcome = "unavailable";
         state.advisoryWarning = `Final whole-artifact review unavailable: the worktree changed after publication of ${state.head}; no coherent whole-artifact assessment was posted`;
@@ -1076,7 +1085,7 @@ async function advisoryReview(state: RunState): Promise<void> {
         const patchPath = join(state.runDir, "review.patch");
         writeFileSync(
           patchPath,
-          await git(state.worktree, "diff", "--binary", state.baseSha, before.worktree, "--"),
+          await git(gitContext(state), "diff", "--binary", state.baseSha, before.worktree, "--"),
           { mode: 0o600 },
         );
         const outcome = await runPhaseTask(state, {
@@ -1093,7 +1102,7 @@ async function advisoryReview(state: RunState): Promise<void> {
             state.finalCheckLog ?? "Required checks passed",
           ),
         });
-        const after = await artifactSnapshot(state.worktree);
+        const after = await artifactSnapshot(gitContext(state));
         assertArtifactUnchanged(before, after, "Final review");
         state.review = materializeReview(outcome, identityOf(before));
         state.advisoryOutcome = "review";
@@ -1141,7 +1150,7 @@ async function advisoryReview(state: RunState): Promise<void> {
 async function accept(state: RunState, ticket: Ticket): Promise<void> {
   const review = ticket.review;
   if (!review) throw new Error("Cannot accept work without a completed review");
-  const snapshot = await artifactSnapshot(state.worktree);
+  const snapshot = await artifactSnapshot(gitContext(state));
   if (
     snapshot.head !== review.head ||
     snapshot.worktree !== review.tree ||
@@ -1179,7 +1188,7 @@ function editingInterrupted(state: RunState, ticket?: Ticket): boolean {
  */
 async function manualChangeSinceStop(state: RunState, ticket?: Ticket): Promise<boolean> {
   const recordedHead = ticket ? (ticket.workHead ?? ticket.baseline) : state.baseSha;
-  const snapshot = await artifactSnapshot(state.worktree);
+  const snapshot = await artifactSnapshot(gitContext(state));
   // The phase already observed this HEAD, even if no controller commit recorded
   // it. Its saved files are not new manual work on an unchanged resume.
   if (ticket?.resumeArtifact)
@@ -1203,7 +1212,9 @@ async function manualChangeSinceStop(state: RunState, ticket?: Ticket): Promise<
   if (attempted) return snapshot.head !== attempted.head || snapshot.worktree !== attempted.tree;
   // No interrupted editing phase: any uncommitted content is the operator's.
   if (!recordedHead) return false;
-  return snapshot.worktree !== (await git(state.worktree, "rev-parse", `${recordedHead}^{tree}`));
+  return (
+    snapshot.worktree !== (await git(gitContext(state), "rev-parse", `${recordedHead}^{tree}`))
+  );
 }
 
 /**
@@ -1218,16 +1229,16 @@ async function adoptManualAnchor(state: RunState, ticket: Ticket): Promise<void>
   if (ticket.anchor) return;
   const baseline = ticket.baseline;
   if (!baseline) return;
-  const head = await git(state.worktree, "rev-parse", "HEAD");
+  const head = await git(gitContext(state), "rev-parse", "HEAD");
   if (head === baseline) return;
   try {
-    await git(state.worktree, "merge-base", "--is-ancestor", baseline, head);
+    await git(gitContext(state), "merge-base", "--is-ancestor", baseline, head);
   } catch {
     throw new Error(
       `Ticket #${ticket.number} HEAD does not descend from its baseline; work is preserved. Restore the baseline history before resuming`,
     );
   }
-  const commits = (await git(state.worktree, "rev-list", "--reverse", `${baseline}..${head}`))
+  const commits = (await git(gitContext(state), "rev-list", "--reverse", `${baseline}..${head}`))
     .split("\n")
     .filter(Boolean);
   if (commits.length !== 1)
@@ -1245,7 +1256,7 @@ async function resolveTicket(state: RunState, ticket: Ticket): Promise<void> {
   // unchanged resume must not commit or accept the hook's leftovers.
   const hookStop = await unresolvedHookStop(state, ticket);
   if (hookStop) throw new Error(hookStop);
-  ticket.baseline ??= await git(state.worktree, "rev-parse", "HEAD");
+  ticket.baseline ??= await git(gitContext(state), "rev-parse", "HEAD");
   ticket.status = "running";
   state.currentTicket = ticket.number;
   const resuming = ticket.phase !== undefined;
@@ -1263,7 +1274,7 @@ async function resolveTicket(state: RunState, ticket: Ticket): Promise<void> {
     // failed required check must still reach review rather than a blind repair.
     ticket.phase = "review";
     ticket.reviewOnCheckFailure = true;
-    ticket.resumeArtifact = identityOf(await artifactSnapshot(state.worktree));
+    ticket.resumeArtifact = identityOf(await artifactSnapshot(gitContext(state)));
     save(state);
   }
 
@@ -1326,7 +1337,12 @@ async function eligible(state: RunState, ticket: Ticket): Promise<boolean> {
       const match = blocker.html_url.match(/^https:\/\/([^/]+)\/([^/]+\/[^/]+)\/issues\/(\d+)$/);
       if (!match || match[1].toLowerCase() !== expectedHost.toLowerCase())
         throw new Error(`Unsupported dependency URL: ${blocker.html_url}`);
-      const current = await getIssue(state.repo, host, match[2], Number(match[3]));
+      const current = await getIssue(
+        gitContext(state, state.repo),
+        host,
+        match[2],
+        Number(match[3]),
+      );
       if (current.state !== "closed") return false;
     }
   }
@@ -1335,8 +1351,8 @@ async function eligible(state: RunState, ticket: Ticket): Promise<boolean> {
 
 async function verifyOrigin(state: RunState): Promise<void> {
   if (
-    (await originUrl(state.repo)) !== state.origin ||
-    (existsSync(state.worktree) && (await originUrl(state.worktree)) !== state.origin)
+    (await originUrl(gitContext(state, state.repo))) !== state.origin ||
+    (existsSync(state.worktree) && (await originUrl(gitContext(state))) !== state.origin)
   ) {
     throw new Error(
       "origin changed since this run started. Refusing to continue or publish to a different destination",
@@ -1349,11 +1365,13 @@ async function publishReviewObservations(state: RunState, host: string | undefin
   if (!number) throw new Error("Invalid PR URL; cannot publish review observations");
   const endpoint = `repos/${state.githubRepo}/issues/${number}/comments`;
   const pages: unknown = JSON.parse(
-    await gh(state.repo, host, "api", endpoint, "--paginate", "--slurp"),
+    await gh(gitContext(state, state.repo), host, "api", endpoint, "--paginate", "--slurp"),
   );
   if (!Array.isArray(pages) || !pages.every(Array.isArray))
     throw new Error("Invalid paginated PR comments response");
-  const viewer = JSON.parse(await gh(state.repo, host, "api", "user")) as { login: string };
+  const viewer = JSON.parse(await gh(gitContext(state, state.repo), host, "api", "user")) as {
+    login: string;
+  };
   if (typeof viewer?.login !== "string" || !viewer.login)
     throw new Error("Cannot identify the review observations author");
   // Reconcile against the identity that owns the managed comment, not the
@@ -1413,7 +1431,7 @@ async function publishReviewObservations(state: RunState, host: string | undefin
     save(state);
   }
   const posted = await gh(
-    state.repo,
+    gitContext(state, state.repo),
     host,
     "api",
     comments.length ? `repos/${state.githubRepo}/issues/comments/${comments[0].id}` : endpoint,
@@ -1434,13 +1452,19 @@ async function publishReviewObservations(state: RunState, host: string | undefin
 async function publish(state: RunState): Promise<void> {
   await verifyOrigin(state);
   await unchangedHead(state, state.head);
-  if (await git(state.worktree, "status", "--porcelain"))
+  if (await git(gitContext(state), "status", "--porcelain"))
     throw new Error("Unreviewed changes exist before publication");
-  await git(state.worktree, "push", "--set-upstream", "origin", `HEAD:refs/heads/${state.branch}`);
+  await git(
+    gitContext(state),
+    "push",
+    "--set-upstream",
+    "origin",
+    `HEAD:refs/heads/${state.branch}`,
+  );
   const host = githubHostFromOrigin(state.origin);
   const existing = JSON.parse(
     await gh(
-      state.repo,
+      gitContext(state, state.repo),
       host,
       "pr",
       "list",
@@ -1482,7 +1506,7 @@ async function publish(state: RunState): Promise<void> {
   state.pr =
     existing[0]?.url ??
     (await gh(
-      state.repo,
+      gitContext(state, state.repo),
       host,
       "pr",
       "create",
@@ -1513,7 +1537,7 @@ async function assertAcceptedAncestry(state: RunState): Promise<void> {
   ];
   for (const ancestor of ancestors) {
     try {
-      await git(state.worktree, "merge-base", "--is-ancestor", ancestor, "HEAD");
+      await git(gitContext(state), "merge-base", "--is-ancestor", ancestor, "HEAD");
     } catch {
       throw new Error(
         "Accepted history was rewritten or is no longer an ancestor of HEAD. Work is preserved; restore the accepted commits or start a new run",
@@ -1562,7 +1586,15 @@ export async function execute(state: RunState): Promise<void> {
     save(state);
     if (state.phase === "setup") {
       if (!existsSync(state.worktree)) {
-        await git(state.repo, "worktree", "add", "-b", state.branch, state.worktree, state.baseSha);
+        await git(
+          gitContext(state, state.repo),
+          "worktree",
+          "add",
+          "-b",
+          state.branch,
+          state.worktree,
+          state.baseSha,
+        );
       }
       await unchangedHead(state, state.baseSha);
       try {
@@ -1578,7 +1610,7 @@ export async function execute(state: RunState): Promise<void> {
       state.phase = "tickets";
       save(state);
     }
-    if ((await git(state.worktree, "branch", "--show-current")) !== state.branch)
+    if ((await git(gitContext(state), "branch", "--show-current")) !== state.branch)
       throw new Error("Worktree is no longer on the run's feature branch");
     // Explicit resume permits manual commits, but never a rewrite of accepted history.
     await assertAcceptedAncestry(state);
@@ -1586,8 +1618,8 @@ export async function execute(state: RunState): Promise<void> {
     await reconcilePendingCommit(state);
     if (
       state.phase === "publish" &&
-      ((await git(state.worktree, "rev-parse", "HEAD")) !== state.head ||
-        (await git(state.worktree, "status", "--porcelain")))
+      ((await git(gitContext(state), "rev-parse", "HEAD")) !== state.head ||
+        (await git(gitContext(state), "status", "--porcelain")))
     ) {
       state.phase = "final";
       save(state);
@@ -1596,7 +1628,7 @@ export async function execute(state: RunState): Promise<void> {
       let next = state.tickets.find((ticket) => ticket.number === state.currentTicket);
       if (!next) {
         await unchangedHead(state, state.head);
-        if (await git(state.worktree, "status", "--porcelain"))
+        if (await git(gitContext(state), "status", "--porcelain"))
           throw new Error(
             "Unassigned changes between tickets. Inspect the worktree before continuing",
           );
@@ -1626,11 +1658,11 @@ export async function execute(state: RunState): Promise<void> {
       const checks = await runChecks(state);
       if (!checks.passed)
         throw new Error(`Required checks failed for the publication artifact: ${checks.error}`);
-      if (await git(state.worktree, "status", "--porcelain"))
+      if (await git(gitContext(state), "status", "--porcelain"))
         throw new Error(
           "Uncommitted changes before publication. Commit or discard them in the run worktree, then resume",
         );
-      state.head = await git(state.worktree, "rev-parse", "HEAD");
+      state.head = await git(gitContext(state), "rev-parse", "HEAD");
       state.finalCheckLog = checks.log;
       state.phase = "publish";
       save(state);

@@ -139,7 +139,20 @@ export function command(program: string, args: string[], options: CommandOptions
   });
 }
 
-export const git = (cwd: string, ...args: string[]) => command("git", args, { cwd });
+/**
+ * Working directory and controller deadline for one Git or GitHub invocation.
+ * Passed explicitly so a run's snapshotted `deadlines.gitMs` is never replaced
+ * by the generic default.
+ */
+export type CommandContext = Pick<CommandOptions, "cwd" | "timeoutMs">;
+
+/** Normalize a bare directory for call sites with no run-level deadline. */
+export function commandContext(context: string | CommandContext): CommandContext {
+  return typeof context === "string" ? { cwd: context } : context;
+}
+
+export const git = (context: string | CommandContext, ...args: string[]) =>
+  command("git", args, commandContext(context));
 
 /** Last `max` chars without splitting a surrogate pair at the cut. */
 export function tailText(text: string, max: number): string {
@@ -147,9 +160,11 @@ export function tailText(text: string, max: number): string {
   return /^[\uDC00-\uDFFF]/.test(tail) ? tail.slice(1) : tail;
 }
 
-export async function originUrl(cwd: string): Promise<string> {
-  const fetchUrls = (await git(cwd, "remote", "get-url", "--all", "origin")).split("\n");
-  const pushUrls = (await git(cwd, "remote", "get-url", "--push", "--all", "origin")).split("\n");
+export async function originUrl(context: string | CommandContext): Promise<string> {
+  const fetchUrls = (await git(context, "remote", "get-url", "--all", "origin")).split("\n");
+  const pushUrls = (await git(context, "remote", "get-url", "--push", "--all", "origin")).split(
+    "\n",
+  );
   if (
     fetchUrls.length !== 1 ||
     pushUrls.length !== 1 ||

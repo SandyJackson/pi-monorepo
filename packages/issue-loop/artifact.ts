@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { command, git } from "./process.ts";
+import { type CommandContext, command, git } from "./process.ts";
 
 /**
  * Git artifact/history helpers: content identities, branch/HEAD/index/worktree
@@ -30,25 +30,26 @@ export interface ArtifactSnapshot {
  * Tree of the working tree including relevant untracked files, computed with a
  * throwaway index so the real index is never staged by a read-only guard.
  */
-export async function contentTree(cwd: string): Promise<string> {
+export async function contentTree(context: CommandContext): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), "issue-loop-content-"));
   const index = join(dir, "index");
   try {
-    const env = { GIT_INDEX_FILE: index };
-    await command("git", ["read-tree", "HEAD"], { cwd, env });
-    await command("git", ["add", "-A"], { cwd, env });
-    return await command("git", ["write-tree"], { cwd, env });
+    // Keep the caller's deadline; only the index location differs.
+    const options = { ...context, env: { GIT_INDEX_FILE: index } };
+    await command("git", ["read-tree", "HEAD"], options);
+    await command("git", ["add", "-A"], options);
+    return await command("git", ["write-tree"], options);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-export async function artifactSnapshot(cwd: string): Promise<ArtifactSnapshot> {
+export async function artifactSnapshot(context: CommandContext): Promise<ArtifactSnapshot> {
   const [branch, head, index, worktree] = await Promise.all([
-    git(cwd, "branch", "--show-current"),
-    git(cwd, "rev-parse", "HEAD"),
-    git(cwd, "write-tree"),
-    contentTree(cwd),
+    git(context, "branch", "--show-current"),
+    git(context, "rev-parse", "HEAD"),
+    git(context, "write-tree"),
+    contentTree(context),
   ]);
   return { branch, head, index, worktree };
 }
@@ -176,14 +177,12 @@ export function isActionableHookFailure(message: string): boolean {
  * targeting that anchor. Hooks run normally and are never bypassed.
  */
 export async function commitWork(
-  cwd: string,
+  context: CommandContext,
   options: {
     subject: string;
     fixup?: string;
     expectedTree: string;
     trailers?: Record<string, string>;
-    /** Controller-owned Git deadline, separate from worker supervision. */
-    timeoutMs?: number;
     /** Bounded combined hook/commit log for the repairer and operator. */
     log?: string;
   },
@@ -196,7 +195,7 @@ export async function commitWork(
   for (const [token, value] of Object.entries(options.trailers ?? {}))
     args.push("--trailer", `${token}: ${value}`);
   try {
-    await command("git", args, { cwd, log: options.log, timeoutMs: options.timeoutMs });
+    await command("git", args, { ...context, log: options.log });
   } catch (error) {
     if (error instanceof Error && error.name === "CommandStoppedError") throw error;
     const detail = error instanceof Error ? error.message : String(error);
@@ -217,9 +216,9 @@ export async function commitWork(
       !isActionableHookFailure(diagnostic),
     );
   }
-  const sha = await git(cwd, "rev-parse", "HEAD");
-  const dirty = (await git(cwd, "status", "--porcelain")) !== "";
-  const tree = await git(cwd, "rev-parse", "HEAD^{tree}");
+  const sha = await git(context, "rev-parse", "HEAD");
+  const dirty = (await git(context, "status", "--porcelain")) !== "";
+  const tree = await git(context, "rev-parse", "HEAD^{tree}");
   return { sha, mutated: tree !== options.expectedTree, dirty };
 }
 
@@ -238,22 +237,22 @@ export type CommitReconciliation =
  * preserved work rather than being accepted unverified.
  */
 export async function reconcileCommitIntent(
-  cwd: string,
+  context: CommandContext,
   intent: CommitIntent,
 ): Promise<CommitReconciliation> {
-  const head = await git(cwd, "rev-parse", "HEAD");
+  const head = await git(context, "rev-parse", "HEAD");
   if (head === intent.parent) return { kind: "pending" };
-  const candidates = (await git(cwd, "rev-list", "--reverse", `${intent.parent}..HEAD`))
+  const candidates = (await git(context, "rev-list", "--reverse", `${intent.parent}..HEAD`))
     .split("\n")
     .filter(Boolean);
   const matches: string[] = [];
   const expectedTrailers = [`Loop-Run: ${intent.run}`, `Loop-Step: ${intent.step}`];
   for (const sha of candidates) {
-    const [firstParent = ""] = (await git(cwd, "rev-list", "--parents", "-n", "1", sha))
+    const [firstParent = ""] = (await git(context, "rev-list", "--parents", "-n", "1", sha))
       .split(" ")
       .slice(1);
-    const tree = await git(cwd, "rev-parse", `${sha}^{tree}`);
-    const body = await git(cwd, "log", "-1", "--format=%B", sha);
+    const tree = await git(context, "rev-parse", `${sha}^{tree}`);
+    const body = await git(context, "log", "-1", "--format=%B", sha);
     if (
       firstParent === intent.parent &&
       tree === intent.expectedTree &&

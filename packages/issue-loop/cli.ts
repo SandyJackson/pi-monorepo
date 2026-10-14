@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { gh, githubHostFromOrigin, snapshot } from "./github.ts";
 import { assertSupportedPi } from "./pi-version.ts";
-import { git, originUrl } from "./process.ts";
+import { type CommandContext, git, originUrl } from "./process.ts";
 import { execute } from "./runner.ts";
 import {
   defaultLoopSettings,
@@ -83,29 +83,40 @@ async function main(): Promise<void> {
     settings.deadlines.setupMs = timeoutMs;
     settings.deadlines.checkMs = timeoutMs;
   }
-  // Fail fast on unknown skills before creating the run; the copy lands in the
-  // run dir below so resume reuses the snapshot.
-  const repo = await git(resolve(values.repo), "rev-parse", "--show-toplevel");
-  const origin = await originUrl(repo);
+  // Settings are resolved above, so even the top-level probe uses the run's Git deadline.
+  const probe: CommandContext = { cwd: resolve(values.repo), timeoutMs: settings.deadlines.gitMs };
+  const repo = await git(probe, "rev-parse", "--show-toplevel");
+  const repoContext: CommandContext = { cwd: repo, timeoutMs: settings.deadlines.gitMs };
+  const origin = await originUrl(repoContext);
   const host = githubHostFromOrigin(origin);
   const repositoryUrl = origin.replace(/^git@([^:]+):/, "https://$1/").replace(/\.git$/, "");
   const metadata = JSON.parse(
-    await gh(repo, host, "repo", "view", repositoryUrl, "--json", "nameWithOwner,defaultBranchRef"),
+    await gh(
+      repoContext,
+      host,
+      "repo",
+      "view",
+      repositoryUrl,
+      "--json",
+      "nameWithOwner,defaultBranchRef",
+    ),
   ) as { nameWithOwner: string; defaultBranchRef: { name: string } };
   if (!/^[\w.-]+\/[\w.-]+$/.test(metadata.nameWithOwner) || !metadata.defaultBranchRef?.name)
     throw new Error("Cannot determine the GitHub repository and default branch");
   const baseBranch = metadata.defaultBranchRef.name;
-  await git(repo, "check-ref-format", `refs/heads/${baseBranch}`);
+  await git(repoContext, "check-ref-format", `refs/heads/${baseBranch}`);
   const { parent, tickets } = await snapshot(
-    repo,
+    repoContext,
     host,
     metadata.nameWithOwner,
     Number(values.issue),
   );
-  await git(repo, "fetch", "origin", `refs/heads/${baseBranch}`);
-  const baseSha = await git(repo, "rev-parse", "FETCH_HEAD");
+  await git(repoContext, "fetch", "origin", `refs/heads/${baseBranch}`);
+  const baseSha = await git(repoContext, "rev-parse", "FETCH_HEAD");
   const id = `${parent.number}-${new Date().toISOString().replace(/[-:.]/g, "")}-${randomUUID().slice(0, 8)}`;
   const runDir = join(dirname(repo), ".pi-issue-loops", `${basename(repo)}-${id}`);
+  // Fail fast on unknown skills before creating the run; the copy lands in the
+  // run dir below so resume reuses the snapshot.
   validateLoopSkills(settings);
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
   materializeLoopSkills(settings, runDir);

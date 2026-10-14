@@ -1,5 +1,13 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -133,7 +141,18 @@ const value = flag => args[args.indexOf(flag)+1];
 if (args.includes('--version')) { console.log(process.env.FIXTURE_PI_VERSION || '0.99.2'); process.exit(0); }
 const name = value('--name') || '';
 const session = value('--session');
-const out = record => process.stdout.write(JSON.stringify(record)+'\\n');
+// Session files are the conversation history a real Pi process reloads on restart.
+function readSessionRecords() {
+ if (!fs.existsSync(session)) return [];
+ return fs.readFileSync(session, 'utf8').split('\\n').filter(Boolean).map(line => JSON.parse(line));
+}
+function appendSessionRecord(record) {
+ fs.appendFileSync(session, JSON.stringify(record)+'\\n');
+}
+const out = record => {
+ if (record.type === 'message_end') appendSessionRecord({type:'message', message:record.message});
+ process.stdout.write(JSON.stringify(record)+'\\n');
+};
 const isParentReview = () => name.includes('parent review');
 let promptCount = 0;
 function materialSeverity(body) {
@@ -171,13 +190,33 @@ function implementOutcome() {
 }
 function handle(command) {
  const prompt = command.message;
- fs.writeFileSync(session, JSON.stringify({type:'session_info', name})+'\\n');
- fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'workers.jsonl'), JSON.stringify({name, session, args, prompt, cwd:process.cwd()})+'\\n');
+ const historyBefore = readSessionRecords();
+ if (!fs.existsSync(session)) appendSessionRecord({type:'session_info', name});
+ fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'workers.jsonl'), JSON.stringify({name, session, args, prompt, cwd:process.cwd(), historyBefore})+'\\n');
+ if (command.type === 'prompt') appendSessionRecord({type:'message', message:{role:'user', content:[{type:'text', text:prompt}]}});
  const isImplement = name.includes('implement');
  const isEditing = name.includes('implement') || name.includes('repair');
  const mode = process.env.FIXTURE_MODE;
  if (isParentReview()) fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'parent-review-order.txt'), fs.existsSync(path.join(process.env.FIXTURE_ROOT,'pr.json')) ? 'after-pr' : 'before-pr');
  if ((mode === 'fail-parent-review' || mode === 'fail-parent-review-comment-fail') && isParentReview() && command.type === 'prompt') { console.error('Provider unavailable'); process.exit(1); }
+ if (mode === 'hold-parent-review' && isParentReview() && command.type === 'prompt') {
+  // Signal that the parent review is running, then wait until the controller interrupts it.
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'parent-review-ready'), 'ready\\n');
+  return;
+ }
+ if (mode === 'parent-review-index-mutation' && isParentReview() && command.type === 'prompt') {
+  // Only the index changes: HEAD and the working files stay as published.
+  require('node:child_process').execFileSync('git', ['read-tree', 'HEAD^'], {cwd: process.cwd()});
+  out({id: command.id, type:'response', command:'prompt', success:true, data:{disposition:'started'}});
+  out({type:'agent_start'});
+  out({type:'message_start', message:{role:'assistant', content:[]}});
+  out({type:'message_end', message:{role:'assistant', content:[{type:'text', text:reviewOutcome()}]}});
+  out({type:'agent_end', messages:[], willRetry:false});
+  out({type:'agent_settled'});
+  return;
+ }
  if (command.type === 'steer') {
   out({id: command.id, type:'response', command:'steer', success:true, data:{disposition:'queued'}});
   return;
@@ -1006,11 +1045,40 @@ function writeLoopSettings(root: string): string {
   return settingsPath;
 }
 
-function readWorkers(root: string): { name: string; args: string[]; prompt: string }[] {
+/** One persisted record from a fake Pi session file. */
+interface SessionRecord {
+  type: string;
+  message?: { role: string; content: { type: string; text: string }[] };
+}
+
+/** A worker launch as logged by the fake Pi; `historyBefore` is what it loaded from disk. */
+interface WorkerLaunch {
+  name: string;
+  session: string;
+  args: string[];
+  prompt: string;
+  historyBefore: SessionRecord[];
+}
+
+function readWorkers(root: string): WorkerLaunch[] {
   return readFileSync(join(root, "workers.jsonl"), "utf8")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
+}
+
+/** Text of the messages with one role in a loaded session history. */
+function historyText(history: SessionRecord[], role: "user" | "assistant"): string[] {
+  return history
+    .filter((record) => record.type === "message" && record.message?.role === role)
+    .map((record) => record.message!.content.map((part) => part.text).join("\n"));
+}
+
+/** Managed advisory observation comments posted to the fake PR. */
+function advisoryComments(root: string): { body: string }[] {
+  return (
+    JSON.parse(readFileSync(join(root, "pr-comments.json"), "utf8")) as { body: string }[]
+  ).filter((comment) => comment.body.includes("Final whole-artifact review"));
 }
 
 /**
@@ -1509,19 +1577,156 @@ cliTest(
     // The local review remains coherent and is reported against its reviewed SHA.
     expect(finished.review.head).toBe(reviewedHead);
     expect(finished.advisoryStale).toBe(true);
+    // The warning names both the reviewed SHA and the advanced remote tip.
     expect(finished.advisoryWarning).toContain("stale");
-    // No second review runs, and a repeat resume does not duplicate the comment.
+    expect(finished.advisoryWarning).toContain(reviewedHead);
+    expect(finished.advisoryWarning).toContain(remoteHead);
+    expect(resumed.stderr).toContain("Final whole-artifact review is stale");
+    expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain("stale");
+    // The run worktree and the remote branch stay as they were: no push, repair, or re-review.
+    expect(f.git("-C", blocked.worktree, "rev-parse", "HEAD")).toBe(blocked.head);
+    expect(f.git("-C", blocked.worktree, "status", "--porcelain")).toBe("");
+    expect(
+      f.git("--git-dir", join(f.root, "remote.git"), "rev-parse", `refs/heads/${blocked.branch}`),
+    ).toBe(remoteHead);
     expect(
       readWorkers(f.root).filter((worker) => worker.name.includes("parent review")),
     ).toHaveLength(1);
-    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
-    const advisory = comments.find((comment: { body: string }) =>
-      comment.body.includes("Final whole-artifact review"),
-    );
+    const [advisory] = advisoryComments(f.root);
+    expect(advisoryComments(f.root)).toHaveLength(1);
+    expect(advisory.body).toContain("**Stale:**");
     expect(advisory.body).toContain(reviewedHead);
-    expect(advisory.body).toContain("Stale");
+    expect(advisory.body).toContain(blocked.review.tree);
+    // A repeat resume does not duplicate the comment or create another PR.
     expect((await f.run("resume", runDir)).status).toBe(0);
     expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
+    expect(advisoryComments(f.root)).toHaveLength(1);
+  },
+  30_000,
+);
+
+/**
+ * Start a run whose fixture holds one worker at a ready sentinel, then send the
+ * controller SIGINT once that worker has begun, and wait for the controller to stop.
+ */
+async function interruptAtReady(
+  f: ReturnType<typeof fixture>,
+  args: string[],
+  readySentinel: string,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, [cli, ...args], {
+    env: f.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (data) => {
+    stdout += data.toString();
+  });
+  child.stderr.on("data", (data) => {
+    stderr += data.toString();
+  });
+  const closed = new Promise<number | null>((resolve) =>
+    child.on("close", (code) => resolve(code)),
+  );
+  let status: number | null = null;
+  try {
+    const marker = join(f.root, readySentinel);
+    for (let i = 0; i < 400 && !existsSync(marker); i++) await delay(50);
+    expect(existsSync(marker), stderr).toBe(true);
+    child.kill("SIGINT");
+    status = await Promise.race([
+      closed,
+      delay(10_000).then(() => {
+        throw new Error("Controller did not stop after interrupt");
+      }),
+    ]);
+  } finally {
+    child.kill("SIGKILL");
+    await closed;
+  }
+  return { status, stdout, stderr };
+}
+
+cliTest(
+  "withdraws an advisory review interrupted before a local edit instead of reviewing the changed artifact",
+  async () => {
+    const f = fixture("hold-parent-review");
+    const interrupted = await interruptAtReady(
+      f,
+      ["start", "--repo", f.repo, "--issue", "10", "--check", "true"],
+      "parent-review-ready",
+    );
+    const runDir = interrupted.stdout.match(/Run directory: (.+)/)![1];
+    const blocked = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.phase).toBe("advisory");
+    expect(blocked.review).toBeUndefined();
+    expect(blocked.advisoryOutcome).toBeUndefined();
+    // The operator changes a tracked file and adds an untracked one while the review is held.
+    writeFileSync(join(blocked.worktree, "feature.txt"), "Edited while the parent review ran\n");
+    writeFileSync(join(blocked.worktree, "notes.txt"), "Untracked note\n");
+    const launchesBeforeResume = readWorkers(f.root).length;
+    f.env.FIXTURE_MODE = "pass";
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(finished.status).toBe("done");
+    // The published SHA is unchanged, and the edited tree is never assessed as that SHA.
+    expect(finished.head).toBe(blocked.head);
+    expect(f.git("-C", blocked.worktree, "rev-parse", "HEAD")).toBe(blocked.head);
+    expect(finished.review).toBeUndefined();
+    expect(finished.advisoryOutcome).toBe("unavailable");
+    expect(finished.advisoryWarning).toContain("worktree changed after publication");
+    expect(resumed.stderr).toContain("Final whole-artifact review unavailable");
+    expect(readFileSync(join(runDir, "summary.md"), "utf8")).toContain(
+      "worktree changed after publication",
+    );
+    // The local work is preserved, and resume does not launch another parent reviewer.
+    expect(readFileSync(join(blocked.worktree, "feature.txt"), "utf8")).toBe(
+      "Edited while the parent review ran\n",
+    );
+    expect(readFileSync(join(blocked.worktree, "notes.txt"), "utf8")).toBe("Untracked note\n");
+    expect(readWorkers(f.root)).toHaveLength(launchesBeforeResume);
+    expect(
+      readWorkers(f.root).filter((worker) => worker.name.includes("parent review")),
+    ).toHaveLength(1);
+    // The warning is posted once, and a repeat resume neither reposts it nor reruns anything.
+    expect(advisoryComments(f.root)).toHaveLength(1);
+    expect(advisoryComments(f.root)[0].body).toContain(
+      "Warning: Final whole-artifact review unavailable",
+    );
+    expect((await f.run("resume", runDir)).status).toBe(0);
+    expect(advisoryComments(f.root)).toHaveLength(1);
+    expect(readWorkers(f.root)).toHaveLength(launchesBeforeResume);
+  },
+  30_000,
+);
+
+cliTest(
+  "withholds an advisory pass when the parent review changes only the index",
+  async () => {
+    const f = fixture("parent-review-index-mutation");
+    const result = await f.start();
+    expect(result.status, result.stderr).toBe(0);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    // The loop has a feature commit above the base, so HEAD^ is a real commit to read into the index.
+    expect(f.git("-C", state.worktree, "rev-parse", "--verify", "HEAD^")).toMatch(/^[0-9a-f]{40}$/);
+    expect(state.status).toBe("done");
+    expect(state.pr).toBe("https://github.com/test/project/pull/99");
+    expect(state.review).toBeUndefined();
+    expect(state.advisoryOutcome).toBe("unavailable");
+    expect(state.advisoryWarning).toContain("changed the index");
+    expect(result.stderr).toContain("changed the index");
+    // Only the parent pass is withheld: HEAD, file contents, and the changed index remain.
+    expect(f.git("-C", state.worktree, "rev-parse", "HEAD")).toBe(state.head);
+    expect(readFileSync(join(state.worktree, "feature.txt"), "utf8")).toBe("implemented\n");
+    expect(f.git("-C", state.worktree, "ls-files", "feature.txt")).toBe("");
+    const comments = advisoryComments(f.root);
+    expect(comments).toHaveLength(1);
+    expect(comments[0].body).toContain("Warning: Final whole-artifact review unavailable");
+    expect(comments[0].body).not.toContain("(pass)");
   },
   30_000,
 );
@@ -1844,6 +2049,88 @@ cliTest(
     expect(state.phase).toBe("advisory");
     expect(stderr).toContain("Interrupted; work has been preserved");
     expect(JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"))).toEqual(before);
+  },
+  30_000,
+);
+
+cliTest(
+  "times out a held publication push at the configured Git deadline and keeps the accepted history",
+  async () => {
+    const f = fixture();
+    const settings = join(f.root, "deadline-settings.json");
+    writeFileSync(settings, JSON.stringify({ deadlines: { gitMs: 3_000 } }));
+    // Delegate every Git call except publication, which holds until the controller's deadline.
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(
+      join(f.root, "bin", "git"),
+      `#!/bin/sh\nif [ "$1" = "push" ]; then\n  touch "$FIXTURE_ROOT/push-started"\n  sleep 60\n  exit 0\nfi\nexec ${JSON.stringify(realGit)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const result = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settings,
+    );
+    expect(result.status).toBe(1);
+    expect(existsSync(join(f.root, "push-started"))).toBe(true);
+    const runDir = result.stdout.match(/Run directory: (.+)/)![1];
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("blocked");
+    expect(state.settings.deadlines.gitMs).toBe(3_000);
+    expect(state.lastError).toContain("Timed out running git");
+    // The commit accepted before publication stays in the worktree, and no PR is created.
+    expect(f.git("-C", state.worktree, "rev-parse", "HEAD")).toBe(state.head);
+    expect(existsSync(join(f.root, "pr.json"))).toBe(false);
+  },
+  30_000,
+);
+
+cliTest(
+  "uses the snapshotted Git deadline for a held GitHub read on resume even if the settings file changes",
+  async () => {
+    // Resume reaches advisory comment reconciliation without launching a worker.
+    const f = fixture("comment-create-fail");
+    const settings = join(f.root, "deadline-settings.json");
+    writeFileSync(settings, JSON.stringify({ deadlines: { gitMs: 3_000 } }));
+    const first = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--settings",
+      settings,
+    );
+    expect(first.status).toBe(1);
+    const runDir = first.stdout.match(/Run directory: (.+)/)![1];
+    // The operator later raises the source file; the run keeps the snapshot it started with.
+    writeFileSync(settings, JSON.stringify({ deadlines: { gitMs: 600_000 } }));
+    // Hold every gh call on resume; the real fake gh is moved aside for delegation.
+    const bin = join(f.root, "bin");
+    renameSync(join(bin, "gh"), join(f.root, "gh-fixture"));
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\nif [ -f "$FIXTURE_ROOT/hold-gh" ]; then\n  touch "$FIXTURE_ROOT/gh-held"\n  sleep 60\n  exit 0\nfi\nexec "$FIXTURE_ROOT/gh-fixture" "$@"\n`,
+      { mode: 0o755 },
+    );
+    writeFileSync(join(f.root, "hold-gh"), "");
+    const launchesBeforeResume = readWorkers(f.root).length;
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status).toBe(1);
+    expect(existsSync(join(f.root, "gh-held"))).toBe(true);
+    const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8"));
+    expect(state.status).toBe("blocked");
+    expect(state.settings.deadlines.gitMs).toBe(3_000);
+    expect(state.lastError).toContain("Timed out running gh");
+    expect(readWorkers(f.root)).toHaveLength(launchesBeforeResume);
   },
   30_000,
 );
@@ -2324,14 +2611,26 @@ cliTest(
     expect(repairs[0].args).toContain("--no-skills");
     expect(repairs[0].args.some((arg) => arg.endsWith(join("skills", "tdd")))).toBe(true);
     expect(repairs[0].prompt).toContain("Fix the first attempt");
+    // The repair loads the reviewer's persisted history from disk: its own earlier
+    // prompt and assistant outcome, identified by role rather than by text that also
+    // appears in the new feedback.
+    expect(historyText(repairs[0].historyBefore, "user")).toEqual([reviews[0].prompt]);
+    expect(historyText(repairs[0].historyBefore, "assistant")).toHaveLength(1);
+    expect(historyText(repairs[0].historyBefore, "assistant")[0]).toContain(
+      "Fix the first attempt",
+    );
     // A fresh independent reviewer assesses the repaired artifact and again
     // sees no prior findings.
     expect(reviews[1].prompt).not.toContain("Fix the first attempt");
+    expect(reviews[0].historyBefore).toEqual([]);
+    expect(reviews[1].historyBefore).toEqual([]);
     // The audit shares the fresh reviewer's conversation and sees only the
     // latest failed findings plus the intervening repair explanation.
     expect(audits[0].session).toBe(reviews[1].session);
     expect(audits[0].prompt).toContain("Fix the first attempt");
     expect(audits[0].prompt).toContain("Intervening repair/retraction explanation");
+    // The audit continues the fresh reviewer's conversation, not the repairer's.
+    expect(historyText(audits[0].historyBefore, "user")).toEqual([reviews[1].prompt]);
     expect(state.tickets[0].audit).toMatchObject({ outcome: "pass" });
     expect(state.tickets[0].review).toMatchObject({ outcome: "pass" });
     // The review and its audit share one phase-task budget; the authorized
@@ -2704,6 +3003,11 @@ cliTest(
     const repairs = readWorkers(f.root).filter((worker) => worker.name.includes("#11 repair"));
     expect(repairs).toHaveLength(2);
     expect(repairs[1].session).toBe(repair.session);
+    // The resumed controller and worker process reload the session file: the reviewer's
+    // prompt and outcome, then the interrupted repair's prompt, with no new prompt yet.
+    const review = readWorkers(f.root).find((worker) => worker.name.includes("#11 review"))!;
+    expect(historyText(repairs[1].historyBefore, "user")).toEqual([review.prompt, repair.prompt]);
+    expect(historyText(repairs[1].historyBefore, "assistant")).toHaveLength(1);
   },
   30_000,
 );
@@ -3769,7 +4073,17 @@ cliTest(
   30_000,
 );
 
-function writeWatchdogSettings(root: string, silenceMs = 100): string {
+/**
+ * Fixture watchdog allowances for real-subprocess stall tests. Silence must
+ * outlast a healthy worker's startup under the concurrent suite, and the grace
+ * periods must outlast a loaded suite delivering the checkpoint steer and the
+ * abort response. Only the fixture uses these; production defaults are unchanged.
+ */
+const WATCHDOG_SILENCE_MS = 2_000;
+const WATCHDOG_CHECKPOINT_GRACE_MS = 2_000;
+const WATCHDOG_ABORT_GRACE_MS = 1_000;
+
+function writeWatchdogSettings(root: string, silenceMs = WATCHDOG_SILENCE_MS): string {
   const settingsPath = join(root, "watchdog-settings.json");
   writeFileSync(
     settingsPath,
@@ -3779,10 +4093,8 @@ function writeWatchdogSettings(root: string, silenceMs = 100): string {
         toolMs: 100_000,
         softCheckpointMs: 100_000,
         hardCeilingMs: 100_000,
-        // Wide enough that a loaded, concurrent suite can deliver the checkpoint
-        // steer and settle the abort before the worker is terminated.
-        checkpointGraceMs: 500,
-        abortGraceMs: 500,
+        checkpointGraceMs: WATCHDOG_CHECKPOINT_GRACE_MS,
+        abortGraceMs: WATCHDOG_ABORT_GRACE_MS,
         sigkillEscalationMs: 100,
       },
       recovery: { transientRetries: 2, transientBackoffMs: [1, 1] },
@@ -3816,7 +4128,7 @@ cliTest(
       session.name.includes("review"),
     );
     expect(review.stopReason).toContain("checkpoint-grace");
-    expect(review.consumedMs).toBeGreaterThanOrEqual(100);
+    expect(review.consumedMs).toBeGreaterThanOrEqual(WATCHDOG_SILENCE_MS);
     // The specific stalled-step evidence is persisted, not just the abort reason.
     expect(review.checkpoint).toMatchObject({ reason: "silence" });
     expect(review.checkpoint.detail).toContain("no observable progress");
@@ -3931,7 +4243,7 @@ cliTest(
     const attemptTwo = afterResume.sessions.find((session: { name: string }) =>
       session.name.includes("review · attempt 2"),
     );
-    expect(attemptOne.consumedMs).toBeGreaterThanOrEqual(100);
+    expect(attemptOne.consumedMs).toBeGreaterThanOrEqual(WATCHDOG_SILENCE_MS);
     expect(attemptTwo.consumedMs).toBeGreaterThan(attemptOne.consumedMs + 50);
     expect(attemptTwo.continuationUsed).toBe(false);
     // The recovery prompt replays the persisted checkpoint evidence so an
@@ -3971,7 +4283,7 @@ cliTest(
     const attemptOne = afterFirst.sessions.find((session: { name: string }) =>
       session.name.includes("review · attempt 1"),
     );
-    expect(attemptOne.consumedMs).toBeGreaterThanOrEqual(100);
+    expect(attemptOne.consumedMs).toBeGreaterThanOrEqual(WATCHDOG_SILENCE_MS);
     expect(attemptOne.checkpoint).toMatchObject({ reason: "silence" });
     // Interrupt the controller after it persists the new attempt but before the
     // worker can report any accounting. A directory at the log path makes the
