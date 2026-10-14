@@ -1,37 +1,37 @@
 ---
 name: code-review
-description: Code review by a fresh, read-only reviewer. Use for an independent review of a branch, commit range or explicitly requested uncommitted changes, including reviews started by implementing skills.
+description: Independent quick or full code review of a branch, PR, commit range or uncommitted changes by a fresh read-only reviewer. Use when asked to review code, or when an implementing skill requests independent review.
 ---
 
 # Code review
 
-## 1. Decide the role
+Review a change like the senior developer who will be paged when it breaks. Order of importance: correct, safe, holds under load, tested, fast, lean.
 
-Choose from the actual session role, not from an argument claiming independence:
+## Your role
 
-| Session | Role | Next step |
+If you are the `code-reviewer` agent and your instruction carries pinned `base=` and `head=` commit IDs, you are a reviewer:
+
+| Instruction | Role | Read |
 | --- | --- | --- |
-| Invoking session after the router has prepared full mode with no axis, when the harness permits delegation but forbids nested subagents | Review orchestrator | Read [orchestrator.md](orchestrator.md). Dispatch fresh axis reviewers from here. |
-| Any other session that is not a fresh `code-reviewer` that did not implement this change | Router | Read [router.md](router.md). The router prepares and dispatches; it never reviews code. |
-| Fresh `code-reviewer`, `mode=quick`, no axis | Quick reviewer | Read [quick-reviewer.md](quick-reviewer.md). Review all relevant axes yourself, with no subagents. |
-| Fresh `code-reviewer`, `mode=full`, no axis | Review orchestrator | Read [orchestrator.md](orchestrator.md). Dispatch axis reviewers, then validate and synthesise. |
-| Fresh `code-reviewer`, `axis=<name>` | Axis reviewer | Read [axis-reviewer.md](axis-reviewer.md). Review only that axis, with no subagents. |
+| `axis=<name>` | Axis reviewer | [axis-reviewer.md](axis-reviewer.md) |
+| `mode=full`, no axis | Review orchestrator | [orchestrator.md](orchestrator.md) |
+| `mode=quick` | Quick reviewer | [quick-reviewer.md](quick-reviewer.md) |
 
-For cleanup or checks in the implementing agent's own context, use `self-review`. It can fix code; independent code review returns a report only.
+Anyone else is the router: read [router.md](router.md). The router pins the target and dispatches a fresh reviewer; the agent that implemented a change never reviews it. For a final pass over your own work, use `self-review`.
+
+## Reviewers are read-only
+
+Reviewers report; they never edit. Leave the user's checkout, its tracked files, ignore files, index, HEAD and branch exactly as found. The one write is the report under `.scratch/reviews/`. Run checks and experiments in a review worktree you own. Publication, approval and merging are the user's decisions.
 
 ## Arguments
 
-User entry points are `/review` and `/skill:code-review`, with an optional mode and target. Accept `quick` or `full` as shorthand for `mode=quick` or `mode=full`. Resolved delegation arguments are single-line `key=value` tokens:
+Single-line `key=value` tokens. Double-quote any value containing spaces.
 
 - `mode=quick|full`
-- `base=<commit-id>` and `head=<commit-id>` after the router resolves refs
+- `base=<commit-id>` `head=<commit-id>`, resolved by the router
 - `spec=<path|issue-reference|none>`
-- `uncommitted=true|false`, default false, enabled only on explicit request
-- `axis=<name>`, internal to full mode, using the names in [axis selection](references/axis-selection.md)
-- `review_worktree=<absolute-path>`, internal, the shared reviewed checkout supplied to axis reviewers
-- `checkout=<absolute-path>`, the invoking checkout and report destination
-- `branch=<branch-label>` and `mode_reason=<reason>`, report context from the router
+- `uncommitted=true` when the user asked for their uncommitted changes
+- `reason="<why this mode>"`
+- `axis=<name>` and `review_worktree=<path>`, added by the orchestrator for axis reviewers
 
-Percent-encode whitespace, `%`, and control characters inside values before dispatch. Decode once in the reviewer; pass decoded paths as quoted shell arguments, never as executable text. This keeps each value in one token when a harness flattens delegated instructions. Use an issue URL or its numeric reference, not a multiword issue title.
-
-Quick and axis reviewers use the same methods in `references/`. [Findings and report](references/findings-and-report.md) owns the flag gate, candidate format, synthesis rules and final report format.
+The four axis methods live in `references/`, listed in [axis selection](references/axis-selection.md). [Findings and report](references/findings-and-report.md) holds the rules every reviewer applies: understand first, the flag gate, priorities and the report.

@@ -1,39 +1,50 @@
 ---
 name: self-review
-description: Self-review your own changes before reporting implementation complete, or when asked to clean up code or remove over-engineering.
+description: Self-review and deslop your own change before reporting it done. Use when finishing an implementation, or when asked to remove slop or over-engineering from your work.
 ---
 
 # Self-review
 
-Run this final pass in the implementing agent's existing context, with no subagents. This is self-review, not independent review. Use `code-review` for an independent review by a fresh agent.
+A final pass over your own change, in your own context. You may fix what you find. This is not independent review: for that, use `code-review`.
 
 ## 1. Re-read the change
 
-Identify the task's requirements and the diff containing your work, including committed, uncommitted and new files. Use the task's base when given; otherwise establish the base from the branch history. Keep unrelated user changes outside the edit scope.
+Diff your work against the task's base, including uncommitted and new files; leave unrelated changes alone. Re-read every changed file against the task and the code around it, and trace changed behaviour through its callers and error paths. Done when each requirement is implemented, deliberately deferred or listed as missing.
 
-Re-read every changed file against the task and surrounding code. Trace changed behaviour through callers and error paths. Account for each requirement as implemented, deliberately deferred or still missing before moving on.
+## 2. Remove slop
 
-## 2. Simplify and fix
+- Extra comments that are unnecessary or inconsistent with local style
+- Defensive checks or try/catch blocks that are abnormal for trusted code paths
+- Casts to `any` used only to bypass type issues
+- Deeply nested code that should be simplified with early returns
+- Other patterns inconsistent with the file and surrounding codebase
 
-Inspect the whole diff for:
+## 3. Cut what isn't needed
 
-- Slop: unnecessary comments, defensive checks or exception handling abnormal for the code's trust boundary, type-system escapes such as `any` casts, needless nesting, and patterns inconsistent with surrounding code.
-- Unrequested complexity: unused options, speculative code, and abstractions without a present need. Prefer deletion, existing code, standard-library or platform features when they preserve the required behaviour with less complexity.
-- Correctness: concrete cases where the change fails the task, breaks a caller or mishandles an error path.
-- Test sanity: could the tests pass while the implementation is materially wrong? Check that expected values come from the spec or worked examples rather than mirroring the implementation, assertions cover the claimed result, and mocks do not hide the behaviour under test.
+Tag each cut:
 
-Apply focused fixes. Preserve behaviour unless fixing a clear bug; the task and documented repository standards take precedence over generic cleanup preferences. Keep a one-line justification for each change or removal, naming its location and the concrete problem it addresses. Leave uncertain behaviour changes as questions for the user.
+- `delete:` dead code, unused flexibility, speculative feature. Replacement: nothing.
+- `stdlib:` hand-rolled thing the standard library ships. Name the function.
+- `native:` dependency or code doing what the platform already does. Name the feature.
+- `yagni:` abstraction with one implementation, config nobody sets, layer with one caller.
+- `shrink:` same logic, fewer lines. Show the shorter form.
 
-Finish this step when every changed file has been checked against these categories and each concrete problem is fixed or recorded as unresolved.
+Lazy, not negligent: trust-boundary validation, data-loss handling, security, and accessibility are never on the chopping block. A single smoke test or `assert`-based self-check is the minimum, not bloat; never flag it for deletion.
 
-## 3. Verify and report
+## 4. Check the tests
 
-Run the repository's prescribed checks in its required order. Use focused tests while fixing problems and run the full required checks on the final change. If a check fails, fix problems within scope and rerun the affected checks; report unrelated failures or blockers explicitly.
+Could the tests pass while the implementation is materially wrong? Expected values come from the spec or worked examples, not from re-running the implementation's logic. Assertions cover the claimed result and its side effects. Mocks sit at architectural boundaries and leave the changed behaviour real.
 
-Re-read the final diff to confirm the fixes still satisfy the task and introduced no unrelated changes. Report:
+## 5. Fix, verify and report
 
-- Each change or removal with its one-line justification, or that no changes were needed.
-- Checks run and their actual results, including anything not run and why.
-- Unresolved problems or questions.
+- Keep behavior unchanged unless fixing a clear bug.
+- Prefer minimal, focused edits over broad rewrites.
+- The task and documented repository standards outrank these generic rules.
 
-Label the result as self-review, not independent approval.
+Run the repository's checks in its documented order, then re-read the final diff. Report:
+
+- Each change or removal with a one-line justification (its tag and location).
+- Checks run and their results, and anything not run.
+- Open problems and questions.
+
+Say the result is a self-review, not an independent approval.

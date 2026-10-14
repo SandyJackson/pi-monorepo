@@ -81,7 +81,7 @@ An independent, read-only examination of a change by a fresh agent that did not 
 The review's allocation of work. Quick uses one reviewer for all relevant axes; full uses an orchestrator and separate axis reviewers.
 
 **Review target**:
-The pinned base and head commits whose final comparison is reviewed. An explicitly requested uncommitted review is a live checkout delta, identified as an exception to the pinned target.
+The pinned base and head commits whose final comparison is reviewed. An explicitly requested review of uncommitted changes compares the checkout with its HEAD instead.
 
 **Review axis**:
 One review perspective with a shared method: correctness and requirements, security and resilience, design and maintainability, or tests and verification.

@@ -1,76 +1,85 @@
 # Findings and report
 
+## Understand first
+
+- Read the diff, then the code it touches: callers of every changed function, the functions it calls, the tests, the README.
+- Trace the real flow: where data comes in, what is stored, what goes out.
+- A change can break code it does not touch. When a signature, return value or behavior changes, grep every caller.
+- Find the expected load in the repo (README, deploy config): one person running a script, or many users and processes at once. Judge scale against that, and say which load you assumed.
+
 ## Flag gate
 
-No concrete case, no finding. Apply every criterion to every candidate:
+Flag an issue only when all of these hold. "The commit" and "the PR" mean the review target.
 
-- The change introduces the defect; a pre-existing defect is outside findings.
-- It has a material correctness, security, performance or maintainability consequence.
-- It is discrete and actionable, with affected code identified.
-- The author would plausibly fix it on seeing the evidence.
-- Its trigger and consequence follow from code or stated requirements, not unstated assumptions.
-- Affected callers or consumers are identifiable and provably reached, not merely imagined.
-- It is not the intended behaviour change. An intentional change can still break a separate established contract; name that contract.
-- The proposed fix demands no more rigour than the repository applies to comparable code.
+1. It meaningfully impacts the accuracy, performance, security, or maintainability of the code.
+2. The bug is discrete and actionable (i.e. not a general issue with the codebase or a combination of multiple issues).
+3. Fixing the bug does not demand a level of rigor that is not present in the rest of the codebase (e.g. one doesn't need very detailed comments and input validation in a repository of one-off scripts in personal projects).
+4. The bug was introduced in the commit (pre-existing bugs should not be flagged).
+5. The author of the original PR would likely fix the issue if they were made aware of it.
+6. The bug does not rely on unstated assumptions about the codebase or author's intent.
+7. It is not enough to speculate that a change may disrupt another part of the codebase, to be considered a bug, one must identify the other parts of the code that are provably affected.
+8. The bug is clearly not just an intentional change by the original author.
 
-Documented repository standards override generic heuristics. Cite the applicable rule for standard-based findings. Unsupported style preferences stay out. Keep one brief finding per root cause, with a narrow file:line range, trigger, impact, evidence and smallest useful fix direction.
+Output all findings that the original author would fix if they knew about it. If there is no finding that a person would definitely love to see and fix, prefer outputting no findings. Do not stop at the first qualifying finding.
 
-## Priority and evidence
+Ignore trivial style unless it obscures meaning or violates documented standards. A documented repository standard overrides the generic heuristics in these references; cite it for any finding it supports.
 
-Assign priority by consequence:
+## Check before you report
+
+- Every finding needs a concrete case: "this input or situation leads to this wrong result". No case, no finding.
+- Re-read the lines and confirm: the caller exists, the value can really be empty, the code really is unused.
+- Propose the smallest fix that works. Prefer fixes that delete code. Never add layers, frameworks or config the problem does not need.
+- No style taste, no "consider", no vague worries.
+
+A concern you cannot confirm is a **review question**: say what evidence would settle it.
+
+## Writing a finding
+
+- The comment should be clear about why the issue is a bug.
+- The comment should appropriately communicate the severity of the issue. It should not claim that an issue is more severe than it actually is.
+- The comment should be brief. The body should be at most 1 paragraph.
+- The comment should clearly and explicitly communicate the scenarios, environments, or inputs that are necessary for the bug to arise. The comment should immediately indicate that the issue's severity depends on these factors.
+- The comment's tone should be matter-of-fact and not accusatory or overly positive.
+- Keep the line range as short as possible for interpreting the issue.
+
+Each finding has a priority, a `file:line` location, the trigger, the impact, the fix and its evidence.
 
 | Priority | Meaning |
 | --- | --- |
-| P0 | Blocks merge regardless of inputs. An unconditional failure of release, operations or core usage. |
-| P1 | Must fix before merge. A reachable case causes serious incorrect behaviour, exposure, data loss or a broken required contract. |
-| P2 | Worth fixing, not merge-blocking. A concrete lesser defect or maintenance/test gap. |
-| P3 | Optional. Keep brief or omit. |
+| P0 | Drop everything to fix. Blocking release, operations, or major usage. Only use for universal issues that do not depend on any assumptions about the inputs. |
+| P1 | Must fix before merge: a reachable case causes incorrect behaviour, exposure, data loss or a broken contract. |
+| P2 | Worth fixing, not blocking: a lesser defect, or risky logic with no test. |
+| P3 | Optional: a small speed-up or a shorter form. Keep brief. |
 
-Evidence is `reproduced` when a command or experiment demonstrated the trigger and impact, or `traced in code` when an explicit execution path proves them. `unverified` belongs only in review questions, never in findings. Distinguish checks actually run from checks recommended to the author.
+Evidence is **reproduced** (a command or experiment showed it) or **traced in code** (the execution path proves it). Keep checks you ran separate from checks you recommend.
 
 ## Axis candidate return
 
-Axis reviewers return candidates to the orchestrator, not a saved final report. Give each candidate an axis-local ID. Include proposed priority, narrow location, reachable trigger and affected caller, impact, evidence status, introduction by this change, and smallest useful fix direction. Cite commands and results for reproduced evidence or the execution path for code traces. Label unresolved concerns as questions.
-
-Also return the assigned axis, files and connected paths examined, requirements sources or inferred intent, checks actually run with results, recommended checks, declined-to-judge decisions and coverage limits. An empty candidate list is valid; distinguish it from unfinished work.
+Axis reviewers return candidates, not a report. Give each an ID (`tests-1`) plus the finding fields above. Then list: files and callers examined, the spec or inferred intent used, checks run with results, review questions, declined-to-judge items and coverage limits. An empty candidate list is a valid result; say whether the axis finished.
 
 ## Full synthesis
 
-Validate every returned candidate against the reviewed contents yourself. Re-read its location, trace the caller and trigger, and check guards, tests, requirements and every flag-gate criterion. Reviewer agreement is a reason to inspect, not proof. Scrutinise a concrete security or correctness case even when only one reviewer found it. Prior conversation, hypothetical callers and preferred alternative designs are not evidence.
+Validate every candidate yourself against the code at head, using the flag gate and check-before-you-report. Merge duplicates by root cause, keeping every contributing ID. Filter with these:
 
-Deduplicate by root cause, retaining the strongest evidence and all contributing candidate IDs. One defect reported by several axes gets one finding. Give every candidate an explicit disposition:
+- **Nitpick gravity.** Reviewers tend to fill their review. If they don't find critical issues, they'll inflate nits to fill the space. If a reviewer's findings are all nits and style preferences, the code is probably fine. Say so.
+- **Hypothetical vs. actual.** "What if someone passes null here?" is only a finding if the caller can actually pass null. Trace the call site. If the input is validated upstream or the type system prevents it, dismiss the finding.
+- **"I would have done it differently."** This is the most common false positive in code review. A finding that amounts to "I prefer a different approach" is not a bug, not a design flaw, and not actionable unless the reviewer shows a concrete problem with the current approach. Dismiss these, and say why.
+- **Missing context.** Watch for findings on code the author didn't write or modify, and for patterns flagged that are consistent with the rest of the codebase.
+- **When reviewers are right.** Be especially careful about dismissing security findings and correctness bugs. These deserve more scrutiny even when they come from a single reviewer.
 
-| Group | Meaning |
-| --- | --- |
-| Act on | Validated P0 or P1 findings requiring action before merge |
-| Consider | Validated P2 findings worth fixing without blocking merge |
-| Noted | Validated P3 findings, kept brief |
-| Dismissed with reason | Rejected candidates, with the guard, contract, evidence or failed flag-gate criterion that defeats them |
+Group the results: **act on** (P0, P1), **consider** (P2), **noted** (P3), **dismissed** (rejected or merged, with the reason or the finding it merged into). If your act-on list has more than 5 items, you're probably not filtering hard enough. The dismissed list is a trust mechanism: it lets the user overrule your filtering.
 
-Unresolved candidates become review questions with `unverified` evidence, not findings or claims of safety. Record their candidate IDs there. Preserve dismissed IDs and a brief reason so the user can challenge the filtering. Merged duplicate IDs link to the retained finding rather than implying the defect was rejected.
-
-Treat more than about five act-on items as a signal to recheck filtering, root causes and priority. This is not a quota: retain every independently supported serious defect. If the returned set contains only nits or unsupported preferences, an empty findings list is the right result; leave taste out rather than promoting it to a defect.
-
-Synthesis is complete when every returned candidate is linked to a validated finding, review question or reasoned dismissal, and every selected axis has a recorded completion, failure or timeout outcome.
+Done when every candidate is a finding, a review question or a dismissal, and every selected axis is recorded as finished, failed or timed out.
 
 ## Report
 
-Return these sections even when their lists are empty:
+1. Start with `What this change does:` in two or three sentences. Mark the intent inferred when there is no spec.
+2. **Findings**, grouped by priority (in full mode by act on, consider, noted). Number findings across all groups, so the user can say "fix 2 and 5". Full mode follows them with the dismissed list.
+3. **Review questions**: unconfirmed concerns and the evidence that would settle them.
+4. **Declined to judge**: every behaviour you considered and set aside as outside the plan or spec, one line each, with the reason. The user rules on each line; nothing you set aside is dropped silently. An empty list means you set nothing aside.
+5. **Coverage note**: base and head IDs, committed or uncommitted target, mode and reason, spec used, axes run, skipped or incomplete, checks run with results, assumed load, what you could not check.
+6. End with `Verdict: Ship.` or `Verdict: fix 1 and 3 first.`, and `Lean: -<N> lines possible.` when lean findings exist.
 
-1. **What the change does**. A short factual summary. Mark inferred intent when there is no spec.
-2. **Findings by priority**. Number findings across P0 to P3. Each includes location, reachable trigger, impact, evidence status and fix direction. State "No validated findings" when empty; this is not proof of correctness.
-3. **Review questions**. Unverified concerns, missing context and the evidence needed to decide them.
-4. **Declined to judge**. Each behaviour deliberately set aside and why, or "None". This preserves scope decisions for the user's judgement.
-5. **Coverage note**. Include base/head IDs, branch, committed or live target, mode and selection reason, spec reference and any inference, axes run or skipped with reasons, checks and their actual results, assumed load, unavailable checks, limits, cleanup status and saved report path.
+Nothing found: `What this change does:`, then `Looks good. Ship.` and the coverage note. Missing coverage is never a clean review.
 
-Full mode uses these same sections. Within Findings by priority, label P0/P1 as act on, P2 as consider and P3 as noted. Follow them with a dismissed-with-reason list, including duplicate-to-finding links. Keep unresolved candidates in Review questions. In coverage record failed or timed-out axes, partial results used, and the invoking-session fallback when applicable. Missing coverage is not a clean review.
-
-Save under the invoking `checkout`, not the temporary worktree:
-
-```text
-.scratch/reviews/<YYYY-MM-DD>-<branch>-<head7>-<mode>.md
-```
-
-Use the local date and pinned head's first seven characters. Sanitize the branch label to filename-safe letters, digits, dots, underscores and hyphens, replacing slashes and other characters with hyphens. Keep it a single filename component. For a live review, the head ID identifies the anchor, not the mutable contents; say so in coverage. If the same filename exists, append a time suffix before `.md` to preserve the earlier report.
-
-Create only the report directory and report file in the user's checkout. Preserve ignore files and tracked source. Return the saved Markdown as the final message; publication to GitHub, approval and merge are outside this review.
+Save the report to `.scratch/reviews/<YYYY-MM-DD>-<branch>-<head7>-<mode>.md` in the checkout the review was started from, creating the directory if needed. Take the branch from `git branch --show-current` (`detached` if empty), with `/` and other non-filename characters replaced by `-`. If the file exists, add the time before `.md`. Write it with bash, then return the same Markdown as your final message. If saving fails, say so and still return the report.

@@ -1,52 +1,48 @@
 # Router
 
-Prepare the target and dispatch one fresh reviewer. Read only the scope metadata needed for routing, not the code for findings.
+Pin the target, resolve the spec, pick the mode, then dispatch one fresh `code-reviewer`. Read only what routing needs; the reviewer reads the code.
 
 ## 1. Pin the target
 
-Record the invoking checkout with `git rev-parse --show-toplevel` and its branch with `git branch --show-current`. Use `detached` plus the short head ID as the label when detached. This checkout is the report's main checkout, even when it is itself a worktree.
+Resolve refs to commit IDs with `git rev-parse --verify '<ref>^{commit}'`.
 
-Resolve the head ref, default `HEAD`, with `git rev-parse --verify --end-of-options '<ref>^{commit}'`. Resolve an explicit `base=` the same way and use that commit directly. With no explicit base, discover the repository's default branch from the remote HEAD symbolic ref or repository metadata. If neither establishes it, ask the user; the current feature branch is not a fallback. Resolve the default branch and compute `git merge-base <default-branch-id> <head-id>` as the base.
+- **head**: the user's `head=`, default `HEAD`.
+- **base**: the user's `base=`, used as given. Otherwise the merge-base of head and the default branch, found with `git symbolic-ref --short refs/remotes/origin/HEAD`. If that fails, ask the user which branch to compare against.
 
-Check `git diff --quiet <base-id> <head-id> --`. Exit 0 means empty and stops dispatch; exit 1 means a diff; other failures also stop. Both IDs must resolve before proceeding. Use the final two-commit comparison, not intermediate commit diffs, as the review target.
+Stop on a ref that doesn't resolve, or when `git diff --quiet <base> <head>` reports no difference.
 
-### Explicit uncommitted review
+**Uncommitted changes**, only when the user asks for them: set base and head to the current `HEAD` and add `uncommitted=true`. The target is `git diff HEAD` plus untracked files from `git status --porcelain`. Stop if both are empty. Ask the user not to edit files until the review returns.
 
-Normalize an explicit request for staged, unstaged or untracked changes to `uncommitted=true`. Review the combined current checkout delta against `HEAD`, including untracked non-ignored files, in place. Pin base and head to the current `HEAD`; reject conflicting `base=` or `head=` rather than mixing a commit-range review with a live review. Check `git status --porcelain --untracked-files=all` for a non-empty target. Tell the user this is a live review and ask them to pause editing until it finishes.
+Done when base and head are commit IDs and the target is non-empty.
 
-This branch is deliberately not an immutable snapshot. Dispatch into the invoking checkout and label the exception in the report.
+## 2. Resolve the spec
 
-Finish when the comparison is non-empty, both IDs are recorded, and the checkout and branch label are known.
+Take the first that applies:
 
-## 2. Resolve the spec reference
+1. The user's `spec=`, including `spec=none`.
+2. Issue references (`#123`, `Closes #45`) in `git log <base>..<head> --format=%B`.
+3. A spec file under `docs/`, `specs/` or `.scratch/` matching the branch or feature.
+4. Ask the user for a path, an issue reference or `none`.
 
-Use the first available source:
+Ask when more than one candidate fits equally. Pass the reference, made absolute if it is a path; the reviewer reads it.
 
-1. Explicit `spec=`, including `spec=none`.
-2. Issue references in `git log <base-id>..<head-id> --format=%B`. For live changes, inspect the current head's commit message. Prefer the originating requirements issue over incidental mentions; ask the user if multiple references leave the choice ambiguous.
-3. A spec file under `docs/`, `specs/` or `.scratch/` matching the branch or feature. Ask the user if multiple files match equally.
-4. Ask the user for a path, issue reference or `none`.
+## 3. Pick the mode
 
-Pass only the reference. The reviewer reads or fetches its contents. Resolve relative file paths against the invoking checkout to absolute paths before encoding them. Do not invent requirements when the user chooses `none`.
+Use the user's `quick` or `full`. Otherwise choose:
 
-Finish with one reference or `none`; awaiting a user answer is not permission to dispatch with a guessed spec.
+- **quick** for documentation, configuration or a contained change in one area.
+- **full** for behaviour spanning modules, trust boundaries, persistence or concurrency.
 
-## 3. Choose the mode
-
-Accept an explicit quick or full mode and record that it was requested. Otherwise inspect the change's file list, diff size and commit descriptions, including untracked files for live review. Recommend and choose quick for small, low-risk documentation, configuration or contained single-area changes. Choose full for behaviour spanning modules, trust boundaries, persistence or concurrency. Risk takes precedence over line count; configuration that changes permissions is not automatically low-risk. If metadata leaves the risk unclear, choose full and state that uncertainty.
-
-Record a target-specific reason as `mode_reason=` and announce the choice. Finish when mode and reason are recorded; a recommendation needs no extra confirmation.
+Risk outranks size: a one-line permissions change is full. When unsure, choose full. Tell the user the mode and why, and pass it as `reason=`.
 
 ## 4. Dispatch
 
-Use the harness's delegation facility to start one fresh `code-reviewer`, with the invoking checkout as its working directory and no implementing conversation carried into it. Its instruction must begin with the skill invocation on one line:
+Start one fresh `code-reviewer` with this checkout as its working directory and nothing from your conversation. The instruction is one line, starting:
 
 ```text
-/skill:code-review mode=<quick-or-full> base=<base-id> head=<head-id> spec=<encoded-reference> uncommitted=false checkout=<encoded-absolute-path> branch=<encoded-label> mode_reason=<encoded-reason>
+/skill:code-review mode=<mode> base=<base> head=<head> spec=<spec> reason="<reason>"
 ```
 
-For live review, change `uncommitted` to true. Use the agent definition's model, thinking level and default timeout. Wait for its report and return it with the saved path. If dispatch fails or times out, report that independent review did not complete, rather than reviewing the code yourself.
+Add `uncommitted=true` when it applies. Wait for the report and return it with its saved path. If the reviewer fails or times out, say the independent review did not complete.
 
-Where subagents are unavailable, give the user the resolved instruction and ask them to run it in a fresh reviewer session with the `code-reviewer` definition and this skill loaded, using a harness that supports axis delegation for full mode. Where only nested subagents are unavailable, delegate quick mode normally. For full mode, finish routing here and read [orchestrator.md](orchestrator.md) in this invoking session with the resolved arguments. Use the `code-reviewer` definition's model, thinking level and timeout budget for orchestration and dispatch fresh axis reviewers directly. State this fallback in coverage; prior implementation knowledge is not evidence for a finding.
-
-Finish when the reviewer has returned a report or the dispatch failure has been reported. Publication, approval and merging remain the user's decisions.
+Where nested subagents are unavailable, a full review runs its orchestrator here: read [orchestrator.md](orchestrator.md) with these arguments and dispatch the axis reviewers from this session. Say so in the coverage note. Where no subagents are available, give the user the instruction to run in a fresh `code-reviewer` session.
