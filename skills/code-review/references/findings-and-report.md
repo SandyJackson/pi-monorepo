@@ -13,6 +13,14 @@ Flag an issue only when all of these hold.
 
 Ignore trivial style unless it obscures meaning or violates documented standards. A documented repository standard overrides the generic heuristics in these references; cite it for any finding it supports.
 
+## Pre-existing issues
+
+A bug older than the review target is not a finding, but it is still worth knowing when tracing the change led you straight to it.
+
+- Do not hunt for these. Only what you met while reading the code the change touches: a broken caller, a function you called, a test next to the one you read.
+- It needs the same concrete case as a finding, and it goes in its own list, one line each, with no priority. It does not count towards the verdict.
+- If the change newly exposes it, a new caller now reaching a broken path for instance, the change introduced it: that is a normal finding.
+
 ## Check before you report
 
 - Every finding needs a concrete case: "this input or situation leads to this wrong result". No case, no finding.
@@ -42,7 +50,7 @@ Evidence is **reproduced** (a command or experiment showed it) or **traced in co
 
 ## Axis candidate return
 
-Axis reviewers return candidates, not a report. Give each an ID (`tests-1`) plus the finding fields above. Then list: files and callers examined, the spec or inferred intent used, checks run with results, review questions, declined-to-judge items and coverage limits. An empty candidate list is a valid result; say whether the axis finished.
+Axis reviewers return candidates, not a report. Give each an ID (`tests-1`) plus the finding fields above. Candidates predating the review target go in a separate pre-existing list, not among the findings. Then list: files and callers examined, the spec or inferred intent used, checks run with results, review questions, declined-to-judge items and coverage limits. An empty candidate list is a valid result; say whether the axis finished.
 
 ## Full synthesis
 
@@ -62,10 +70,11 @@ Done when every candidate is a finding, a review question or a dismissal, and ev
 
 1. Start with `What this change does:` in two or three sentences. Mark the intent inferred when there is no spec.
 2. **Findings**, grouped by priority (in full mode by act on, consider, noted). Number findings across all groups, so the user can say "fix 2 and 5". Full mode follows them with the dismissed list.
-3. **Review questions**: unconfirmed concerns and the evidence that would settle them.
-4. **Declined to judge**: every behaviour you considered and set aside as outside the plan or spec, one line each, with the reason. The user rules on each line; nothing you set aside is dropped silently. An empty list means you set nothing aside.
-5. **Coverage note**: base and head IDs, committed or uncommitted target, mode and reason, spec used, axes run, skipped or incomplete, checks run with results, assumed load, what you could not check.
-6. End with `Verdict: Ship.` or `Verdict: fix 1 and 3 first.`, and `Lean: -<N> lines possible.` when lean findings exist.
+3. **Pre-existing issues**: bugs you met while tracing, when there are any.
+4. **Review questions**: unconfirmed concerns and the evidence that would settle them.
+5. **Declined to judge**: every behaviour you considered and set aside as outside the plan or spec, one line each, with the reason. The user rules on each line; nothing you set aside is dropped silently. An empty list means you set nothing aside.
+6. **Coverage note**: base and head IDs, committed or uncommitted target, mode and reason, spec used, axes run, skipped or incomplete, checks run with results, assumed load, what you could not check.
+7. End with `Verdict: Ship.` or `Verdict: fix 1 and 3 first.`, and `Lean: -<N> lines possible.` when lean findings exist.
 
 Nothing found: `What this change does:`, then `Looks good. Ship.` and the coverage note. Missing coverage is never a clean review.
 
