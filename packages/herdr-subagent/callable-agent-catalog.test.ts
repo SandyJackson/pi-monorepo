@@ -154,7 +154,7 @@ describe("agent discovery", () => {
     writeAgent(userAgentsDir, "unreadable.md", "unreadable", "unreadable definition");
     fs.writeFileSync(
       path.join(userAgentsDir, "configured.md"),
-      "---\nname: configured\ndescription: configured agent\ntools: read, bash\nmodel: provider/model\n---\nKeep this prompt.\n",
+      "---\nname: configured\ndescription: configured agent\ntools: read, bash\nmodel: provider/model\nthinking: high\n---\nKeep this prompt.\n",
     );
     writeAgent(projectAgentsDir, "shared.md", "shared", "project definition");
     const nestedDir = path.join(projectDir, "nested", "child");
@@ -180,6 +180,7 @@ describe("agent discovery", () => {
     expect(merged.find(({ name }) => name === "configured")).toMatchObject({
       tools: ["read", "bash"],
       model: "provider/model",
+      thinking: "high",
       systemPromptBody: "Keep this prompt.",
     });
   });

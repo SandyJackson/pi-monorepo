@@ -54,7 +54,7 @@ const SubagentParams = Type.Object(
       Type.Integer({
         minimum: 1,
         description:
-          "Per-task delegation timeout in minutes (default: " +
+          "Per-task delegation timeout in minutes (overrides the agent default, otherwise " +
           DEFAULT_TURN_TIMEOUT_MINUTES +
           "). " +
           "On expiry the child pane is left running for manual inspection.",
@@ -108,7 +108,6 @@ function truncateAnswer(answer: string): string {
 export type ExecuteDelegation = (
   tasks: readonly DelegatedTaskRecord[],
   options: {
-    timeoutMs: number;
     /** Purpose label for the delegation's tab; the delegation falls back to sub-agents. */
     label?: string;
     signal?: AbortSignal;
@@ -212,12 +211,15 @@ export function createSubagentTool(
           });
           continue;
         }
-        validTasks.push({ ...task, config });
+        validTasks.push({
+          ...task,
+          config,
+          timeoutMs: (params.timeout ?? config.timeout ?? DEFAULT_TURN_TIMEOUT_MINUTES) * 60 * 1000,
+        });
       }
 
       if (validTasks.length > 0) {
         const executions = await options.executeDelegation(validTasks, {
-          timeoutMs: (params.timeout ?? DEFAULT_TURN_TIMEOUT_MINUTES) * 60 * 1000,
           label: tabLabel,
           signal: _signal,
           onProgress: (update) => {
@@ -238,9 +240,8 @@ export function createSubagentTool(
         return result;
       });
       const completedCount = results.filter(({ outcome }) => outcome.status === "completed").length;
-      const timeoutMinutes = params.timeout ?? DEFAULT_TURN_TIMEOUT_MINUTES;
       // biome-ignore lint/suspicious/useIterableCallbackReturn: switch is exhaustive over the status union; the ": string" annotation makes a missed case a compile error
-      const resultTexts = results.map(({ outcome }): string => {
+      const resultTexts = results.map(({ task, outcome }): string => {
         switch (outcome.status) {
           case "invalid":
             return outcome.error;
@@ -250,8 +251,13 @@ export function createSubagentTool(
               ? `The delegated turn completed without a final answer. Inspect the visible session in pane ${outcome.session.paneId}.`
               : truncateAnswer(answer);
           }
-          case "timed_out":
+          case "timed_out": {
+            const timeoutMinutes =
+              "timeoutMs" in task && task.timeoutMs !== undefined
+                ? task.timeoutMs / 60_000
+                : DEFAULT_TURN_TIMEOUT_MINUTES;
             return `The delegated turn timed out after ${timeoutMinutes} ${timeoutMinutes === 1 ? "minute" : "minutes"}. The visible session remains available in pane ${outcome.session.paneId}.`;
+          }
           case "aborted":
             return outcome.stage === "before_launch"
               ? "The delegated task was aborted before launch. No visible subagent session was started."

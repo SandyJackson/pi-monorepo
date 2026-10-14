@@ -10,8 +10,12 @@ Pi discovers agents from the `agents/` directory in the agent directory (typical
    - `display_name` - Display name
    - `tools` - Tool allowlist
    - `model` - Model override
+   - `thinking` - Thinking level passed to visible subagents as `--thinking`; omitted to use Pi's default
+   - `timeout` - Optional positive integer number of minutes for the agent's default delegation timeout
    - `extensions` - Required extensions
 3. The body of the markdown file is used as the system prompt
+
+For `herdr-subagent`, the call's `timeout` overrides each agent's frontmatter `timeout`. An agent without a timeout uses the 60-minute default. Invalid frontmatter timeouts stop discovery with an error naming the file and the positive-integer requirement.
 
 ## Manual Copy Instructions
 
@@ -48,6 +52,8 @@ description: Agent description
 display_name: Agent Name
 tools: read, grep, find, ls, bash
 model: openai-codex/gpt-5.6-sol
+thinking: high
+timeout: 90
 extensions:
   - bash-permission
 ---

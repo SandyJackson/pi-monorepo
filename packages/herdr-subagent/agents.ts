@@ -46,9 +46,13 @@ export interface ParsedAgentFile {
   model?: string;
   /** Thinking-level override from frontmatter `thinking`; `undefined` means Pi's default. */
   thinking?: string;
+  /** Default delegation timeout in positive integer minutes. */
+  timeout?: number;
   /** Body text after frontmatter (role guidance for the system prompt). */
   systemPromptBody: string;
 }
+
+class InvalidAgentTimeoutError extends Error {}
 
 /** Normalize one agent file's frontmatter and body into a `ParsedAgentFile`. */
 export function parseAgentFileContent(content: string, fallbackName: string): ParsedAgentFile {
@@ -83,7 +87,16 @@ export function parseAgentFileContent(content: string, fallbackName: string): Pa
   if (thinkingRaw !== undefined && typeof thinkingRaw !== "string")
     throw new Error("frontmatter `thinking` must be a string");
   const thinking = typeof thinkingRaw === "string" ? thinkingRaw.trim() : undefined;
-  return { name, description, tools, model, thinking, systemPromptBody: body.trim() };
+  const timeout = frontmatter.timeout;
+  if (
+    timeout !== undefined &&
+    (typeof timeout !== "number" || !Number.isInteger(timeout) || timeout <= 0)
+  ) {
+    throw new InvalidAgentTimeoutError(
+      "frontmatter `timeout` must be a positive integer number of minutes",
+    );
+  }
+  return { name, description, tools, model, thinking, timeout, systemPromptBody: body.trim() };
 }
 
 /** A resolved agent definition from a markdown file. */
@@ -109,6 +122,10 @@ export interface AgentConfig {
    * `undefined` means "use Pi's default model".
    */
   model?: string;
+  /** Thinking-level override; omitted to use Pi's default. */
+  thinking?: string;
+  /** Default delegation timeout in positive integer minutes. */
+  timeout?: number;
   /** Body text after frontmatter (appended as system prompt in child pane). */
   systemPromptBody: string;
   /** Whether the agent was loaded from the user or project directory. */
@@ -158,7 +175,10 @@ function loadFromDir(dirPath: string, source: "user" | "project"): AgentConfig[]
     let parsed: ParsedAgentFile;
     try {
       parsed = parseAgentFileContent(content, path.basename(filePath, ".md"));
-    } catch {
+    } catch (error) {
+      if (error instanceof InvalidAgentTimeoutError) {
+        throw new Error(`${filePath}: ${error.message}`, { cause: error });
+      }
       // Malformed frontmatter — skip this file
       continue;
     }
@@ -171,6 +191,8 @@ function loadFromDir(dirPath: string, source: "user" | "project"): AgentConfig[]
       description: parsed.description,
       tools: parsed.tools,
       model: parsed.model,
+      thinking: parsed.thinking,
+      timeout: parsed.timeout,
       systemPromptBody: parsed.systemPromptBody,
       source,
       sourceDir: dirPath,
