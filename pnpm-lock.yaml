@@ -20,6 +20,9 @@ importers:
       '@pi-workspace/session-auto-name':
         specifier: workspace:*
         version: link:packages/session-auto-name
+      '@pi-workspace/worktree-trust':
+        specifier: workspace:*
+        version: link:packages/worktree-trust
       '@tmustier/pi-code-actions':
         specifier: workspace:*
         version: link:packages/code-actions
@@ -118,6 +121,15 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 0.99.2
         version: 0.99.2(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
+
+  packages/worktree-trust:
+    devDependencies:
+      '@earendil-works/pi-coding-agent':
+        specifier: 0.99.2
+        version: 0.99.2(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
 
 packages:
 
