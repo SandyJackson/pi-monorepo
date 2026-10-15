@@ -152,6 +152,78 @@ describe("decideWorktreeTrust", () => {
     expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
   });
 
+  it("is undecided when an untracked symlink is added to the skills", async () => {
+    trustStore.set(repo, true);
+    writeFile(join(root, "outside.md"));
+    mkdirSync(join(worktree, ".agents", "skills", "linked"));
+    symlinkSync(
+      join(root, "outside.md"),
+      join(worktree, ".agents", "skills", "linked", "SKILL.md"),
+    );
+
+    expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
+  });
+
+  it("is undecided when the skills directory is reached through a symlink", async () => {
+    trustStore.set(repo, true);
+    const outside = join(root, "outside-agents");
+    writeFile(join(outside, "skills", "demo", "SKILL.md"), "trusted\n");
+    rmSync(join(worktree, ".agents"), { recursive: true });
+    symlinkSync(outside, join(worktree, ".agents"));
+
+    expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
+  });
+
+  it("is undecided when a skill is deleted", async () => {
+    trustStore.set(repo, true);
+    rmSync(join(worktree, ".agents", "skills", "demo"), { recursive: true });
+
+    expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
+  });
+
+  it("is undecided when .agents is a submodule with changed skills", async () => {
+    git(repo, "rm", "-rq", ".agents");
+    const nested = join(repo, ".agents");
+    mkdirSync(nested);
+    git(nested, "init", "-q", "-b", "main");
+    writeFile(join(nested, "skills", "demo", "SKILL.md"), "trusted\n");
+    commitAll(nested, "nested skills");
+    commitAll(repo, "move skills into a submodule");
+    trustStore.set(repo, true);
+    git(worktree, "merge", "-q", "--ff-only", "main");
+    writeFile(join(worktree, ".agents", "skills", "demo", "SKILL.md"), "changed\n");
+
+    expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
+  });
+
+  it("is undecided when skills appear in an untracked nested repository", async () => {
+    git(repo, "rm", "-rq", ".agents");
+    commitAll(repo, "remove skills");
+    trustStore.set(repo, true);
+    git(worktree, "merge", "-q", "--ff-only", "main");
+    const nested = join(worktree, ".agents");
+    mkdirSync(nested);
+    git(nested, "init", "-q", "-b", "main");
+    writeFile(join(nested, "skills", "demo", "SKILL.md"));
+    commitAll(nested, "nested skills");
+
+    expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
+  });
+
+  it("is undecided when Git attributes hide a skill edit from git diff", async () => {
+    writeFile(join(repo, ".agents", "skills", "demo", "SKILL.md"), "description: $Id$\n");
+    commitAll(repo, "add ident token");
+    trustStore.set(repo, true);
+    git(worktree, "merge", "-q", "--ff-only", "main");
+    writeFile(join(worktree, ".gitattributes"), "*.md ident\n");
+    writeFile(
+      join(worktree, ".agents", "skills", "demo", "SKILL.md"),
+      "description: $Id: injected instructions $\n",
+    );
+
+    expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
+  });
+
   it("is undecided when a committed symlink exposes unchanged repo files as Pi config", async () => {
     trustStore.set(repo, true);
     writeFile(join(repo, "fixtures", "pi", "settings.json"), "{}\n");

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
@@ -88,52 +88,64 @@ function skillPaths(worktreeRoot: string, cwd: string): string[] {
 }
 
 /**
- * True when Git cannot vouch for a skill's content: it is reached through a
- * symlink, or its index entry is a symlink, a submodule, or flagged
- * assume-unchanged or skip-worktree (which hide edits from `git diff`).
+ * Files under the skill directories as Pi reads them, relative to the worktree
+ * root. Undefined when they hold anything other than plain files and
+ * directories, or are reached through a symlink. Symlinks are never followed,
+ * so the walk stays inside the worktree.
  */
-async function skillsUnverifiable(
-  worktreeRoot: string,
-  paths: string[],
-  pathspecs: string[],
-): Promise<boolean> {
-  for (const path of paths) {
-    const absolute = join(worktreeRoot, path);
-    if (existsSync(absolute) && realpathSync(absolute) !== absolute) return true;
+function readSkillFiles(worktreeRoot: string, paths: string[]): string[] | undefined {
+  const files: string[] = [];
+  const pending = paths.filter((path) => existsSync(join(worktreeRoot, path)));
+  if (pending.some((path) => realpathSync(join(worktreeRoot, path)) !== join(worktreeRoot, path)))
+    return undefined;
+  for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
+    if (!statSync(join(worktreeRoot, dir)).isDirectory()) return undefined;
+    for (const entry of readdirSync(join(worktreeRoot, dir), { withFileTypes: true })) {
+      if (entry.isFile()) files.push(join(dir, entry.name));
+      else if (entry.isDirectory()) pending.push(join(dir, entry.name));
+      else return undefined;
+    }
   }
-  // Entries read `<tag> <mode> <object> <stage>\t<path>`; tag "H" is a plain tracked file.
-  const entries = await git(worktreeRoot, "ls-files", "-v", "--stage", "-z", "--", ...pathspecs);
-  return entries
-    .split("\0")
-    .filter(Boolean)
-    .some((entry) => {
-      const [tag, mode] = entry.split(" ");
-      return tag !== "H" || mode === "120000" || mode === "160000";
-    });
+  return files;
 }
 
-/** True when the worktree's trust resources differ from the main worktree's HEAD, including uncommitted, untracked and ignored files. */
-async function resourcesDiffer(
+/**
+ * True when the skill files on disk are exactly the files of the main
+ * worktree's HEAD under the same paths, byte for byte. Hashing the files
+ * directly, rather than asking `git diff` or the index, means attributes,
+ * filters, index flags and nested repositories cannot hide a change.
+ */
+async function skillsMatchHead(
   worktreeRoot: string,
   mainHead: string,
-  pathspecs: string[],
+  paths: string[],
 ): Promise<boolean> {
-  try {
-    await git(worktreeRoot, "diff", "--quiet", mainHead, "--", ...pathspecs);
-  } catch (error) {
-    if ((error as { code?: unknown }).code === 1) return true;
-    throw error;
+  const files = readSkillFiles(worktreeRoot, paths);
+  if (!files) return false;
+
+  const pathspecs = paths.map((path) => `:(literal)${path}`);
+  const tree = await git(worktreeRoot, "ls-tree", "-r", "-z", mainHead, "--", ...pathspecs);
+  const headBlobs = new Map<string, string>();
+  // Entries read `<mode> <type> <object>\t<path>`.
+  for (const entry of tree.split("\0").filter(Boolean)) {
+    const [meta, path] = entry.split("\t");
+    headBlobs.set(path, meta.split(" ")[2]);
   }
-  const untracked = await git(worktreeRoot, "ls-files", "--others", "-z", "--", ...pathspecs);
-  return untracked !== "";
+  if (files.length !== headBlobs.size) return false;
+  if (files.length === 0) return true;
+
+  const hashOutput = await git(worktreeRoot, "hash-object", "--no-filters", "--", ...files);
+  const hashes = hashOutput.split("\n");
+  return files.every((file, index) => headBlobs.get(file) === hashes[index]);
 }
 
 /**
  * Decides project trust for a linked Git worktree by inheriting its repository's trust.
  *
  * Returns "yes" only when the repository's main worktree is trusted, cwd has
- * no Pi config, and the skills Pi would load from cwd verifiably match the
- * main worktree's HEAD. Anything else is "undecided", so Pi falls back to saved decisions and its prompt.
+ * no Pi config, and the skill files Pi would load from cwd are identical to
+ * the main worktree's HEAD. Anything else is "undecided", so Pi falls back to
+ * saved decisions and its prompt.
  */
 export async function decideWorktreeTrust(
   cwd: string,
@@ -151,8 +163,5 @@ export async function decideWorktreeTrust(
   if (hasPiConfig(canonicalCwd)) return "undecided";
 
   const paths = skillPaths(worktree.root, canonicalCwd);
-  const pathspecs = paths.map((path) => `:(literal)${path}`);
-  if (await skillsUnverifiable(worktree.root, paths, pathspecs)) return "undecided";
-  if (await resourcesDiffer(worktree.root, worktree.mainHead, pathspecs)) return "undecided";
-  return "yes";
+  return (await skillsMatchHead(worktree.root, worktree.mainHead, paths)) ? "yes" : "undecided";
 }
