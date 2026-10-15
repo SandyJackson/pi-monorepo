@@ -72,16 +72,18 @@ assessment of a material requirement; describe what evidence is needed.
 
 ## Finish
 
-Return a verdict and a review body. For `changes_requested`, report all
-findings and identify which ones block a `pass` so the next agent can address
-them. For `pass`, put remaining minor findings in the body so a human can consider
-them during PR review; use an empty body when nothing remains. A passing body
-must not contain findings tagged Major or Critical; the controller rejects them. Each finding
-cites a file and line, states the failure mode, and starts with its axis and
-severity: `[Spec][Major]` or `[Standards][Minor]`, for example. For
-`blocked`, explain what prevents a material assessment. The required JSON shape
-is supplied with the requirements; match it exactly. Example:
+Return a structured assessment. The controller supplies the required JSON
+shape with the requirements; match it exactly. Each finding has an `axis`
+(`spec` or `standards`), a `severity` (`critical`, `major`, or `minor`), a
+`location` (`path:line`), and a `description` stating the failure mode.
 
-```
-{"verdict":"pass","body":"[Standards][Minor] repo.ts:L41: The fallback label for an invalid optional field is misleading."}
+Use `pass` only when no critical or major finding remains; put remaining minor
+findings in the finding list so a human can consider them during PR review.
+Use `changes_requested` when at least one critical or major finding blocks
+acceptance, and report every finding. Use `blocked` when missing or ambiguous
+information prevents a credible assessment of a material requirement; describe
+the evidence that is needed. Example:
+
+```json
+{"outcome":"pass","summary":"Meets the ticket.","findings":[{"axis":"standards","severity":"minor","location":"repo.ts:41","description":"The fallback label for an invalid optional field is misleading."}]}
 ```

@@ -6,7 +6,14 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**/*.ts", "**/*.json", "!**/node_modules", "!**/dist", "!packages/code-actions"]
+    "includes": [
+      "**/*.ts",
+      "**/*.json",
+      "**/*.cjs",
+      "!**/node_modules",
+      "!**/dist",
+      "!packages/code-actions"
+    ]
   },
   "formatter": {
     "enabled": true,

@@ -1,9 +1,10 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { ArtifactIdentity, CommitIntent } from "./artifact.ts";
 import type { LoopSettings } from "./settings.ts";
+import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName } from "./worker.ts";
 
-export const RUN_STATE_VERSION = 4;
-export const MAX_REPAIRS = 2;
+export const RUN_STATE_VERSION = 13;
 
 export interface Issue {
   number: number;
@@ -13,27 +14,125 @@ export interface Issue {
   state: "open" | "closed";
 }
 
+export type Severity = "critical" | "major" | "minor";
+
+/**
+ * A hook result that preserved uncommitted work. The controller refuses to
+ * auto-commit or accept it until the artifact changes (an explicit manual fix
+ * or a new editing phase); otherwise an unchanged resume would reconcile hook
+ * leftovers as a fixup. The recovery slice later routes these to repair.
+ */
+export interface HookStop {
+  reason: string;
+  /** Content tree of the preserved work when the hook stopped. */
+  tree: string;
+}
+
+/** Controller-assigned, artifact-linked review finding. */
+export interface Finding {
+  id: number;
+  axis: FindingAxis;
+  severity: Severity;
+  location: string;
+  description: string;
+  artifact: ArtifactIdentity;
+}
+
 export interface Review {
-  verdict: "pass" | "changes_requested" | "blocked";
-  body: string;
+  outcome: "pass" | "changes_requested" | "incomplete" | "blocked";
+  summary: string;
+  findings: Finding[];
+  remainingWork?: string;
+  blockers?: string;
   head: string;
   tree: string;
 }
+
+/** Persisted child phase, used to resume an authorized repair or review. */
+export type TicketPhase = "implement" | "repair" | "review" | "audit";
 
 export interface Ticket extends Issue {
   blockers: Issue[];
   repairs: number;
   status: "pending" | "running" | "blocked" | "accepted";
+  /** Worker phase that most recently ran or is pending for this ticket. */
+  phase?: TicketPhase;
+  /** Original child baseline: the accepted HEAD before this child started. */
   baseline?: string;
+  /** Feature anchor commit: the first changed work commit for this child. */
+  anchor?: string;
+  /** Who produced the anchor commit: the controller or a verified manual commit. */
+  anchorOrigin?: "controller" | "manual";
+  /** Subsequent repair fixups targeting the anchor, oldest first. */
+  repairCommits?: string[];
+  /** HEAD after the latest child work commit (anchor or a later fixup). */
+  workHead?: string;
+  /** Accepted SHA. A work commit alone never implies acceptance. */
   commit?: string;
+  /** Worktree content tree when the latest editing phase stopped without completing. */
+  stoppedTree?: string;
+  /** Latest controller-observed phase artifact, including manual HEADs not recorded as work commits. */
+  resumeArtifact?: ArtifactIdentity;
+  /** Unresolved hook outcome that preserved work and must not be auto-committed. */
+  hookStop?: HookStop;
   feedback?: string;
+  /** Latest artifact-linked primary review verdict; earlier verdicts remain in `reviews`. */
   review?: Review;
+  /** Earlier artifact-linked review verdicts, oldest first. */
+  reviews?: Review[];
+  /** Read-only second pass confirming the latest failed review's findings on the unchanged artifact. */
+  audit?: Review;
+  /** Review rounds started, used to derive the next review phase-task identity. */
+  reviewRounds?: number;
+  /** Conversation (session file) hosting the current review round, its audit, and its repair. */
+  reviewConversation?: string;
+  /** Phase-task identity of the current review round; the audit shares its budget. */
+  reviewTask?: string;
+  /** Artifact identity the pending review/audit was attempted against; detects operator changes across a review stop. */
+  reviewAttempt?: ArtifactIdentity;
+  /** Manual work pending review: review it even when required checks fail instead of returning to a stale editor. */
+  reviewOnCheckFailure?: boolean;
+  /** Phase-task identity of the editing phase currently being worked. */
+  editTask?: string;
+  /** Conversation (session file) that hosts the current editing phase task. */
+  editConversation?: string;
+  /** Originating role of the editing conversation; keeps its model/thinking unchanged during repair. */
+  editConversationRole?: "implement" | "review";
+  /** Intervening repair/retraction explanation supplied to the latest-findings audit. */
+  repairNote?: string;
+  /** Explanation recorded when a repair round produced no artifact change (retraction). */
+  retraction?: string;
 }
+
+export type SessionKind = "implement" | "review" | "repair" | "audit";
 
 export interface Session {
   name: string;
+  /** Shared session file for every attempt in one worker conversation. */
   path: string;
   log: string;
+  /** Ticket this conversation belongs to, or undefined for the parent conversation. */
+  ticket?: number;
+  /** Role guidance/config this attempt ran with. */
+  kind: SessionKind;
+  /** Originating role of the conversation; selects model/thinking for every attempt. */
+  conversationRole: "implement" | "review";
+  /** Phase-task identity; attempts sharing it share one runtime budget. */
+  phaseTask: string;
+  /** Execution time the phase task had consumed when it last stopped. */
+  consumedMs?: number;
+  /** Whether the single incomplete/stalled continuation was used. */
+  continuationUsed?: boolean;
+  /** Controller transient retries consumed after Pi exhausted its native retries. */
+  transientRetries?: number;
+  /** Response correction attempts consumed for this phase task. */
+  corrections?: number;
+  /** Controller-recorded stop explanation from the watchdog or a worker failure. */
+  stopReason?: string;
+  /** Checkpoint evidence persisted before an abort, replayed on recovery. */
+  checkpoint?: CheckpointEvidence;
+  /** Phase outcome the worker returned; an interrupted attempt leaves this unset so resume reuses its allowance. */
+  outcome?: PhaseOutcomeName;
 }
 
 export interface RunState {
@@ -50,18 +149,54 @@ export interface RunState {
   head: string;
   check: string;
   setup?: string;
-  timeoutMs: number;
   /** Resolved `--settings` snapshot. `resume` reuses it even if the source files change. */
   settings: LoopSettings;
   parent: Issue;
   tickets: Ticket[];
   sessions: Session[];
-  finalRepairs: number;
-  phase: "setup" | "tickets" | "final" | "publish" | "done";
+  /** Required-check log shown to the advisory reviewer. */
+  finalCheckLog?: string;
+  /** Advisory PR comment id once posted, so resume can reconcile idempotently. */
+  advisoryCommentId?: number;
+  /** Visible warning when the advisory review was unavailable or unfinished. */
+  advisoryWarning?: string;
+  /**
+   * Terminal advisory review outcome, independent of the verdict. Once set, a
+   * resume only republishes the recorded observations/warning instead of
+   * starting a fresh review with a new phase-task budget.
+   */
+  advisoryOutcome?: "review" | "unavailable";
+  /**
+   * Login that owns the managed observations comment, persisted before the
+   * first create and never cleared. Reconciliation uses it rather than the
+   * account resuming, so changed authorization stops for recovery instead of
+   * posting a duplicate under the same marker.
+   */
+  advisoryCommentAuthor?: string;
+  /**
+   * The advisory review describes an older SHA than the remote branch tip.
+   * The local review stays coherent for its reviewed SHA; the report labels it
+   * stale instead of claiming the latest branch was reviewed.
+   */
+  advisoryStale?: boolean;
+  /**
+   * Commit intent persisted before Git runs. On resume it is reconciled from
+   * verified operation identity, lineage, and artifact data so a crash between
+   * Git and state persistence never repeats or loses a commit.
+   */
+  pendingCommit?: CommitIntent;
+  phase: "setup" | "tickets" | "final" | "publish" | "advisory" | "done";
   status: "running" | "blocked" | "done";
   currentTicket?: number;
+  /** Worktree content tree when the latest parent editing phase stopped without completing. */
+  stoppedTree?: string;
+  /** Unresolved parent hook outcome that preserved work and must not be auto-committed. */
+  hookStop?: HookStop;
   feedback?: string;
+  /** Latest parent review verdict; earlier verdicts remain in `reviews`. */
   review?: Review;
+  /** Earlier parent review verdicts, oldest first. */
+  reviews?: Review[];
   lastError?: string;
   pr?: string;
 }
@@ -75,37 +210,52 @@ function atomicWrite(path: string, text: string): void {
   renameSync(`${path}.tmp`, path);
 }
 
+function findingLines(review: Review): string[] {
+  return review.findings.map(
+    (finding) =>
+      `- [${finding.axis}][${finding.severity}] ${finding.location}: ${finding.description}`,
+  );
+}
+
 export function reviewObservations(state: RunState): string[] {
   const observations: string[] = [];
-  const append = (title: string, review: Review | undefined) => {
-    if (review?.verdict !== "pass" || !review.body.trim()) return;
+  const append = (title: string, review: Review | undefined, advisory = false) => {
+    if (!review) return;
+    // Child notes are historical passing observations. The final whole-artifact
+    // review is advisory: its verdict, summary, and findings are always reported,
+    // even when it passes without findings.
+    if (!advisory && (review.outcome !== "pass" || review.findings.length === 0)) return;
+    const body = [review.summary, ...findingLines(review)].filter(Boolean).join("\n");
     const fence = "`".repeat(
-      (review.body.match(/`+/g) ?? []).reduce(
-        (length, ticks) => Math.max(length, ticks.length + 1),
-        3,
-      ),
+      (body.match(/`+/g) ?? []).reduce((length, ticks) => Math.max(length, ticks.length + 1), 3),
     );
     observations.push(
-      `### ${title}`,
+      `### ${title}${advisory ? ` (${review.outcome})` : ""}`,
       `Reviewed HEAD: \`${review.head}\`; content tree: \`${review.tree}\`.`,
+      ...(advisory && state.advisoryStale
+        ? [
+            "**Stale:** the remote branch advanced after this review; these findings describe the reviewed SHA, not the latest remote branch.",
+          ]
+        : []),
       "",
-      fence,
-      review.body,
-      fence,
+      ...(body.trim() ? [fence, body, fence] : []),
       "",
     );
   };
   for (const ticket of state.tickets) append(`#${ticket.number} ${ticket.title}`, ticket.review);
-  append("Parent review", state.review);
+  append("Final whole-artifact review", state.review, true);
   return observations.length
     ? [
         "## Review observations",
         "",
-        "Historical observations from passing reviews; these may have been resolved by later changes.",
+        "Historical observations from reviews; these may have been resolved by later changes.",
         "",
         ...observations,
+        ...(state.advisoryWarning ? [`Warning: ${state.advisoryWarning}`, ""] : []),
       ]
-    : [];
+    : state.advisoryWarning
+      ? ["## Review observations", "", `Warning: ${state.advisoryWarning}`, ""]
+      : [];
 }
 
 export function save(state: RunState): void {
@@ -113,7 +263,7 @@ export function save(state: RunState): void {
   atomicWrite(join(state.runDir, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
   const rows = state.tickets.map(
     (ticket) =>
-      `| #${ticket.number} ${ticket.title.replaceAll("|", "\\|").replaceAll("\n", " ")} | ${ticket.status} | ${ticket.repairs}/${MAX_REPAIRS} | ${ticket.commit ?? ""} |`,
+      `| #${ticket.number} ${ticket.title.replaceAll("|", "\\|").replaceAll("\n", " ")} | ${ticket.status} | ${ticket.repairs}/${state.settings.repairRounds} | ${ticket.commit ?? ""} |`,
   );
   const active = state.tickets.find((ticket) => ticket.number === state.currentTicket);
   const cli = resolve(import.meta.dirname, "run.mjs");
@@ -149,14 +299,19 @@ export function load(runDir: string): RunState {
   const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")) as RunState;
   if (state.version !== RUN_STATE_VERSION) {
     throw new Error(
-      "Unsupported run state version; older snapshots may include issue comments or use an incompatible reviewer contract. Preserve any work and start a new run from reviewed issue bodies. Do not change the version by hand.",
+      "Unsupported run state version; older snapshots may include issue comments or an incompatible worker contract. Preserve any work and start a new run from reviewed issue bodies. Do not change the version by hand.",
     );
   }
   if (
     state.runDir !== resolve(runDir) ||
     !Array.isArray(state.tickets) ||
     !Array.isArray(state.sessions) ||
-    !["setup", "tickets", "final", "publish", "done"].includes(state.phase) ||
+    !state.settings?.repair ||
+    !state.settings.watchdog ||
+    !state.settings.recovery ||
+    !state.settings.deadlines ||
+    !Number.isInteger(state.settings.repairRounds) ||
+    !["setup", "tickets", "final", "publish", "advisory", "done"].includes(state.phase) ||
     !["running", "blocked", "done"].includes(state.status)
   ) {
     throw new Error(

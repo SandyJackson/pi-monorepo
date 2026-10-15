@@ -3,8 +3,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEFAULT_DEADLINES,
   DEFAULT_IMPLEMENT_TOOLS,
+  DEFAULT_RECOVERY,
+  DEFAULT_REPAIR_ROUNDS,
   DEFAULT_REVIEW_TOOLS,
+  DEFAULT_WATCHDOG,
   loadLoopSettings,
   materializeLoopSkills,
   validateLoopSkills,
@@ -67,6 +71,14 @@ describe("loadLoopSettings", () => {
         skills: ["tdd", "diagnosing-bugs", "deslop"],
         promptBody: "Implement the ticket.",
       },
+      repair: {
+        agentName: "loop-repair",
+        model: undefined,
+        thinking: undefined,
+        tools: DEFAULT_IMPLEMENT_TOOLS,
+        skills: ["tdd", "diagnosing-bugs", "deslop"],
+        promptBody: expect.stringContaining("Repair the findings"),
+      },
       review: {
         agentName: "review",
         model: "provider/review-model",
@@ -75,6 +87,10 @@ describe("loadLoopSettings", () => {
         skills: [],
         promptBody: "Review the patch.",
       },
+      repairRounds: DEFAULT_REPAIR_ROUNDS,
+      watchdog: DEFAULT_WATCHDOG,
+      recovery: DEFAULT_RECOVERY,
+      deadlines: DEFAULT_DEADLINES,
       appendSystemPrompt: "Prefer small changes.",
     });
   });
@@ -92,12 +108,24 @@ describe("loadLoopSettings", () => {
     });
     expect(settings.review).toEqual({
       agentName: "loop-reviewer",
-      model: "openai-codex/gpt-6-sol",
+      model: "openai-codex/gpt-6.1-sol",
       thinking: "high",
       tools: DEFAULT_REVIEW_TOOLS,
       skills: [],
-      promptBody: expect.stringContaining("[Spec][Major]"),
+      promptBody: expect.stringContaining("severity"),
     });
+    expect(settings.repair).toEqual({
+      agentName: "loop-repair",
+      model: undefined,
+      thinking: undefined,
+      tools: DEFAULT_IMPLEMENT_TOOLS,
+      skills: ["tdd", "diagnosing-bugs", "deslop"],
+      promptBody: expect.stringContaining("Repair the findings"),
+    });
+    expect(settings.repairRounds).toBe(DEFAULT_REPAIR_ROUNDS);
+    expect(settings.watchdog).toEqual(DEFAULT_WATCHDOG);
+    expect(settings.recovery).toEqual(DEFAULT_RECOVERY);
+    expect(settings.deadlines).toEqual(DEFAULT_DEADLINES);
     expect(settings.appendSystemPrompt).toBeUndefined();
   });
 
@@ -113,12 +141,57 @@ describe("loadLoopSettings", () => {
     const settingsPath = writeSettingsDir({
       "loop-settings.json": JSON.stringify({
         implementSkills: ["tdd"],
+        repairSkills: ["deslop"],
         reviewSkills: [],
       }),
     });
     const settings = loadLoopSettings(settingsPath);
     expect(settings.implement.skills).toEqual(["tdd"]);
+    expect(settings.repair.skills).toEqual(["deslop"]);
     expect(settings.review.skills).toEqual([]);
+  });
+
+  it("overrides repair rounds, watchdog policy, and controller deadlines", () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({
+        repairRounds: 5,
+        watchdog: { silenceMs: 1000, hardCeilingMs: 5000 },
+        deadlines: { checkMs: 2000 },
+      }),
+    });
+    const settings = loadLoopSettings(settingsPath);
+    expect(settings.repairRounds).toBe(5);
+    expect(settings.watchdog).toEqual({
+      ...DEFAULT_WATCHDOG,
+      silenceMs: 1000,
+      hardCeilingMs: 5000,
+    });
+    expect(settings.deadlines).toEqual({ ...DEFAULT_DEADLINES, checkMs: 2000 });
+  });
+
+  it("overrides the controller recovery policy", () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({
+        recovery: { transientRetries: 1, transientBackoffMs: [10, 20] },
+      }),
+    });
+    const settings = loadLoopSettings(settingsPath);
+    expect(settings.recovery).toEqual({ transientRetries: 1, transientBackoffMs: [10, 20] });
+  });
+
+  it.each([
+    [{ repairRounds: -1 }, /repairRounds/],
+    [{ repairRounds: 1.5 }, /repairRounds/],
+    [{ repairRounds: 11 }, /repairRounds/],
+    [{ watchdog: { silenceMs: 0 } }, /watchdog.silenceMs/],
+    [{ watchdog: [] }, /watchdog/],
+    [{ recovery: { transientRetries: -1 } }, /recovery.transientRetries/],
+    [{ recovery: { transientBackoffMs: [10, "soon"] } }, /recovery.transientBackoffMs/],
+    [{ recovery: [] }, /recovery/],
+    [{ deadlines: { gitMs: "soon" } }, /deadlines.gitMs/],
+  ])("rejects invalid policy settings (%j)", (config, pattern) => {
+    const settingsPath = writeSettingsDir({ "loop-settings.json": JSON.stringify(config) });
+    expect(() => loadLoopSettings(settingsPath)).toThrow(pattern);
   });
 
   it.each([
@@ -144,7 +217,7 @@ describe("loadLoopSettings", () => {
     fs.mkdirSync(path.join(curated, "tdd"), { recursive: true });
     fs.writeFileSync(path.join(curated, "tdd", "SKILL.md"), "# tdd\n", "utf8");
     const settingsPath = writeSettingsDir({
-      "loop-settings.json": JSON.stringify({ implementSkills: ["tdd"] }),
+      "loop-settings.json": JSON.stringify({ implementSkills: ["tdd"], repairSkills: [] }),
     });
     const settings = loadLoopSettings(settingsPath);
     expect(() => validateLoopSkills(settings, curated)).not.toThrow();
@@ -189,7 +262,7 @@ describe("loadLoopSettings", () => {
     expect(settings.implement.skills).toEqual(["tdd", "diagnosing-bugs", "deslop"]);
     expect(settings.implement.promptBody).toContain("/skill:tdd");
     expect(settings.review.agentName).toBe("loop-reviewer");
-    expect(settings.review.model).toBe("openai-codex/gpt-6-sol");
+    expect(settings.review.model).toBe("openai-codex/gpt-6.1-sol");
     expect(settings.review.thinking).toBe("high");
     expect(settings.review.tools).toEqual(["read", "grep", "find", "ls"]);
     expect(settings.review.skills).toEqual([]);

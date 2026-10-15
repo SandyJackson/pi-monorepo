@@ -8,7 +8,7 @@ import { cpSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { type ParsedAgentFile, parseAgentFileContent } from "@pi-workspace/herdr-subagent/agents";
 
-/** Tool allowlist used when the implement agent file omits `tools`. */
+/** Tool allowlist used when the implement or repair agent file omits `tools`. */
 export const DEFAULT_IMPLEMENT_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"];
 
 /** Tool allowlist used when the review agent file omits `tools`. */
@@ -16,6 +16,12 @@ export const DEFAULT_REVIEW_TOOLS = ["read", "grep", "find", "ls"];
 
 /** Thinking levels accepted in an agent file's `thinking` field (Pi's `--thinking` set). */
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** Default curated implementer/repairer skill set. */
+export const DEFAULT_IMPLEMENT_SKILLS = ["tdd", "diagnosing-bugs", "deslop"];
+
+/** Configured child code-repair rounds per ticket, including no-change retractions. */
+export const DEFAULT_REPAIR_ROUNDS = 3;
 
 /** Resolved configuration for one loop role. Plain data: safe to snapshot into state.json. */
 export interface RoleSettings {
@@ -30,25 +36,98 @@ export interface RoleSettings {
   promptBody?: string;
 }
 
+/**
+ * Progress-watchdog policy enforced by the supervised worker. Persisted with a
+ * run so resume keeps the same allowances.
+ */
+export interface WatchdogSettings {
+  /** Silence without observable output before a step is suspicious. */
+  silenceMs: number;
+  /** Maximum duration for one in-flight tool regardless of output. */
+  toolMs: number;
+  /** Soft phase checkpoint for long productive phases. */
+  softCheckpointMs: number;
+  /** Grace after a checkpoint request before cancellation. */
+  checkpointGraceMs: number;
+  /** Hard phase ceiling covering retries and continuations. */
+  hardCeilingMs: number;
+  /** Bounded wait for an RPC abort response. */
+  abortGraceMs: number;
+  /** SIGTERM-to-SIGKILL escalation. */
+  sigkillEscalationMs: number;
+}
+
+/** Controller-owned command deadlines, separate from worker supervision. */
+export interface DeadlineSettings {
+  setupMs: number;
+  checkMs: number;
+  gitMs: number;
+}
+
+/**
+ * Controller recovery policy applied after Pi exhausts its own native retries.
+ * Persisted with a run so resume keeps the same allowances.
+ */
+export interface RecoverySettings {
+  /** Maximum classified transient retries per phase task. */
+  transientRetries: number;
+  /** Backoff before each transient retry; index i is used for retry i+1. */
+  transientBackoffMs: number[];
+}
+
+export const DEFAULT_WATCHDOG: WatchdogSettings = {
+  silenceMs: 10 * 60_000,
+  toolMs: 30 * 60_000,
+  softCheckpointMs: 60 * 60_000,
+  checkpointGraceMs: 5 * 60_000,
+  hardCeilingMs: 120 * 60_000,
+  abortGraceMs: 10_000,
+  sigkillEscalationMs: 2_000,
+};
+
+export const DEFAULT_DEADLINES: DeadlineSettings = {
+  setupMs: 60 * 60_000,
+  checkMs: 60 * 60_000,
+  gitMs: 60_000,
+};
+
+export const DEFAULT_RECOVERY: RecoverySettings = {
+  transientRetries: 2,
+  transientBackoffMs: [5_000, 15_000],
+};
+
 /** Resolved settings snapshot stored with the run; `resume` reuses it verbatim. */
 export interface LoopSettings {
   implement: RoleSettings;
+  repair: RoleSettings;
   review: RoleSettings;
+  repairRounds: number;
+  watchdog: WatchdogSettings;
+  recovery: RecoverySettings;
+  deadlines: DeadlineSettings;
   appendSystemPrompt?: string;
 }
 
-function readAgent(role: string, settingsDir: string, ref: unknown): Omit<RoleSettings, "skills"> {
-  const defaults = role === "review" ? DEFAULT_REVIEW_TOOLS : DEFAULT_IMPLEMENT_TOOLS;
+type Role = "implement" | "repair" | "review";
+
+const AGENT_FILES: Record<Role, string> = {
+  implement: "./loop-implement.md",
+  repair: "./loop-repair.md",
+  review: "./loop-reviewer.md",
+};
+
+function defaultTools(role: Role): string[] {
+  return role === "review" ? DEFAULT_REVIEW_TOOLS : DEFAULT_IMPLEMENT_TOOLS;
+}
+
+function readAgent(role: Role, settingsDir: string, ref: unknown): Omit<RoleSettings, "skills"> {
+  const defaults = defaultTools(role);
   if (ref === undefined) {
     // No user file: the blessed role file is always the base, never the
     // runner's bare fallback text. It doubles as the template for
     // user-authored replacements.
     const blessed = blessedAgentsDir();
-    return readAgent(
-      role,
-      blessed,
-      role === "review" ? "./loop-reviewer.md" : "./loop-implement.md",
-    );
+    return readAgent(role, blessed, AGENT_FILES[role]);
   }
   if (typeof ref !== "string" || !ref.trim()) throw new Error(`"${role}Agent" must be a file path`);
   const filePath = resolve(settingsDir, ref);
@@ -108,9 +187,9 @@ function assertSkillName(field: string, settingsPath: string, name: string): voi
     );
 }
 
-/** Parse and validate a per-role skill list (`implementSkills` / `reviewSkills`). Absent means the blessed default (trio for implement, empty for review); explicit `[]` opts out. */
-function readSkills(role: string, field: string, settingsPath: string, value: unknown): string[] {
-  if (value === undefined) return role === "implement" ? [...DEFAULT_IMPLEMENT_SKILLS] : [];
+/** Parse and validate a per-role skill list (`implementSkills` / `repairSkills` / `reviewSkills`). Absent means the role default (trio for implement/repair, empty for review); explicit `[]` opts out. */
+function readSkills(role: Role, field: string, settingsPath: string, value: unknown): string[] {
+  if (value === undefined) return role === "review" ? [] : [...DEFAULT_IMPLEMENT_SKILLS];
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string"))
     throw new Error(`"${field}" in ${settingsPath} must be an array of skill-name strings`);
   for (const name of value) assertSkillName(field, settingsPath, name);
@@ -120,18 +199,74 @@ function readSkills(role: string, field: string, settingsPath: string, value: un
   return [...value];
 }
 
+function readInteger(
+  field: string,
+  settingsPath: string,
+  value: unknown,
+  { min, max }: { min: number; max: number },
+): number {
+  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max)
+    throw new Error(`"${field}" in ${settingsPath} must be an integer from ${min} to ${max}`);
+  return value as number;
+}
+
+function readOverrides<T extends object>(
+  field: string,
+  settingsPath: string,
+  value: unknown,
+  defaults: T,
+  { min, max }: { min: number; max: number },
+): T {
+  if (value === undefined) return { ...defaults };
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`"${field}" in ${settingsPath} must be an object`);
+  const result = { ...defaults } as unknown as Record<string, number>;
+  for (const key of Object.keys(defaults)) {
+    const override = (value as Record<string, unknown>)[key];
+    if (override === undefined) continue;
+    result[key] = readInteger(`${field}.${key}`, settingsPath, override, { min, max });
+  }
+  return result as T;
+}
+
+/** Parse and validate the optional controller recovery policy. */
+function readRecovery(settingsPath: string, value: unknown): RecoverySettings {
+  const defaults: RecoverySettings = {
+    transientRetries: DEFAULT_RECOVERY.transientRetries,
+    transientBackoffMs: [...DEFAULT_RECOVERY.transientBackoffMs],
+  };
+  if (value === undefined) return defaults;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`"recovery" in ${settingsPath} must be an object`);
+  const record = value as Record<string, unknown>;
+  const transientRetries =
+    record.transientRetries === undefined
+      ? defaults.transientRetries
+      : readInteger("recovery.transientRetries", settingsPath, record.transientRetries, {
+          min: 0,
+          max: 10,
+        });
+  let transientBackoffMs = defaults.transientBackoffMs;
+  if (record.transientBackoffMs !== undefined) {
+    const backoff = record.transientBackoffMs;
+    if (!Array.isArray(backoff) || !backoff.every((item) => Number.isInteger(item) && item >= 0))
+      throw new Error(
+        `"recovery.transientBackoffMs" in ${settingsPath} must be an array of millisecond integers`,
+      );
+    transientBackoffMs = [...(backoff as number[])];
+  }
+  return { transientRetries, transientBackoffMs };
+}
+
 /** Directory holding the blessed role agent files, resolved beside this module. */
 export function blessedAgentsDir(): string {
   return resolve(import.meta.dirname, "agents");
 }
 
-/** Default implementer skill set: the curated trio every default run gets. */
-export const DEFAULT_IMPLEMENT_SKILLS = ["tdd", "diagnosing-bugs", "deslop"];
-
 /**
  * Built-in configuration used when `start` is run without `--settings`.
  * The blessed `.md` role files are always the base: a settings file replaces
- * one role's file (and skills) or the other, but a worker never runs on the
+ * one role's file (and skills) or another, but a worker never runs on the
  * runner's bare fallback text. The `.md` files double as the template for
  * user-authored replacements.
  */
@@ -139,10 +274,19 @@ export function defaultLoopSettings(): LoopSettings {
   // Same shape as a `{}` settings file: blessed files with blessed skills.
   const blessed = blessedAgentsDir();
   const implement = readAgent("implement", blessed, undefined);
+  const repair = readAgent("repair", blessed, undefined);
   const review = readAgent("review", blessed, undefined);
   return {
     implement: { ...implement, skills: [...DEFAULT_IMPLEMENT_SKILLS] },
+    repair: { ...repair, skills: [...DEFAULT_IMPLEMENT_SKILLS] },
     review: { ...review, skills: [] },
+    repairRounds: DEFAULT_REPAIR_ROUNDS,
+    watchdog: { ...DEFAULT_WATCHDOG },
+    recovery: {
+      transientRetries: DEFAULT_RECOVERY.transientRetries,
+      transientBackoffMs: [...DEFAULT_RECOVERY.transientBackoffMs],
+    },
+    deadlines: { ...DEFAULT_DEADLINES },
   };
 }
 
@@ -170,16 +314,34 @@ export function loadLoopSettings(settingsPath: string): LoopSettings {
     throw new Error(`"appendSystemPrompt" in ${resolved} must be a string`);
   const appendSystemPrompt = (inline as string | undefined)?.trim() || undefined;
   const implement = readAgent("implement", settingsDir, config.implementAgent);
+  const repair = readAgent("repair", settingsDir, config.repairAgent);
   const review = readAgent("review", settingsDir, config.reviewAgent);
   return {
     implement: {
       ...implement,
       skills: readSkills("implement", "implementSkills", resolved, config.implementSkills),
     },
+    repair: {
+      ...repair,
+      skills: readSkills("repair", "repairSkills", resolved, config.repairSkills),
+    },
     review: {
       ...review,
       skills: readSkills("review", "reviewSkills", resolved, config.reviewSkills),
     },
+    repairRounds:
+      config.repairRounds === undefined
+        ? DEFAULT_REPAIR_ROUNDS
+        : readInteger("repairRounds", resolved, config.repairRounds, { min: 0, max: 10 }),
+    watchdog: readOverrides("watchdog", resolved, config.watchdog, DEFAULT_WATCHDOG, {
+      min: 1,
+      max: 24 * 60 * 60_000,
+    }),
+    recovery: readRecovery(resolved, config.recovery),
+    deadlines: readOverrides("deadlines", resolved, config.deadlines, DEFAULT_DEADLINES, {
+      min: 1,
+      max: 24 * 60 * 60_000,
+    }),
     ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
   };
 }
@@ -194,7 +356,7 @@ export function validateLoopSkills(
   settings: LoopSettings,
   curatedDir: string = curatedSkillsDir(),
 ): void {
-  const names = new Set([...settings.implement.skills, ...settings.review.skills]);
+  const names = skillNames(settings);
   for (const name of names) {
     const marker = join(resolve(curatedDir), name, "SKILL.md");
     try {
@@ -207,6 +369,14 @@ export function validateLoopSkills(
   }
 }
 
+function skillNames(settings: LoopSettings): Set<string> {
+  return new Set([
+    ...settings.implement.skills,
+    ...settings.repair.skills,
+    ...settings.review.skills,
+  ]);
+}
+
 /**
  * Copy the selected skills into `<runDir>/skills/<name>/`. Call once at
  * `start`; `resume` reuses the copy so a run never drifts with the curated dir.
@@ -217,7 +387,7 @@ export function materializeLoopSkills(
   curatedDir: string = curatedSkillsDir(),
 ): void {
   validateLoopSkills(settings, curatedDir);
-  const names = new Set([...settings.implement.skills, ...settings.review.skills]);
+  const names = skillNames(settings);
   for (const name of names)
     cpSync(join(resolve(curatedDir), name), join(runDir, "skills", name), { recursive: true });
   if (names.size === 0) mkdirSync(join(runDir, "skills"), { recursive: true });

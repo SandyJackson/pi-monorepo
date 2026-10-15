@@ -16,7 +16,7 @@ rather than after the two-minute test suite:
 3. `pnpm exec vitest run` (full suite)
 
 While iterating, scope Vitest to what you are changing, e.g.
-`pnpm exec vitest run packages/issue-loop/cli.test.ts -t "<test name>"`.
+`pnpm exec vitest run packages/issue-loop/cli-lifecycle.test.ts -t "<test name>"`.
 The full suite already includes every package's tests, so run it once at the end.
 
 Always invoke repo binaries with `pnpm exec`, never `npx`.
