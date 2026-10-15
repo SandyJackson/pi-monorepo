@@ -33,6 +33,7 @@ const scenario = process.argv[2];
 const out = (record) => process.stdout.write(JSON.stringify(record) + "\\n");
 const response = (id, data) => JSON.stringify({ id, type: "response", command: "prompt", success: true, data }) + "\\n";
 let buffer = "";
+let noEarlyExit = false;
 function handle(command) {
   if (scenario === "handled") {
     out({ id: command.id, type: "response", command: "prompt", success: true, data: { disposition: "handled" } });
@@ -101,6 +102,31 @@ function handle(command) {
     out({ type: "agent_settled" });
     return;
   }
+  if (scenario === "noisy-stderr") {
+    process.stdout.write(accepted);
+    noEarlyExit = true;
+    process.stderr.write("NOISY_HEAD_MARKER " + "x".repeat(256 * 1024) + " NOISY_TAIL_MARKER\\n");
+    // Hold the failure until stderr reaches the kernel: the controller may
+    // tear the peer down as soon as the failed settlement lands, and anything
+    // still in the userland queue would be lost. Kernel-buffered bytes survive.
+    const waitDrain = () => {
+      if (process.stderr.writableLength > 0) setTimeout(waitDrain, 10);
+      else {
+        out({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: '{"outcome":"complete","summary":"Done."}' }],
+            stopReason: "error",
+            errorMessage: "provider stream failed",
+          },
+        });
+        out({ type: "agent_settled" });
+      }
+    };
+    waitDrain();
+    return;
+  }
   if (scenario === "settled-stubborn") {
     process.stdout.write(accepted);
     out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "DONE" }] } });
@@ -124,7 +150,7 @@ process.stdin.on("data", (chunk) => {
     if (line.trim()) handle(JSON.parse(line));
   }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => { if (!noEarlyExit) process.exit(0); });
 `,
 );
 
@@ -198,6 +224,17 @@ it("rejects a settled run whose final message failed, even with valid outcome JS
     /unsuccessful response \(error: provider stream failed\)/,
   );
   await expect(run("aborted-message")).rejects.toThrow(/unsuccessful response \(aborted\)/);
+});
+
+it("reports the tail of noisy worker stderr on failure", async () => {
+  const error = await run("noisy-stderr").then(
+    () => {
+      throw new Error("expected the noisy run to fail");
+    },
+    (error: unknown) => error,
+  );
+  expect(String(error)).toContain("NOISY_TAIL_MARKER");
+  expect(String(error)).not.toContain("NOISY_HEAD_MARKER");
 });
 
 it("completes process-group escalation before settling after an abort", async () => {

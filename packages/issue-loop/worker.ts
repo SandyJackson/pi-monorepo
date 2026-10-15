@@ -136,6 +136,8 @@ export interface WorkerOptions {
 }
 
 const INITIAL_PROMPT_ID = "prompt-1";
+// Retained worker stderr: failures report the last 4,000 chars.
+const MAX_STDERR_CHARS = 16 * 1024;
 const CHECKPOINT_STEER_ID = "steer-1";
 const CLEAR_QUEUE_ID = "clear-1";
 const ABORT_ID = "abort-1";
@@ -1217,7 +1219,10 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
     });
     child.stderr.on("data", (data: string) => {
       if (options.log) appendFileSync(options.log, data);
-      stderr += data;
+      // Failure detail reports only the last 4,000 chars below; retain bounded
+      // context above that so a noisy worker cannot grow controller memory
+      // for the whole phase allowance.
+      stderr = tailText(stderr + data, MAX_STDERR_CHARS);
     });
     child.stdin.on("error", () => {
       /* The child can exit before consuming its prompt. */
