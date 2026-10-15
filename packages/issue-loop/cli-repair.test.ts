@@ -2,6 +2,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect } from "vitest";
+import { contentTree } from "./artifact.ts";
 import {
   cliTest,
   fixture,
@@ -294,6 +295,50 @@ CUSTOM REPAIR GUIDANCE.`,
     expect(tools).toEqual(expect.arrayContaining(["read", "grep", "find", "ls", "bash", "edit"]));
     // The reviewer's model and thinking are not silently switched.
     expect(repair.args[repair.args.indexOf("--model") + 1]).toBe(state.settings.review.model);
+  },
+  30_000,
+);
+
+cliTest(
+  "recovers a completed repair without reopening the editor when the handoff never persisted",
+  async () => {
+    const f = fixture("fixup");
+    const first = await f.run("start", "--repo", f.repo, "--issue", "10", "--check", "true");
+    expect(first.status, first.stderr).toBe(0);
+    const runDir = runDirFrom(first.stdout);
+    // Simulate a controller that stopped after the outcome save but before
+    // the review handoff (older versions saved those separately): the repair
+    // session is complete, but the ticket still says repair.
+    const statePath = join(runDir, "state.json");
+    const stranded = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(stranded.tickets[0].phase).toBe("review");
+    // Rewind the finished run so resume revisits the ticket instead of
+    // short-circuiting past it: the loop only routes tickets while the run
+    // phase is tickets with a current ticket set.
+    stranded.phase = "tickets";
+    stranded.status = "running";
+    stranded.currentTicket = stranded.tickets[0].number;
+    // Reproduce the finding's precondition exactly: the repair session is
+    // complete for the current edit task, the ticket still says repair, and
+    // the artifact is unchanged since the recorded snapshot (as with a
+    // no-change retraction when nothing was committed in between).
+    stranded.tickets[0].phase = "repair";
+    stranded.tickets[0].resumeArtifact = {
+      head: stranded.head,
+      tree: await contentTree({ cwd: stranded.worktree, timeoutMs: 30_000 }),
+    };
+    writeFileSync(statePath, JSON.stringify(stranded));
+    const resumed = await f.run("resume", runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = readState(runDir);
+    expect(finished.status).toBe("done");
+    expect(finished.tickets[0].status).toBe("accepted");
+    // No second repair attempt ran: the handoff completed from the saved outcome.
+    const repairs = finished.sessions.filter(
+      (session: { kind: string }) => session.kind === "repair",
+    );
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0].outcome).toBe("complete");
   },
   30_000,
 );

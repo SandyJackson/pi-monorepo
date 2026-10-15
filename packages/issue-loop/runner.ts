@@ -387,7 +387,11 @@ async function runPhaseTask(state: RunState, options: PhaseTaskOptions): Promise
       throw new Error(`${session.stopReason}. Inspect ${session.log}`);
     }
     session.outcome = outcome.outcome;
-    save(state);
+    // The editing phase persists this outcome together with its review handoff
+    // in finishEditing, so a stop between the two saves cannot strand a
+    // completed outcome behind an unflipped phase. Review phases have no
+    // handoff here and keep the immediate save.
+    if (options.phase !== "editing") save(state);
     return outcome;
   } catch (error) {
     session.stopReason = error instanceof Error ? error.message : String(error);
@@ -472,6 +476,19 @@ function appendNote(note: string | undefined, addition: string): string {
   return note ? `${note}\n\n${addition}` : addition;
 }
 
+/** Move a completed editing phase to review. The caller saves: persisting the
+ * outcome and this handoff in one snapshot means a stop between them cannot
+ * strand a completed outcome behind an unflipped phase. */
+async function reviewHandoff(state: RunState, ticket: Ticket): Promise<void> {
+  ticket.phase = "review";
+  ticket.reviewTask = undefined;
+  ticket.reviewAttempt = undefined;
+  ticket.audit = undefined;
+  ticket.stoppedTree = undefined;
+  ticket.resumeArtifact = identityOf(await artifactSnapshot(gitContext(state)));
+  ticket.reviewOnCheckFailure = undefined;
+}
+
 /** Persist a completed editing phase and record its repair/retraction note. */
 async function finishEditing(
   state: RunState,
@@ -486,13 +503,7 @@ async function finishEditing(
       ticket.retraction = after === before ? outcome.summary : undefined;
       ticket.repairNote = appendNote(ticket.repairNote, outcome.summary);
     }
-    ticket.phase = "review";
-    ticket.reviewTask = undefined;
-    ticket.reviewAttempt = undefined;
-    ticket.audit = undefined;
-    ticket.stoppedTree = undefined;
-    ticket.resumeArtifact = identityOf(await artifactSnapshot(gitContext(state)));
-    ticket.reviewOnCheckFailure = undefined;
+    await reviewHandoff(state, ticket);
     save(state);
     return;
   }
@@ -1284,9 +1295,21 @@ async function resolveTicket(state: RunState, ticket: Ticket): Promise<void> {
     // below without spending a repair round.
     if (!resuming) await implementChild(state, ticket);
   } else if (ticket.phase === "repair" && !manualChange) {
-    // An unchanged interrupted repair is execution recovery and resumes before
-    // any re-review.
-    await editingPhase(state, ticket, "repair");
+    const completed = latestEditingSession(state, ticket);
+    if (completed?.outcome === "complete" && completed.phaseTask === ticket.editTask) {
+      // Recovery: the worker already completed this repair attempt, but the
+      // review handoff never persisted (e.g. the controller stopped between
+      // the outcome save and the handoff save under an older version).
+      // Complete the handoff without reopening the editor; the retraction
+      // explanation from the interrupted save is unavailable, so review
+      // re-assesses the artifact as it stands.
+      await reviewHandoff(state, ticket);
+      save(state);
+    } else {
+      // An unchanged interrupted repair is execution recovery and resumes before
+      // any re-review.
+      await editingPhase(state, ticket, "repair");
+    }
   }
 
   // A manual change is reviewed even when checks fail, so the fresh reviewer can
