@@ -126,10 +126,10 @@ async function skillsMatchHead(
   const pathspecs = paths.map((path) => `:(literal)${path}`);
   const tree = await git(worktreeRoot, "ls-tree", "-r", "-z", mainHead, "--", ...pathspecs);
   const headBlobs = new Map<string, string>();
-  // Entries read `<mode> <type> <object>\t<path>`.
+  // Entries read `<mode> <type> <object>\t<path>`; the path itself may contain tabs.
   for (const entry of tree.split("\0").filter(Boolean)) {
-    const [meta, path] = entry.split("\t");
-    headBlobs.set(path, meta.split(" ")[2]);
+    const tab = entry.indexOf("\t");
+    headBlobs.set(entry.slice(tab + 1), entry.slice(0, tab).split(" ")[2]);
   }
   if (files.length !== headBlobs.size) return false;
   if (files.length === 0) return true;

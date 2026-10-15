@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
@@ -170,6 +178,17 @@ describe("decideWorktreeTrust", () => {
     writeFile(join(outside, "skills", "demo", "SKILL.md"), "trusted\n");
     rmSync(join(worktree, ".agents"), { recursive: true });
     symlinkSync(outside, join(worktree, ".agents"));
+
+    expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
+  });
+
+  it("is undecided when a file whose name contains a tab is renamed into a skill", async () => {
+    writeFile(join(repo, ".agents", "skills", "evil", "SKILL.md\tunused"));
+    commitAll(repo, "add tab-named file");
+    trustStore.set(repo, true);
+    git(worktree, "merge", "-q", "--ff-only", "main");
+    const evil = join(worktree, ".agents", "skills", "evil");
+    renameSync(join(evil, "SKILL.md\tunused"), join(evil, "SKILL.md"));
 
     expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
   });
