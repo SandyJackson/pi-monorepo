@@ -4,9 +4,9 @@
  * Review, issue-loop and `wt` worktrees live at fresh paths, so Pi asks for
  * trust in each one and interactive subagent panes block on the prompt. This
  * extension answers Pi's `project_trust` event with "yes" when the
- * repository's main worktree is trusted and the worktree's skills and Pi
- * config match that worktree's HEAD. It never writes trust.json; every other
- * case is left to Pi's saved decisions and prompt.
+ * repository's main worktree is trusted, the worktree has no Pi config, and
+ * its skills match that worktree's HEAD. It never writes trust.json; every
+ * other case is left to Pi's saved decisions and prompt.
  */
 
 import { type ExtensionAPI, getAgentDir, ProjectTrustStore } from "@earendil-works/pi-coding-agent";

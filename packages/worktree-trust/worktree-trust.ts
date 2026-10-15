@@ -69,11 +69,18 @@ function hasProjectSkillsAbove(worktreeRoot: string): boolean {
   }
 }
 
-/** Paths, relative to the worktree root, of every resource Pi would load from cwd. */
-function trustResourcePaths(worktreeRoot: string, cwd: string): string[] {
-  const relativeCwd = relative(worktreeRoot, cwd);
-  const paths = PI_CONFIG_RESOURCES.map((entry) => join(relativeCwd, ".pi", entry));
-  for (let dir = relativeCwd; ; dir = dirname(dir)) {
+/**
+ * Pi config can reference extensions and skills anywhere, so its loaded content
+ * cannot be verified by comparing fixed paths. Its presence always defers to Pi.
+ */
+function hasPiConfig(cwd: string): boolean {
+  return PI_CONFIG_RESOURCES.some((entry) => existsSync(join(cwd, ".pi", entry)));
+}
+
+/** Paths, relative to the worktree root, of every `.agents/skills` directory Pi would load from cwd. */
+function skillPaths(worktreeRoot: string, cwd: string): string[] {
+  const paths: string[] = [];
+  for (let dir = relative(worktreeRoot, cwd); ; dir = dirname(dir)) {
     paths.push(join(dir, ".agents", "skills"));
     if (dir === "" || dir === ".") break;
   }
@@ -81,10 +88,11 @@ function trustResourcePaths(worktreeRoot: string, cwd: string): string[] {
 }
 
 /**
- * True when a resource is reached through a symlink or contains a tracked one.
- * Pi follows symlinks, so the content it loads could lie outside the compared paths.
+ * True when Git cannot vouch for a skill's content: it is reached through a
+ * symlink, or its index entry is a symlink, a submodule, or flagged
+ * assume-unchanged or skip-worktree (which hide edits from `git diff`).
  */
-async function resourcesUseSymlinks(
+async function skillsUnverifiable(
   worktreeRoot: string,
   paths: string[],
   pathspecs: string[],
@@ -93,8 +101,15 @@ async function resourcesUseSymlinks(
     const absolute = join(worktreeRoot, path);
     if (existsSync(absolute) && realpathSync(absolute) !== absolute) return true;
   }
-  const staged = await git(worktreeRoot, "ls-files", "--stage", "-z", "--", ...pathspecs);
-  return staged.split("\0").some((entry) => entry.startsWith("120000 "));
+  // Entries read `<tag> <mode> <object> <stage>\t<path>`; tag "H" is a plain tracked file.
+  const entries = await git(worktreeRoot, "ls-files", "-v", "--stage", "-z", "--", ...pathspecs);
+  return entries
+    .split("\0")
+    .filter(Boolean)
+    .some((entry) => {
+      const [tag, mode] = entry.split(" ");
+      return tag !== "H" || mode === "120000" || mode === "160000";
+    });
 }
 
 /** True when the worktree's trust resources differ from the main worktree's HEAD, including uncommitted, untracked and ignored files. */
@@ -116,9 +131,9 @@ async function resourcesDiffer(
 /**
  * Decides project trust for a linked Git worktree by inheriting its repository's trust.
  *
- * Returns "yes" only when the repository's main worktree is trusted and the
- * resources Pi would load from cwd match the main worktree's HEAD without
- * going through symlinks. Anything else is "undecided", so Pi falls back to saved decisions and its prompt.
+ * Returns "yes" only when the repository's main worktree is trusted, cwd has
+ * no Pi config, and the skills Pi would load from cwd verifiably match the
+ * main worktree's HEAD. Anything else is "undecided", so Pi falls back to saved decisions and its prompt.
  */
 export async function decideWorktreeTrust(
   cwd: string,
@@ -132,9 +147,12 @@ export async function decideWorktreeTrust(
   if (trustStore.get(worktree.mainWorktree) !== true) return "undecided";
   if (hasProjectSkillsAbove(worktree.root)) return "undecided";
 
-  const paths = trustResourcePaths(worktree.root, realpathSync(cwd));
+  const canonicalCwd = realpathSync(cwd);
+  if (hasPiConfig(canonicalCwd)) return "undecided";
+
+  const paths = skillPaths(worktree.root, canonicalCwd);
   const pathspecs = paths.map((path) => `:(literal)${path}`);
-  if (await resourcesUseSymlinks(worktree.root, paths, pathspecs)) return "undecided";
+  if (await skillsUnverifiable(worktree.root, paths, pathspecs)) return "undecided";
   if (await resourcesDiffer(worktree.root, worktree.mainHead, pathspecs)) return "undecided";
   return "yes";
 }

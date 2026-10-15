@@ -118,6 +118,40 @@ describe("decideWorktreeTrust", () => {
     expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
   });
 
+  it("is undecided when Pi config exists, even unchanged from the main worktree", async () => {
+    writeFile(join(repo, ".pi", "settings.json"), '{ "extensions": ["../src/index.ts"] }\n');
+    commitAll(repo, "add pi settings");
+    trustStore.set(repo, true);
+    git(worktree, "merge", "-q", "--ff-only", "main");
+
+    expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
+  });
+
+  it.each(["--assume-unchanged", "--skip-worktree"])(
+    "is undecided when a skill edit is hidden by %s",
+    async (flag) => {
+      trustStore.set(repo, true);
+      const skill = join(worktree, ".agents", "skills", "demo", "SKILL.md");
+      git(worktree, "update-index", flag, skill);
+      writeFile(skill, "changed\n");
+
+      expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
+    },
+  );
+
+  it("is undecided when a skill is a submodule", async () => {
+    const nested = join(repo, ".agents", "skills", "nested");
+    mkdirSync(nested);
+    git(nested, "init", "-q", "-b", "main");
+    writeFile(join(nested, "SKILL.md"));
+    commitAll(nested, "nested skill");
+    commitAll(repo, "add nested skill repository");
+    trustStore.set(repo, true);
+    git(worktree, "merge", "-q", "--ff-only", "main");
+
+    expect(await decideWorktreeTrust(worktree, trustStore)).toBe("undecided");
+  });
+
   it("is undecided when a committed symlink exposes unchanged repo files as Pi config", async () => {
     trustStore.set(repo, true);
     writeFile(join(repo, "fixtures", "pi", "settings.json"), "{}\n");
