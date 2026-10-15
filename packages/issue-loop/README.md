@@ -261,7 +261,7 @@ pnpm typecheck
 pnpm exec vitest run
 ```
 
-The full suite includes the issue-loop tests. While iterating, `pnpm exec vitest run packages/issue-loop/cli.test.ts -t "<name>"` runs a single scenario; the whole package is nearly as slow as the full suite.
+The full suite includes the issue-loop tests. While iterating, `pnpm exec vitest run packages/issue-loop/cli-lifecycle.test.ts -t "<name>"` runs a single scenario; the whole package is nearly as slow as the full suite.
 
 Tests drive the public `start`/`resume` commands against temporary Git worktrees and fake Pi/GitHub executables: no models, no GitHub mutations, no provider credits. Watchdog, backoff, and grace timing use a virtual clock in the worker tests; CLI tests use short deadlines and synchronize on fixture events rather than long sleeps.
 
