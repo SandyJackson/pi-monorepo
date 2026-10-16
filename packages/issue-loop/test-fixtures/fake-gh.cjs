@@ -72,12 +72,7 @@ else if (args[0] === "api") {
         process.exit(2);
       }
       fs.writeFileSync(file, JSON.stringify(comments));
-      if (
-        (mode === "comment-create-fail" ||
-          mode === "fail-parent-review-comment-fail" ||
-          mode === "integrated") &&
-        method === "POST"
-      ) {
+      if ((mode === "comment-create-fail" || mode === "integrated") && method === "POST") {
         console.error("Connection lost after posting comment");
         process.exit(1);
       }

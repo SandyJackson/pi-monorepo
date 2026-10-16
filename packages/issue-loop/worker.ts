@@ -14,18 +14,23 @@ import { DEFAULT_WATCHDOG, type WatchdogSettings } from "./settings.ts";
  * recovery context, and receive a validated phase outcome.
  */
 
-export type WorkerPhase = "editing" | "review";
+export type WorkerPhase = "editing" | "review" | "describe";
 
 export type EditingOutcomeName = "complete" | "incomplete" | "blocked";
 export type ReviewOutcomeName = "pass" | "changes_requested" | "incomplete" | "blocked";
 export type PhaseOutcomeName = EditingOutcomeName | ReviewOutcomeName;
 
-export type Severity = "critical" | "major" | "minor";
-export type FindingAxis = "spec" | "standards";
+/** Review finding priority. P0-P2 block acceptance; P3 is a passing observation. */
+export type Priority = "P0" | "P1" | "P2" | "P3";
+export type FindingAxis =
+  | "correctness-requirements"
+  | "design-maintainability"
+  | "tests-verification"
+  | "security-resilience";
 
 export interface ParsedFinding {
   axis: FindingAxis;
-  severity: Severity;
+  priority: Priority;
   location: string;
   description: string;
 }
@@ -34,6 +39,8 @@ export interface PhaseOutcome {
   outcome: PhaseOutcomeName;
   summary: string;
   findings: ParsedFinding[];
+  /** PR description Markdown; present only on a completed describe phase. */
+  body?: string;
   remainingWork?: string;
   blockers?: string;
 }
@@ -169,10 +176,16 @@ function isTransientProviderFailure(finalError: string | undefined): boolean {
 
 const EDITING_OUTCOMES: PhaseOutcomeName[] = ["complete", "incomplete", "blocked"];
 const REVIEW_OUTCOMES: PhaseOutcomeName[] = ["pass", "changes_requested", "incomplete", "blocked"];
-const SEVERITIES: Severity[] = ["critical", "major", "minor"];
-const FINDING_AXES: FindingAxis[] = ["spec", "standards"];
-const TOP_LEVEL_KEYS = ["blockers", "findings", "outcome", "remainingWork", "summary"];
-const FINDING_KEYS = ["axis", "description", "location", "severity"];
+const PRIORITIES: Priority[] = ["P0", "P1", "P2", "P3"];
+const BLOCKING_PRIORITIES: Priority[] = ["P0", "P1", "P2"];
+const FINDING_AXES: FindingAxis[] = [
+  "correctness-requirements",
+  "design-maintainability",
+  "tests-verification",
+  "security-resilience",
+];
+const TOP_LEVEL_KEYS = ["blockers", "body", "findings", "outcome", "remainingWork", "summary"];
+const FINDING_KEYS = ["axis", "description", "location", "priority"];
 
 /**
  * Canonical examples advertised in the worker prompt. Tests feed these exact
@@ -202,6 +215,28 @@ export const EDITING_OUTCOME_EXAMPLES: readonly {
   },
 ];
 
+export const DESCRIBE_OUTCOME_EXAMPLES: readonly {
+  outcome: EditingOutcomeName;
+  example: Record<string, unknown>;
+}[] = [
+  {
+    outcome: "complete",
+    example: {
+      outcome: "complete",
+      summary: "What the description covers.",
+      body: "## Summary\n\n...",
+    },
+  },
+  {
+    outcome: "blocked",
+    example: {
+      outcome: "blocked",
+      summary: "What you attempted.",
+      blockers: "What stops the description.",
+    },
+  },
+];
+
 export const REVIEW_OUTCOME_EXAMPLES: readonly {
   outcome: ReviewOutcomeName;
   example: Record<string, unknown>;
@@ -210,11 +245,11 @@ export const REVIEW_OUTCOME_EXAMPLES: readonly {
     outcome: "pass",
     example: {
       outcome: "pass",
-      summary: "No critical or major problems.",
+      summary: "No P0-P2 problems.",
       findings: [
         {
-          axis: "standards",
-          severity: "minor",
+          axis: "design-maintainability",
+          priority: "P3",
           location: "path/to/file.ts:12",
           description: "Optional cleanup.",
         },
@@ -228,8 +263,8 @@ export const REVIEW_OUTCOME_EXAMPLES: readonly {
       summary: "What must change before acceptance.",
       findings: [
         {
-          axis: "spec",
-          severity: "major",
+          axis: "correctness-requirements",
+          priority: "P1",
           location: "path/to/file.ts:12",
           description: "Unmet acceptance criterion.",
         },
@@ -1307,15 +1342,15 @@ function parseFindings(value: unknown): ParsedFinding[] {
     const keys = Object.keys(entry).sort();
     if (keys.join(",") !== FINDING_KEYS.join(","))
       throw new Error(`each finding must have exactly ${FINDING_KEYS.join(", ")}`);
-    const severity = entry.severity;
-    if (typeof severity !== "string" || !SEVERITIES.includes(severity as Severity))
-      throw new Error(`finding severity must be one of ${SEVERITIES.join(", ")}`);
+    const priority = entry.priority;
+    if (typeof priority !== "string" || !PRIORITIES.includes(priority as Priority))
+      throw new Error(`finding priority must be one of ${PRIORITIES.join(", ")}`);
     const axis = entry.axis;
     if (typeof axis !== "string" || !FINDING_AXES.includes(axis as FindingAxis))
       throw new Error(`finding axis must be one of ${FINDING_AXES.join(", ")}`);
     return {
       axis: axis as FindingAxis,
-      severity: severity as Severity,
+      priority: priority as Priority,
       location: readRequiredString(entry, "location"),
       description: readRequiredString(entry, "description"),
     };
@@ -1340,9 +1375,10 @@ function extractJsonObject(text: string): unknown {
 }
 
 /**
- * Validate a phase-specific structured outcome. Editing permits complete;
- * review permits pass/changes_requested; both permit incomplete/blocked.
- * Material critical/major findings are inconsistent with a pass.
+ * Validate a phase-specific structured outcome. Editing and describe permit
+ * complete; review permits pass/changes_requested; all permit
+ * incomplete/blocked. Only a completed describe phase carries a body.
+ * Blocking P0-P2 findings are inconsistent with a pass.
  */
 export function parsePhaseOutcome(phase: WorkerPhase, text: string): PhaseOutcome {
   let raw: unknown;
@@ -1357,18 +1393,22 @@ export function parsePhaseOutcome(phase: WorkerPhase, text: string): PhaseOutcom
   try {
     assertKeys(raw);
     const outcome = raw.outcome;
-    const allowed = phase === "editing" ? EDITING_OUTCOMES : REVIEW_OUTCOMES;
+    const allowed = phase === "review" ? REVIEW_OUTCOMES : EDITING_OUTCOMES;
     if (typeof outcome !== "string" || !allowed.includes(outcome as PhaseOutcomeName))
       throw new Error(
         `outcome must be one of ${allowed.join(", ")} during ${phase} (got ${JSON.stringify(outcome)})`,
       );
     const summary = readRequiredString(raw, "summary");
     const findings = phase === "review" ? parseFindings(raw.findings) : [];
-    if (phase === "editing" && raw.findings !== undefined) {
+    if (phase !== "review" && raw.findings !== undefined) {
       if (!Array.isArray(raw.findings)) throw new Error("findings must be an array");
-      if (raw.findings.length) throw new Error("editing outcomes cannot carry findings");
+      if (raw.findings.length) throw new Error(`${phase} outcomes cannot carry findings`);
     }
     const result: PhaseOutcome = { outcome: outcome as PhaseOutcomeName, summary, findings };
+    if (phase === "describe" && outcome === "complete")
+      result.body = readRequiredString(raw, "body");
+    else if (raw.body !== undefined)
+      throw new Error("only a complete describe outcome can carry a body");
     const remainingWork = raw.remainingWork;
     if (remainingWork !== undefined && (typeof remainingWork !== "string" || !remainingWork.trim()))
       throw new Error("remainingWork must be a non-empty string when present");
@@ -1390,13 +1430,11 @@ export function parsePhaseOutcome(phase: WorkerPhase, text: string): PhaseOutcom
       throw new Error(`${outcome} outcomes cannot report blockers`);
     }
     if (phase === "review") {
-      const material = findings.some(
-        (finding) => finding.severity === "critical" || finding.severity === "major",
-      );
-      if (outcome === "pass" && material)
-        throw new Error("a pass cannot carry critical or major findings");
-      if (outcome === "changes_requested" && !material)
-        throw new Error("changes_requested must carry at least one critical or major finding");
+      const blocking = findings.some((finding) => BLOCKING_PRIORITIES.includes(finding.priority));
+      if (outcome === "pass" && blocking)
+        throw new Error("a pass cannot carry P0, P1 or P2 findings");
+      if (outcome === "changes_requested" && !blocking)
+        throw new Error("changes_requested must carry at least one P0, P1 or P2 finding");
     }
     return result;
   } catch (error) {

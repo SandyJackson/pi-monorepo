@@ -1,4 +1,4 @@
-// Full loop, PR creation, and advisory-review outcomes.
+// Full loop, PR description, and draft PR creation.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect } from "vitest";
@@ -34,8 +34,8 @@ cliTest(
     expect(workers.every((worker) => worker.name.startsWith(state.name))).toBe(true);
     expect(new Set(workers.map((worker) => worker.session)).size).toBe(workers.length);
     const reviews = workers.filter((worker) => worker.name.includes("review"));
-    expect(reviews.length).toBeGreaterThanOrEqual(3);
-    expect(reviews.every((worker) => worker.args.includes("read,grep,find,ls"))).toBe(true);
+    expect(reviews).toHaveLength(2);
+    expect(reviews.every((worker) => worker.args.includes("read,grep,find,ls,bash"))).toBe(true);
     expect(workers.every((worker) => worker.args.includes("--no-skills"))).toBe(true);
     // RPC mode with ambient extensions disabled for every worker.
     expect(
@@ -62,24 +62,31 @@ cliTest(
     expect(reviews.every((worker) => !worker.args.includes("--skill"))).toBe(true);
     expect(existsSync(join(runDir, "skills", "tdd", "SKILL.md"))).toBe(true);
     expect(existsSync(join(runDir, "skills", "diagnosing-bugs", "SKILL.md"))).toBe(true);
+    // One PR-description worker, with the pr skill and no editing tools.
+    const describers = workers.filter((worker) => worker.name.includes("parent describe"));
+    expect(describers).toHaveLength(1);
+    expect(describers[0].args).toContain("read,grep,find,ls,bash");
+    expect(describers[0].args.some((arg: string) => arg.endsWith(join("skills", "pr")))).toBe(true);
+    expect(describers[0].prompt).toContain('"body"');
+    expect(existsSync(join(runDir, "skills", "pr", "SKILL.md"))).toBe(true);
     const prArgs = JSON.parse(readFileSync(join(f.root, "pr.json"), "utf8"));
     const baseIndex = prArgs.indexOf("--base");
     expect(prArgs.slice(baseIndex, baseIndex + 2)).toEqual(["--base", "main"]);
-    // A passing final review with no findings is still posted as an advisory
-    // comment with its verdict, summary, and reviewed artifact.
-    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
-    expect(comments).toHaveLength(1);
-    expect(comments[0].body).toContain("Final whole-artifact review");
-    expect(comments[0].body).toContain("(pass)");
-    expect(comments[0].body).toContain("Review passed.");
-    expect(comments[0].body).toContain(state.review.head);
-    expect(comments[0].body).toContain(state.review.tree);
+    expect(prArgs).toContain("--draft");
+    // The worker's body leads; the controller owns the review note and closing lines.
+    const pr = readFileSync(join(runDir, "pr.md"), "utf8");
+    expect(pr.startsWith("## Summary\n\nAdds feature.txt.")).toBe(true);
+    expect(pr).toContain("`/skill:code-review mode=full`");
+    expect(pr).toContain("Closes #10\nCloses #11\nCloses #12");
+    expect(pr).not.toContain("[!NOTE]");
+    // No passing review left an observation, so no comment is posted.
+    expect(existsSync(join(f.root, "pr-comments.json"))).toBe(false);
   },
   30_000,
 );
 
 cliTest(
-  "keeps passing review bodies for tickets and parent without starting repairs",
+  "keeps passing ticket review observations without starting repairs",
   async () => {
     const f = fixture("pass-notes");
     const result = await f.start();
@@ -92,22 +99,14 @@ cliTest(
       state.tickets.every(
         (ticket: { review: { outcome: string; findings: { description: string }[] } }) =>
           ticket.review.outcome === "pass" &&
-          ticket.review.findings[0]?.description === "[Spec][Minor] Ticket cleanup",
+          ticket.review.findings[0]?.description === "[P3] Ticket cleanup",
       ),
     ).toBe(true);
-    expect(state.review).toMatchObject({
-      outcome: "pass",
-      findings: [{ description: "[Standards][Minor] Parent cleanup" }],
-    });
     const summary = readSummary(runDir);
     expect(summary).toContain("Review observations");
     expect(summary).toContain("may have been resolved");
-    expect(summary).toContain("[Spec][Minor] Ticket cleanup");
-    expect(summary).toContain("[Standards][Minor] Parent cleanup");
-    expect(summary).toContain(state.review.head);
-    expect(summary).toContain(state.review.tree);
-    expect(state.review.head).toBe(state.head);
-    expect(state.review.tree).toBe(f.git("-C", state.worktree, "rev-parse", "HEAD^{tree}"));
+    expect(summary).toContain("[P3][correctness-requirements] review: [P3] Ticket cleanup");
+    expect(summary).toContain(state.tickets[1].review.head);
     // The committed feature anchor is the exact reviewed artifact, then accepted.
     expect(state.tickets[0].review.head).toBe(state.tickets[0].anchor);
     expect(state.tickets[0].review.head).toBe(state.tickets[0].commit);
@@ -122,47 +121,12 @@ cliTest(
       });
     }
     const pr = readFileSync(join(runDir, "pr.md"), "utf8");
-    expect(pr).not.toContain("[Spec][Minor] Ticket cleanup");
-    expect(pr).not.toContain("[Standards][Minor] Parent cleanup");
+    expect(pr).not.toContain("[P3] Ticket cleanup");
     const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
     expect(comments).toHaveLength(1);
-    expect(comments[0].body).toContain("[Spec][Minor] Ticket cleanup");
-    expect(comments[0].body).toContain("[Standards][Minor] Parent cleanup");
-    expect(comments[0].body).toContain(state.review.tree);
-  },
-  30_000,
-);
-
-cliTest(
-  "creates the PR before the advisory whole-artifact review without parent repairs",
-  async () => {
-    const f = fixture("parent-reject");
-    const result = await f.start();
-    expect(result.status, result.stderr).toBe(0);
-    const runDir = runDirFrom(result.stdout);
-    const state = readState(runDir);
-    expect(state.status).toBe("done");
-    // The final review is advisory: a material verdict is recorded, not repaired.
-    expect(state.review).toMatchObject({ outcome: "changes_requested" });
-    expect(state.advisoryWarning).toBeUndefined();
-    // The PR existed before the review ran, and no parent editing was authorized.
-    expect(readFileSync(join(f.root, "parent-review-order.txt"), "utf8").trim()).toBe("after-pr");
-    const workers = readWorkers(f.root);
-    expect(
-      workers.some(
-        (worker) =>
-          worker.name.includes("parent implement") || worker.name.includes("parent repair"),
-      ),
-    ).toBe(false);
-    // The advisory comment carries the finding, the reviewed SHA, and its outcome.
-    const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
-    const advisory = comments.find((comment: { body: string }) =>
-      comment.body.includes("Final whole-artifact review"),
-    )!;
-    expect(advisory.body).toContain("Missing acceptance criterion");
-    expect(advisory.body).toContain(state.review.head);
-    expect(advisory.body).toContain("changes_requested");
-    expect(state.advisoryCommentId).toBeGreaterThan(0);
+    expect(comments[0].body).toContain("[P3] Ticket cleanup");
+    expect(comments[0].body).toContain(state.tickets[1].review.tree);
+    expect(state.observationsCommentId).toBeGreaterThan(0);
     // Child history is retained: no squash and no parent commit.
     const subjects = f.git("-C", state.worktree, "log", "--format=%s", `${state.baseSha}..HEAD`);
     expect(subjects).toContain("loop: #11 Ticket 11");
@@ -172,22 +136,54 @@ cliTest(
 );
 
 cliTest(
-  "finishes with a visible warning when the advisory whole-artifact review is unavailable",
+  "rewrites closing keywords in the worker's PR description and notes it",
   async () => {
-    const f = fixture("fail-parent-review");
+    const f = fixture();
+    f.env.FIXTURE_PR_BODY = [
+      "## Summary",
+      "",
+      "Fixes #12345, closes: other/repo#777 and Resolved https://github.com/test/project/issues/5.",
+      "Mentions #11 and enclosed #4 without closing them.",
+    ].join("\n");
     const result = await f.start();
     expect(result.status, result.stderr).toBe(0);
-    const runDir = runDirFrom(result.stdout);
-    const state = readState(runDir);
-    expect(state.status).toBe("done");
-    // A failed advisory review never claims a pass and never traps the PR.
-    expect(state.review).toBeUndefined();
-    expect(state.advisoryWarning).toContain("unavailable");
-    expect(state.pr).toBe("https://github.com/test/project/pull/99");
-    expect(existsSync(join(f.root, "pr.json"))).toBe(true);
-    const summary = readSummary(runDir);
-    expect(summary).toContain("unavailable");
-    expect(result.stderr).toContain("Warning");
+    const pr = readFileSync(join(runDirFrom(result.stdout), "pr.md"), "utf8");
+    const [generated, controller] = pr.split("\n---\n");
+    expect(generated).toContain(
+      "Refs #12345, Refs other/repo#777 and Refs https://github.com/test/project/issues/5.",
+    );
+    expect(generated).toContain("Mentions #11 and enclosed #4 without closing them.");
+    expect(generated).not.toMatch(
+      /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+\S*(?:#\d|\/issues\/)/i,
+    );
+    expect(generated).toContain("rewrote 3 closing keywords");
+    expect(controller).toContain("Closes #10");
+  },
+  30_000,
+);
+
+cliTest(
+  "stops before publication when the PR description is blocked",
+  async () => {
+    const f = fixture("describe-blocked");
+    const result = await f.start();
+    expect(result.status).toBe(1);
+    const state = readState(runDirFrom(result.stdout));
+    expect(state.status).toBe("blocked");
+    expect(state.phase).toBe("describe");
+    expect(state.lastError).toContain("The patch is unreadable.");
+    expect(state.prDescription).toBeUndefined();
+    expect(existsSync(join(f.root, "pr.json"))).toBe(false);
+    // Resume describes again; accepted work is not repeated.
+    f.env.FIXTURE_MODE = "pass";
+    const resumed = await f.run("resume", state.runDir);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    const finished = readState(state.runDir);
+    expect(finished.status).toBe("done");
+    expect(finished.prDescription?.head).toBe(finished.head);
+    expect(readWorkers(f.root).filter((worker) => worker.name.includes("implement"))).toHaveLength(
+      2,
+    );
   },
   30_000,
 );
@@ -205,9 +201,9 @@ cliTest(
     expect(state.phase).toBe("final");
     expect(state.lastError).toContain("Required checks failed for the publication artifact");
     expect(readFileSync(join(f.root, "final-check-count"), "utf8")).toBe("3");
-    // No PR and no advisory review exist for an unverified artifact.
+    // No description and no PR exist for an unverified artifact.
     expect(existsSync(join(f.root, "pr.json"))).toBe(false);
-    expect(state.review).toBeUndefined();
+    expect(state.prDescription).toBeUndefined();
     expect(state.tickets.every((ticket: { status: string }) => ticket.status === "accepted")).toBe(
       true,
     );

@@ -1,11 +1,9 @@
 // Interrupts, deadlines, and run-queue guards.
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { expect } from "vitest";
 import {
-  cli,
   cliTest,
   fixture,
   readState,
@@ -63,12 +61,12 @@ cliTest(
     expect(hookRepair.prompt).toContain("INTEGRATED_LINT");
 
     // Run 2: the operator finishes #12 by hand. A fresh reviewer assesses it,
-    // the PR is published, and the advisory comment post loses its response.
+    // the PR is published, and the observations comment post loses its response.
     writeFileSync(join(stopped.worktree, "manual-12.txt"), "Manually fixed\n");
     const second = await f.run("resume", runDir);
     expect(second.status).toBe(1);
     const posted = readState(runDir);
-    expect(posted.phase).toBe("advisory");
+    expect(posted.phase).toBe("publish");
     expect(posted.tickets.map((ticket: { status: string }) => ticket.status)).toEqual([
       "accepted",
       "accepted",
@@ -90,15 +88,14 @@ cliTest(
 
     const finished = readState(runDir);
     expect(finished.status).toBe("done");
-    expect(finished.advisoryWarning).toBeUndefined();
     expect(readFileSync(join(f.root, "pr-created.txt"), "utf8")).toBe("created\n");
     expect(readFileSync(join(f.root, "comments-created.txt"), "utf8")).toBe("created\n");
     const comments = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
     expect(comments).toHaveLength(1);
-    expect(comments[0].body).toContain("[Standards][Minor] Parent cleanup");
-    expect(comments[0].body).toContain(finished.review.head);
+    expect(comments[0].body).toContain("[P3] Ticket 12 cleanup");
+    expect(comments[0].body).toContain(finished.tickets[1].review.head);
     expect(
-      readWorkers(f.root).filter((worker) => worker.name.includes("parent review")),
+      readWorkers(f.root).filter((worker) => worker.name.includes("parent describe")),
     ).toHaveLength(1);
     // Unsquashed child history is left for the human to squash or merge: the
     // hook repair joins #12's feature commit and the manual fix is its fixup.
@@ -127,57 +124,6 @@ cliTest(
     expect(files("HEAD")).toContain("manual-12.txt");
   },
   60_000,
-);
-
-cliTest(
-  "propagates an interruption during the remote branch lookup instead of completing",
-  async () => {
-    const f = fixture("comment-create-fail");
-    const first = await f.start();
-    expect(first.status).toBe(1);
-    const runDir = runDirFrom(first.stdout);
-    const before = JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"));
-    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
-    writeFileSync(
-      join(f.root, "bin", "git"),
-      `#!/bin/sh\nif [ "$1" = "ls-remote" ]; then\n  touch "$FIXTURE_ROOT/ls-remote-started"\n  sleep 60\n  exit 0\nfi\nexec ${JSON.stringify(realGit)} "$@"\n`,
-      { mode: 0o755 },
-    );
-    f.env.FIXTURE_MODE = "pass-notes";
-    const child = spawn(process.execPath, [cli, "resume", runDir], {
-      env: f.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stderr = "";
-    child.stdout.resume();
-    child.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-    const closed = new Promise<void>((resolve) => child.on("close", () => resolve()));
-    try {
-      const marker = join(f.root, "ls-remote-started");
-      for (let i = 0; i < 200 && !existsSync(marker); i++) await delay(50);
-      expect(existsSync(marker)).toBe(true);
-      child.kill("SIGINT");
-      await Promise.race([
-        closed,
-        delay(5000).then(() => {
-          throw new Error("Controller did not stop after interrupt");
-        }),
-      ]);
-    } finally {
-      child.kill("SIGKILL");
-      await closed;
-    }
-    const state = readState(runDir);
-    // The interruption preserves a resumable stop instead of finishing the run
-    // and mutating the PR after the remote read was aborted.
-    expect(state.status).toBe("blocked");
-    expect(state.phase).toBe("advisory");
-    expect(stderr).toContain("Interrupted; work has been preserved");
-    expect(JSON.parse(readFileSync(join(f.root, "pr-comments.json"), "utf8"))).toEqual(before);
-  },
-  30_000,
 );
 
 cliTest(
@@ -221,7 +167,7 @@ cliTest(
 cliTest(
   "uses the snapshotted Git deadline for a held GitHub read on resume even if the settings file changes",
   async () => {
-    // Resume reaches advisory comment reconciliation without launching a worker.
+    // Resume reaches observations comment reconciliation without launching a worker.
     const f = fixture("comment-create-fail");
     const settings = join(f.root, "deadline-settings.json");
     writeFileSync(settings, JSON.stringify({ deadlines: { gitMs: 3_000 } }));

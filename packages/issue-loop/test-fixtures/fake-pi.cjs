@@ -25,13 +25,11 @@ const out = (record) => {
     appendSessionRecord({ type: "message", message: record.message });
   process.stdout.write(`${JSON.stringify(record)}\n`);
 };
-const isParentReview = () => name.includes("parent review");
+const isDescribe = () => name.includes("parent describe");
 let promptCount = 0;
-function materialSeverity(body) {
-  const lower = String(body || "").toLowerCase();
-  if (lower.includes("[critical]")) return "critical";
-  if (lower.includes("[major]")) return "major";
-  return "minor";
+function bodyPriority(body) {
+  const match = String(body || "").match(/\[(P[0-2])\]/i);
+  return match ? match[1].toUpperCase() : "P3";
 }
 function reviewOutcome() {
   const mode = process.env.FIXTURE_MODE;
@@ -44,14 +42,14 @@ function reviewOutcome() {
       findings: [],
       remainingWork: "Need more evidence.",
     });
-  if (mode === "reject" || (mode === "parent-reject" && isParentReview()))
+  if (mode === "reject")
     return JSON.stringify({
       outcome: "changes_requested",
       summary: "Missing acceptance criterion",
       findings: [
         {
-          axis: "spec",
-          severity: "major",
+          axis: "correctness-requirements",
+          priority: "P1",
           location: "feature.txt",
           description: "Missing acceptance criterion",
         },
@@ -66,24 +64,39 @@ function reviewOutcome() {
     });
   if (mode === "pass-body") {
     const body = process.env.FIXTURE_REVIEW_BODY || "";
-    const severity = materialSeverity(body);
+    const priority = bodyPriority(body);
     return JSON.stringify({
       outcome: "pass",
       summary: "Looks good.",
-      findings: body ? [{ axis: "spec", severity, location: "review", description: body }] : [],
+      findings: body
+        ? [{ axis: "correctness-requirements", priority, location: "review", description: body }]
+        : [],
     });
   }
   if (mode === "pass-notes" || mode === "comment-create-fail") {
-    const note = isParentReview()
-      ? process.env.FIXTURE_REVIEW_BODY || "[Standards][Minor] Parent cleanup"
-      : "[Spec][Minor] Ticket cleanup";
+    const note = "[P3] Ticket cleanup";
     return JSON.stringify({
       outcome: "pass",
       summary: "Review passed.",
-      findings: [{ axis: "spec", severity: "minor", location: "review", description: note }],
+      findings: [
+        { axis: "correctness-requirements", priority: "P3", location: "review", description: note },
+      ],
     });
   }
   return JSON.stringify({ outcome: "pass", summary: "Review passed.", findings: [] });
+}
+function describeOutcome() {
+  if (process.env.FIXTURE_MODE === "describe-blocked")
+    return JSON.stringify({
+      outcome: "blocked",
+      summary: "Tried to read the patch.",
+      blockers: "The patch is unreadable.",
+    });
+  return JSON.stringify({
+    outcome: "complete",
+    summary: "Described the change.",
+    body: process.env.FIXTURE_PR_BODY || "## Summary\n\nAdds feature.txt.",
+  });
 }
 function implementOutcome() {
   const mode = process.env.FIXTURE_MODE;
@@ -118,54 +131,6 @@ function handle(command) {
   const isImplement = name.includes("implement");
   const isEditing = name.includes("implement") || name.includes("repair");
   const mode = process.env.FIXTURE_MODE;
-  if (isParentReview())
-    fs.writeFileSync(
-      path.join(process.env.FIXTURE_ROOT, "parent-review-order.txt"),
-      fs.existsSync(path.join(process.env.FIXTURE_ROOT, "pr.json")) ? "after-pr" : "before-pr",
-    );
-  if (
-    (mode === "fail-parent-review" || mode === "fail-parent-review-comment-fail") &&
-    isParentReview() &&
-    command.type === "prompt"
-  ) {
-    console.error("Provider unavailable");
-    process.exit(1);
-  }
-  if (mode === "hold-parent-review" && isParentReview() && command.type === "prompt") {
-    // Signal that the parent review is running, then wait until the controller interrupts it.
-    out({
-      id: command.id,
-      type: "response",
-      command: "prompt",
-      success: true,
-      data: { disposition: "started" },
-    });
-    out({ type: "agent_start" });
-    fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, "parent-review-ready"), "ready\n");
-    return;
-  }
-  if (mode === "parent-review-index-mutation" && isParentReview() && command.type === "prompt") {
-    // Only the index changes: HEAD and the working files stay as published.
-    require("node:child_process").execFileSync("git", ["read-tree", "HEAD^"], {
-      cwd: process.cwd(),
-    });
-    out({
-      id: command.id,
-      type: "response",
-      command: "prompt",
-      success: true,
-      data: { disposition: "started" },
-    });
-    out({ type: "agent_start" });
-    out({ type: "message_start", message: { role: "assistant", content: [] } });
-    out({
-      type: "message_end",
-      message: { role: "assistant", content: [{ type: "text", text: reviewOutcome() }] },
-    });
-    out({ type: "agent_end", messages: [], willRetry: false });
-    out({ type: "agent_settled" });
-    return;
-  }
   if (command.type === "steer") {
     out({
       id: command.id,
@@ -191,6 +156,24 @@ function handle(command) {
     process.exit(0);
   }
   if (command.type === "prompt") promptCount++;
+  if (isDescribe()) {
+    out({
+      id: command.id,
+      type: "response",
+      command: "prompt",
+      success: true,
+      data: { disposition: "started" },
+    });
+    out({ type: "agent_start" });
+    out({ type: "message_start", message: { role: "assistant", content: [] } });
+    out({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: describeOutcome() }] },
+    });
+    out({ type: "agent_end", messages: [], willRetry: false });
+    out({ type: "agent_settled" });
+    return;
+  }
   if (mode === "integrated") {
     // One scripted run through recovery, repair/audit, hook repair, and manual work.
     const reply = (events) => {
@@ -216,7 +199,14 @@ function handle(command) {
       JSON.stringify({
         outcome: "changes_requested",
         summary: description,
-        findings: [{ axis: "spec", severity: "major", location: "feature.txt", description }],
+        findings: [
+          {
+            axis: "correctness-requirements",
+            priority: "P1",
+            location: "feature.txt",
+            description,
+          },
+        ],
       });
     const count = (key) => {
       const file = path.join(process.env.FIXTURE_ROOT, `integrated-${key}`);
@@ -269,8 +259,8 @@ function handle(command) {
     if (name.includes("#12 review")) {
       const reviewCount = count("review-12");
       if (reviewCount === 1) return answer(changes("INTEGRATED_12 finding"));
-      // Second child review: capture the reviewed patch now, before the advisory
-      // parent review overwrites the shared review.patch.
+      // Second child review: capture the reviewed patch now, before a later
+      // review overwrites the shared review.patch.
       const match = command.message.match(/Patch including new files: (.+)/);
       const patchPath = match ? match[1].trim() : "";
       const patch = patchPath && fs.existsSync(patchPath) ? fs.readFileSync(patchPath, "utf8") : "";
@@ -285,8 +275,8 @@ function handle(command) {
             summary: "Reviewed patch omits the manual fix",
             findings: [
               {
-                axis: "spec",
-                severity: "major",
+                axis: "correctness-requirements",
+                priority: "P1",
                 location: "manual-12.txt",
                 description: "The reviewed patch is missing manual-12.txt or its content",
               },
@@ -294,23 +284,22 @@ function handle(command) {
           }),
         );
       }
-      return answer(pass);
-    }
-    if (isParentReview())
+      // A passing note gives publication an observations comment to post.
       return answer(
         JSON.stringify({
           outcome: "pass",
-          summary: "Parent review passed.",
+          summary: "Review passed.",
           findings: [
             {
-              axis: "standards",
-              severity: "minor",
-              location: "review",
-              description: "[Standards][Minor] Parent cleanup",
+              axis: "design-maintainability",
+              priority: "P3",
+              location: "manual-12.txt",
+              description: "[P3] Ticket 12 cleanup",
             },
           ],
         }),
       );
+    }
     return answer(pass);
   }
   if (
@@ -409,8 +398,8 @@ function handle(command) {
               summary: "Suspected missing behavior",
               findings: [
                 {
-                  axis: "spec",
-                  severity: "major",
+                  axis: "correctness-requirements",
+                  priority: "P1",
                   location: "feature.txt",
                   description: "Suspected missing behavior",
                 },
@@ -455,8 +444,8 @@ function handle(command) {
               summary: "First failure",
               findings: [
                 {
-                  axis: "spec",
-                  severity: "major",
+                  axis: "correctness-requirements",
+                  priority: "P1",
                   location: "first.txt",
                   description: "FIRST_FAILURE finding",
                 },
@@ -468,8 +457,8 @@ function handle(command) {
                 summary: "Second failure",
                 findings: [
                   {
-                    axis: "spec",
-                    severity: "major",
+                    axis: "correctness-requirements",
+                    priority: "P1",
                     location: "second.txt",
                     description: "SECOND_FAILURE finding",
                   },
@@ -523,8 +512,8 @@ function handle(command) {
       summary: "Repair the failing behavior",
       findings: [
         {
-          axis: "spec",
-          severity: "major",
+          axis: "correctness-requirements",
+          priority: "P1",
           location: "feature.txt",
           description: "INTERRUPTED_REPAIR finding",
         },
@@ -576,8 +565,8 @@ function handle(command) {
             summary: "Checks still fail",
             findings: [
               {
-                axis: "spec",
-                severity: "major",
+                axis: "correctness-requirements",
+                priority: "P1",
                 location: "check-ok",
                 description: "CHECKS_FAILING finding",
               },
@@ -684,8 +673,8 @@ function handle(command) {
             summary: "Fix the first attempt",
             findings: [
               {
-                axis: "spec",
-                severity: "major",
+                axis: "correctness-requirements",
+                priority: "P1",
                 location: "feature.txt",
                 description: "FIRST_FAILURE finding",
               },
@@ -761,8 +750,8 @@ function handle(command) {
           summary: "Repair required",
           findings: [
             {
-              axis: "spec",
-              severity: "major",
+              axis: "correctness-requirements",
+              priority: "P1",
               location: "repair-partial.txt",
               description: "INCOMPLETE_REPAIR finding",
             },
@@ -839,8 +828,8 @@ function handle(command) {
             summary: "First failure",
             findings: [
               {
-                axis: "spec",
-                severity: "major",
+                axis: "correctness-requirements",
+                priority: "P1",
                 location: "feature.txt",
                 description: "STALE_FAILURE finding",
               },
@@ -877,13 +866,18 @@ function handle(command) {
     out({ type: "message_start", message: { role: "assistant", content: [] } });
     let text;
     if (isEditing) text = implementOutcome();
-    else if (isParentReview())
-      text = JSON.stringify({ outcome: "pass", summary: "Parent review passed.", findings: [] });
     else {
       const counterFile = path.join(process.env.FIXTURE_ROOT, "fixup-review-count");
       const count =
         (fs.existsSync(counterFile) ? Number(fs.readFileSync(counterFile, "utf8")) : 0) + 1;
       fs.writeFileSync(counterFile, String(count));
+      // Keep the patch this review saw; later reviews overwrite review.patch.
+      const patchPath = command.message.match(/Patch including new files: (.+)/)?.[1].trim();
+      if (patchPath)
+        fs.copyFileSync(
+          patchPath,
+          path.join(process.env.FIXTURE_ROOT, `fixup-review-${count}.patch`),
+        );
       text =
         count === 1
           ? JSON.stringify({
@@ -891,8 +885,8 @@ function handle(command) {
               summary: "Fix the first attempt",
               findings: [
                 {
-                  axis: "spec",
-                  severity: "major",
+                  axis: "correctness-requirements",
+                  priority: "P1",
                   location: "first.txt",
                   description: "Fix the first attempt",
                 },
@@ -1052,8 +1046,8 @@ function handle(command) {
         summary: "Fix the review finding",
         findings: [
           {
-            axis: "spec",
-            severity: "major",
+            axis: "correctness-requirements",
+            priority: "P1",
             location: "feature.txt",
             description: "Fix the review finding",
           },

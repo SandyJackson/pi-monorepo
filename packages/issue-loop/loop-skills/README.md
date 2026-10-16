@@ -32,3 +32,5 @@ read-only reviewer aid has earned it.
 - `diagnosing-bugs/` — repair-attempt discipline: tight loop first, theory
   second. User checkpoints and commit-message duties removed; repairs are
   budgeted, blockers go in the summary.
+- `pr/` — PR body template for the PR-description worker, which always gets
+  it. References to the user and their current question removed.

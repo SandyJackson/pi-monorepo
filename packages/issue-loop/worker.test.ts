@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   assertOutcomeConsistent,
+  DESCRIBE_OUTCOME_EXAMPLES,
   EDITING_OUTCOME_EXAMPLES,
   type PhaseOutcome,
   parsePhaseOutcome,
@@ -374,8 +375,8 @@ describe("parsePhaseOutcome", () => {
         summary: "Looks good.",
         findings: [
           {
-            axis: "standards",
-            severity: "minor",
+            axis: "design-maintainability",
+            priority: "P3",
             location: "src/a.ts:1",
             description: "Rename this.",
           },
@@ -384,8 +385,8 @@ describe("parsePhaseOutcome", () => {
     );
     expect(result.findings).toEqual([
       {
-        axis: "standards",
-        severity: "minor",
+        axis: "design-maintainability",
+        priority: "P3",
         location: "src/a.ts:1",
         description: "Rename this.",
       },
@@ -402,7 +403,14 @@ describe("parsePhaseOutcome", () => {
         JSON.stringify({
           outcome: "complete",
           summary: "Done.",
-          findings: [{ axis: "spec", severity: "major", location: "x", description: "Missing." }],
+          findings: [
+            {
+              axis: "correctness-requirements",
+              priority: "P1",
+              location: "x",
+              description: "Missing.",
+            },
+          ],
         }),
       ),
     ).toThrow(/editing outcomes cannot carry findings/);
@@ -414,27 +422,41 @@ describe("parsePhaseOutcome", () => {
     ).toThrow(/outcome must be one of pass, changes_requested, incomplete, blocked/);
   });
 
-  it("rejects a pass with material findings and a changes_requested without them", () => {
+  it("rejects a pass with blocking findings and a changes_requested without them", () => {
     expect(() =>
       parsePhaseOutcome(
         "review",
         JSON.stringify({
           outcome: "pass",
           summary: "Fine.",
-          findings: [{ axis: "spec", severity: "major", location: "x", description: "Missing." }],
+          findings: [
+            {
+              axis: "correctness-requirements",
+              priority: "P1",
+              location: "x",
+              description: "Missing.",
+            },
+          ],
         }),
       ),
-    ).toThrow(/pass cannot carry critical or major findings/);
+    ).toThrow(/pass cannot carry P0, P1 or P2 findings/);
     expect(() =>
       parsePhaseOutcome(
         "review",
         JSON.stringify({
           outcome: "changes_requested",
           summary: "Fix it.",
-          findings: [{ axis: "spec", severity: "minor", location: "x", description: "Tidy." }],
+          findings: [
+            {
+              axis: "correctness-requirements",
+              priority: "P3",
+              location: "x",
+              description: "Tidy.",
+            },
+          ],
         }),
       ),
-    ).toThrow(/changes_requested must carry at least one critical or major finding/);
+    ).toThrow(/changes_requested must carry at least one P0, P1 or P2 finding/);
   });
 
   it("requires remainingWork for incomplete and blockers for blocked", () => {
@@ -462,10 +484,12 @@ describe("parsePhaseOutcome", () => {
         JSON.stringify({
           outcome: "pass",
           summary: "Fine.",
-          findings: [{ axis: "style", severity: "minor", location: "x", description: "y" }],
+          findings: [{ axis: "spec", priority: "P3", location: "x", description: "y" }],
         }),
       ),
-    ).toThrow(/finding axis must be one of spec, standards/);
+    ).toThrow(
+      /finding axis must be one of correctness-requirements, design-maintainability, tests-verification, security-resilience/,
+    );
   });
 
   it("rejects malformed findings and unknown keys", () => {
@@ -475,7 +499,15 @@ describe("parsePhaseOutcome", () => {
         JSON.stringify({
           outcome: "pass",
           summary: "Fine.",
-          findings: [{ axis: "spec", severity: "minor", location: "x", description: "y", id: 1 }],
+          findings: [
+            {
+              axis: "correctness-requirements",
+              priority: "P3",
+              location: "x",
+              description: "y",
+              id: 1,
+            },
+          ],
         }),
       ),
     ).toThrow(/each finding must have exactly/);
@@ -498,6 +530,32 @@ describe("parsePhaseOutcome", () => {
       expect(parsePhaseOutcome("editing", JSON.stringify(example)).outcome).toBe(outcome);
   });
 
+  it("accepts every describe example the prompt advertises", () => {
+    for (const { outcome, example } of DESCRIBE_OUTCOME_EXAMPLES)
+      expect(parsePhaseOutcome("describe", JSON.stringify(example)).outcome).toBe(outcome);
+  });
+
+  it("requires a body on a complete describe outcome and rejects it elsewhere", () => {
+    expect(
+      parsePhaseOutcome(
+        "describe",
+        JSON.stringify({ outcome: "complete", summary: "Done.", body: "## Summary" }),
+      ),
+    ).toEqual({ outcome: "complete", summary: "Done.", findings: [], body: "## Summary" });
+    expect(() =>
+      parsePhaseOutcome("describe", JSON.stringify({ outcome: "complete", summary: "Done." })),
+    ).toThrow(/body must be a non-empty string/);
+    expect(() =>
+      parsePhaseOutcome(
+        "editing",
+        JSON.stringify({ outcome: "complete", summary: "Done.", body: "## Summary" }),
+      ),
+    ).toThrow(/only a complete describe outcome can carry a body/);
+    expect(() =>
+      parsePhaseOutcome("describe", JSON.stringify({ outcome: "pass", summary: "Done." })),
+    ).toThrow(/outcome must be one of complete, incomplete, blocked during describe/);
+  });
+
   it("accepts every review example the prompt advertises", () => {
     for (const { outcome, example } of REVIEW_OUTCOME_EXAMPLES)
       expect(parsePhaseOutcome("review", JSON.stringify(example)).outcome).toBe(outcome);
@@ -518,8 +576,8 @@ describe("parsePhaseOutcome", () => {
           summary: "Fine.",
           findings: [
             {
-              axis: "standards",
-              severity: "minor",
+              axis: "design-maintainability",
+              priority: "P3",
               location: "a.md",
               description: "Wrap this:\n```\n# heading\n````\nCloses #1",
             },

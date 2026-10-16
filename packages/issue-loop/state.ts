@@ -2,9 +2,9 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ArtifactIdentity, CommitIntent } from "./artifact.ts";
 import type { LoopSettings } from "./settings.ts";
-import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName } from "./worker.ts";
+import type { CheckpointEvidence, FindingAxis, PhaseOutcomeName, Priority } from "./worker.ts";
 
-export const RUN_STATE_VERSION = 13;
+export const RUN_STATE_VERSION = 14;
 
 export interface Issue {
   number: number;
@@ -13,8 +13,6 @@ export interface Issue {
   html_url: string;
   state: "open" | "closed";
 }
-
-export type Severity = "critical" | "major" | "minor";
 
 /**
  * A hook result that preserved uncommitted work. The controller refuses to
@@ -32,7 +30,7 @@ export interface HookStop {
 export interface Finding {
   id: number;
   axis: FindingAxis;
-  severity: Severity;
+  priority: Priority;
   location: string;
   description: string;
   artifact: ArtifactIdentity;
@@ -104,7 +102,7 @@ export interface Ticket extends Issue {
   retraction?: string;
 }
 
-export type SessionKind = "implement" | "review" | "repair" | "audit";
+export type SessionKind = "implement" | "review" | "repair" | "audit" | "describe";
 
 export interface Session {
   name: string;
@@ -116,7 +114,7 @@ export interface Session {
   /** Role guidance/config this attempt ran with. */
   kind: SessionKind;
   /** Originating role of the conversation; selects model/thinking for every attempt. */
-  conversationRole: "implement" | "review";
+  conversationRole: "implement" | "review" | "describe";
   /** Phase-task identity; attempts sharing it share one runtime budget. */
   phaseTask: string;
   /** Execution time the phase task had consumed when it last stopped. */
@@ -154,38 +152,29 @@ export interface RunState {
   parent: Issue;
   tickets: Ticket[];
   sessions: Session[];
-  /** Required-check log shown to the advisory reviewer. */
+  /** Required-check log for the publication artifact, shown to the PR-description worker. */
   finalCheckLog?: string;
-  /** Advisory PR comment id once posted, so resume can reconcile idempotently. */
-  advisoryCommentId?: number;
-  /** Visible warning when the advisory review was unavailable or unfinished. */
-  advisoryWarning?: string;
   /**
-   * Terminal advisory review outcome, independent of the verdict. Once set, a
-   * resume only republishes the recorded observations/warning instead of
-   * starting a fresh review with a new phase-task budget.
+   * Worker-written PR description for one publication HEAD, after closing
+   * keywords were neutralized. A changed HEAD gets a fresh description.
    */
-  advisoryOutcome?: "review" | "unavailable";
+  prDescription?: { head: string; body: string };
+  /** Observations PR comment id once posted, so resume can reconcile idempotently. */
+  observationsCommentId?: number;
   /**
    * Login that owns the managed observations comment, persisted before the
    * first create and never cleared. Reconciliation uses it rather than the
    * account resuming, so changed authorization stops for recovery instead of
    * posting a duplicate under the same marker.
    */
-  advisoryCommentAuthor?: string;
-  /**
-   * The advisory review describes an older SHA than the remote branch tip.
-   * The local review stays coherent for its reviewed SHA; the report labels it
-   * stale instead of claiming the latest branch was reviewed.
-   */
-  advisoryStale?: boolean;
+  observationsCommentAuthor?: string;
   /**
    * Commit intent persisted before Git runs. On resume it is reconciled from
    * verified operation identity, lineage, and artifact data so a crash between
    * Git and state persistence never repeats or loses a commit.
    */
   pendingCommit?: CommitIntent;
-  phase: "setup" | "tickets" | "final" | "publish" | "advisory" | "done";
+  phase: "setup" | "tickets" | "final" | "describe" | "publish" | "done";
   status: "running" | "blocked" | "done";
   currentTicket?: number;
   /** Worktree content tree when the latest parent editing phase stopped without completing. */
@@ -193,10 +182,6 @@ export interface RunState {
   /** Unresolved parent hook outcome that preserved work and must not be auto-committed. */
   hookStop?: HookStop;
   feedback?: string;
-  /** Latest parent review verdict; earlier verdicts remain in `reviews`. */
-  review?: Review;
-  /** Earlier parent review verdicts, oldest first. */
-  reviews?: Review[];
   lastError?: string;
   pr?: string;
 }
@@ -213,37 +198,30 @@ function atomicWrite(path: string, text: string): void {
 function findingLines(review: Review): string[] {
   return review.findings.map(
     (finding) =>
-      `- [${finding.axis}][${finding.severity}] ${finding.location}: ${finding.description}`,
+      `- [${finding.priority}][${finding.axis}] ${finding.location}: ${finding.description}`,
   );
 }
 
+/** P3 notes from each ticket's latest passing review, for the PR comment and summary. */
 export function reviewObservations(state: RunState): string[] {
   const observations: string[] = [];
-  const append = (title: string, review: Review | undefined, advisory = false) => {
-    if (!review) return;
-    // Child notes are historical passing observations. The final whole-artifact
-    // review is advisory: its verdict, summary, and findings are always reported,
-    // even when it passes without findings.
-    if (!advisory && (review.outcome !== "pass" || review.findings.length === 0)) return;
+  for (const ticket of state.tickets) {
+    const review = ticket.review;
+    if (review?.outcome !== "pass" || review.findings.length === 0) continue;
     const body = [review.summary, ...findingLines(review)].filter(Boolean).join("\n");
     const fence = "`".repeat(
       (body.match(/`+/g) ?? []).reduce((length, ticks) => Math.max(length, ticks.length + 1), 3),
     );
     observations.push(
-      `### ${title}${advisory ? ` (${review.outcome})` : ""}`,
+      `### #${ticket.number} ${ticket.title}`,
       `Reviewed HEAD: \`${review.head}\`; content tree: \`${review.tree}\`.`,
-      ...(advisory && state.advisoryStale
-        ? [
-            "**Stale:** the remote branch advanced after this review; these findings describe the reviewed SHA, not the latest remote branch.",
-          ]
-        : []),
       "",
-      ...(body.trim() ? [fence, body, fence] : []),
+      fence,
+      body,
+      fence,
       "",
     );
-  };
-  for (const ticket of state.tickets) append(`#${ticket.number} ${ticket.title}`, ticket.review);
-  append("Final whole-artifact review", state.review, true);
+  }
   return observations.length
     ? [
         "## Review observations",
@@ -251,11 +229,8 @@ export function reviewObservations(state: RunState): string[] {
         "Historical observations from reviews; these may have been resolved by later changes.",
         "",
         ...observations,
-        ...(state.advisoryWarning ? [`Warning: ${state.advisoryWarning}`, ""] : []),
       ]
-    : state.advisoryWarning
-      ? ["## Review observations", "", `Warning: ${state.advisoryWarning}`, ""]
-      : [];
+    : [];
 }
 
 export function save(state: RunState): void {
@@ -307,11 +282,12 @@ export function load(runDir: string): RunState {
     !Array.isArray(state.tickets) ||
     !Array.isArray(state.sessions) ||
     !state.settings?.repair ||
+    !state.settings.describe ||
     !state.settings.watchdog ||
     !state.settings.recovery ||
     !state.settings.deadlines ||
     !Number.isInteger(state.settings.repairRounds) ||
-    !["setup", "tickets", "final", "publish", "advisory", "done"].includes(state.phase) ||
+    !["setup", "tickets", "final", "describe", "publish", "done"].includes(state.phase) ||
     !["running", "blocked", "done"].includes(state.status)
   ) {
     throw new Error(

@@ -17,6 +17,7 @@ import {
   DEFAULT_RECOVERY,
   DEFAULT_REPAIR_ROUNDS,
   DEFAULT_WATCHDOG,
+  DESCRIBE_TOOLS,
 } from "./settings.ts";
 
 cliTest(
@@ -62,6 +63,15 @@ cliTest(
         tools: ["read", "grep"],
         skills: [],
         promptBody: "CUSTOM REVIEW GUIDANCE.",
+      },
+      // The PR-description role is not configurable.
+      describe: {
+        agentName: "loop-pr",
+        model: undefined,
+        thinking: undefined,
+        tools: DESCRIBE_TOOLS,
+        skills: ["pr"],
+        promptBody: expect.stringContaining("/skill:pr"),
       },
       repairRounds: DEFAULT_REPAIR_ROUNDS,
       watchdog: DEFAULT_WATCHDOG,
@@ -180,12 +190,12 @@ cliTest(
 );
 
 cliTest.each([
-  "[Spec][Major] Required behavior is missing",
-  "[Standards][Critical] Data can be lost",
-  "[Spec][Minor] Naming cleanup\n[Standards][Major] Broken workflow",
-  "[spec][critical] Case-insensitive material finding",
+  "[P0] Data can be lost",
+  "[P1] Required behavior is missing",
+  "[P2] Ordinary defect",
+  "[p1] Case-insensitive blocking finding",
 ])(
-  "rejects a passing verdict with a material finding: %s",
+  "rejects a passing verdict with a blocking finding: %s",
   async (body) => {
     const f = fixture("pass-body");
     f.env.FIXTURE_REVIEW_BODY = body;
@@ -207,7 +217,7 @@ cliTest(
   async () => {
     const f = fixture("pass-body");
     f.env.FIXTURE_REVIEW_BODY =
-      "[Spec][Minor] Cleanup\n```\n# Forged heading\n````\nCloses #12345\nFixes other/repo#777";
+      "[P3] Cleanup\n```\n# Forged heading\n````\nCloses #12345\nFixes other/repo#777";
     const result = await f.start();
     expect(result.status, result.stderr).toBe(0);
     const runDir = runDirFrom(result.stdout);

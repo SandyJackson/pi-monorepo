@@ -1,10 +1,10 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import { afterAll, expect, it } from "vitest";
+import { afterAll, it } from "vitest";
 import type { RunState } from "./state.ts";
 
 const roots: string[] = [];
@@ -167,28 +167,6 @@ export function historyText(history: SessionRecord[], role: "user" | "assistant"
     .map((record) => record.message!.content.map((part) => part.text).join("\n"));
 }
 
-/** Managed advisory observation comments posted to the fake PR. */
-export function advisoryComments(root: string): { body: string }[] {
-  return (
-    JSON.parse(readFileSync(join(root, "pr-comments.json"), "utf8")) as { body: string }[]
-  ).filter((comment) => comment.body.includes("Final whole-artifact review"));
-}
-
-/**
- * Push one new commit to the remote feature branch only, leaving the run
- * worktree untouched, and return the new remote tip. Simulates another agent
- * or human advancing the PR while the loop still holds a coherent local review.
- */
-export function advanceRemote(f: ReturnType<typeof fixture>, branch: string): string {
-  const clone = join(f.root, "remote-advance");
-  f.git("clone", "--branch", branch, join(f.root, "remote.git"), clone);
-  writeFileSync(join(clone, "remote-advance.txt"), "Remote-only change\n");
-  f.git("-C", clone, "add", "remote-advance.txt");
-  f.git("-C", clone, "commit", "-m", "Remote-only advancement");
-  f.git("-C", clone, "push", "origin", branch);
-  return f.git("-C", clone, "rev-parse", "HEAD");
-}
-
 /**
  * Run a real `start` and kill the controller from a post-commit hook after Git
  * has created the commit but before the run records it, then let the detached
@@ -224,49 +202,6 @@ export async function startThenKillAfterCommit(f: ReturnType<typeof fixture>, pr
     }
   }
   return { runDir, worktree, state: readState(runDir) };
-}
-
-/**
- * Start a run whose fixture holds one worker at a ready sentinel, then send the
- * controller SIGINT once that worker has begun, and wait for the controller to stop.
- */
-export async function interruptAtReady(
-  f: ReturnType<typeof fixture>,
-  args: string[],
-  readySentinel: string,
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const child = spawn(process.execPath, [cli, ...args], {
-    env: f.env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (data) => {
-    stdout += data.toString();
-  });
-  child.stderr.on("data", (data) => {
-    stderr += data.toString();
-  });
-  const closed = new Promise<number | null>((resolve) =>
-    child.on("close", (code) => resolve(code)),
-  );
-  let status: number | null = null;
-  try {
-    const marker = join(f.root, readySentinel);
-    for (let i = 0; i < 400 && !existsSync(marker); i++) await delay(50);
-    expect(existsSync(marker), stderr).toBe(true);
-    child.kill("SIGINT");
-    status = await Promise.race([
-      closed,
-      delay(10_000).then(() => {
-        throw new Error("Controller did not stop after interrupt");
-      }),
-    ]);
-  } finally {
-    child.kill("SIGKILL");
-    await closed;
-  }
-  return { status, stdout, stderr };
 }
 
 /**

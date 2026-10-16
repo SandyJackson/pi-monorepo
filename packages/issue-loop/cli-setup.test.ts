@@ -80,7 +80,7 @@ it("normalizes an empty agent tools list to the role defaults", () => {
   );
   const settings = loadLoopSettings(join(dir, "loop-settings.json"));
   expect(settings.implement.tools).toEqual(["read", "grep", "find", "ls", "bash", "edit", "write"]);
-  expect(settings.review.tools).toEqual(["read", "grep", "find", "ls"]);
+  expect(settings.review.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
 });
 
 cliTest(

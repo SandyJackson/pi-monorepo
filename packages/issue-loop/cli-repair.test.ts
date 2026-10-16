@@ -51,7 +51,7 @@ cliTest(
       ),
     ).toBe([`loop: #11 Ticket 11`, `fixup! loop: #11 Ticket 11`].join("\n"));
     // The second review saw the whole cumulative delta, not only the fixup.
-    const patch = readFileSync(join(runDir, "review.patch"), "utf8");
+    const patch = readFileSync(join(f.root, "fixup-review-2.patch"), "utf8");
     expect(patch).toContain("first.txt");
     expect(patch).toContain("second.txt");
   },

@@ -16,11 +16,12 @@ import {
 import { load, RUN_STATE_VERSION, type RunState, save } from "./state.ts";
 
 const usage = `Usage:
-  node packages/issue-loop/run.mjs start --repo PATH --issue NUMBER --check COMMAND [--setup COMMAND] [--timeout SECONDS] [--settings PATH]
+  node packages/issue-loop/run.mjs start --repo PATH --issue NUMBER --check COMMAND [--base BRANCH] [--setup COMMAND] [--timeout SECONDS] [--settings PATH]
   node packages/issue-loop/run.mjs resume RUN_DIRECTORY
 
 Requires Node 22.18+ or 24+, Git, authenticated gh and Pi 0.99.1 or newer. macOS/Linux only.
-Starts from origin's default branch. Uses direct open GitHub child issues and native dependencies.
+Starts from origin's default branch, or --base BRANCH fetched from origin. The PR targets that branch.
+Uses direct open GitHub child issues and native dependencies.
 --setup runs once in the new worktree; --check runs after every change and before final publication.
 --timeout overrides the setup and check command deadlines (300 to 7200 seconds; default 3600).
 Worker supervision uses the watchdog policy in the settings snapshot.
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
     args,
     options: {
       repo: { type: "string" },
+      base: { type: "string" },
       issue: { type: "string" },
       check: { type: "string" },
       setup: { type: "string" },
@@ -103,7 +105,7 @@ async function main(): Promise<void> {
   ) as { nameWithOwner: string; defaultBranchRef: { name: string } };
   if (!/^[\w.-]+\/[\w.-]+$/.test(metadata.nameWithOwner) || !metadata.defaultBranchRef?.name)
     throw new Error("Cannot determine the GitHub repository and default branch");
-  const baseBranch = metadata.defaultBranchRef.name;
+  const baseBranch = values.base ?? metadata.defaultBranchRef.name;
   await git(repoContext, "check-ref-format", `refs/heads/${baseBranch}`);
   const { parent, tickets } = await snapshot(
     repoContext,

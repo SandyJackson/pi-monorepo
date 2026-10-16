@@ -9,6 +9,7 @@ import {
   DEFAULT_REPAIR_ROUNDS,
   DEFAULT_REVIEW_TOOLS,
   DEFAULT_WATCHDOG,
+  DESCRIBE_TOOLS,
   loadLoopSettings,
   materializeLoopSkills,
   validateLoopSkills,
@@ -87,6 +88,14 @@ describe("loadLoopSettings", () => {
         skills: [],
         promptBody: "Review the patch.",
       },
+      describe: {
+        agentName: "loop-pr",
+        model: undefined,
+        thinking: undefined,
+        tools: DESCRIBE_TOOLS,
+        skills: ["pr"],
+        promptBody: expect.stringContaining("/skill:pr"),
+      },
       repairRounds: DEFAULT_REPAIR_ROUNDS,
       watchdog: DEFAULT_WATCHDOG,
       recovery: DEFAULT_RECOVERY,
@@ -112,7 +121,7 @@ describe("loadLoopSettings", () => {
       thinking: "high",
       tools: DEFAULT_REVIEW_TOOLS,
       skills: [],
-      promptBody: expect.stringContaining("severity"),
+      promptBody: expect.stringContaining("## Flag gate"),
     });
     expect(settings.repair).toEqual({
       agentName: "loop-repair",
@@ -216,6 +225,9 @@ describe("loadLoopSettings", () => {
     roots.push(curated);
     fs.mkdirSync(path.join(curated, "tdd"), { recursive: true });
     fs.writeFileSync(path.join(curated, "tdd", "SKILL.md"), "# tdd\n", "utf8");
+    // The PR-description worker always needs the pr skill.
+    fs.mkdirSync(path.join(curated, "pr"), { recursive: true });
+    fs.writeFileSync(path.join(curated, "pr", "SKILL.md"), "# pr\n", "utf8");
     const settingsPath = writeSettingsDir({
       "loop-settings.json": JSON.stringify({ implementSkills: ["tdd"], repairSkills: [] }),
     });
@@ -237,7 +249,7 @@ describe("loadLoopSettings", () => {
     expect(() => validateLoopSkills(settings, curated)).toThrow(/Unknown loop skill "nope"/);
   });
 
-  it("loads the blessed loop agent files with read-only review tools", () => {
+  it("loads the blessed loop agent files with non-editing review tools", () => {
     const pkgDir = path.resolve(import.meta.dirname);
     const settingsPath = writeSettingsDir({
       "loop-settings.json": JSON.stringify({
@@ -264,18 +276,18 @@ describe("loadLoopSettings", () => {
     expect(settings.review.agentName).toBe("loop-reviewer");
     expect(settings.review.model).toBe("openai-codex/gpt-6.1-sol");
     expect(settings.review.thinking).toBe("high");
-    expect(settings.review.tools).toEqual(["read", "grep", "find", "ls"]);
+    expect(settings.review.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
     expect(settings.review.skills).toEqual([]);
-    expect(settings.review.promptBody).toContain("Spec");
+    expect(settings.review.promptBody).toContain("## Flag gate");
     expect(() => validateLoopSkills(settings)).not.toThrow();
   });
 
-  it("rejects a review agent that requests mutating tools", () => {
+  it("rejects a review agent that requests editing tools", () => {
     const settingsPath = writeSettingsDir({
       "loop-settings.json": JSON.stringify({ reviewAgent: "./review.md" }),
       "review.md": `---\ndescription: Rogue reviewer\ntools: read, edit\n---\n\nReview.`,
     });
-    expect(() => loadLoopSettings(settingsPath)).toThrow(/read-only/i);
+    expect(() => loadLoopSettings(settingsPath)).toThrow(/must not edit files/);
   });
 
   it("rejects an agent file with an empty prompt body", () => {

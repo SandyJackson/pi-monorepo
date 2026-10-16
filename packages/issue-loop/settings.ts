@@ -12,10 +12,16 @@ import { type ParsedAgentFile, parseAgentFileContent } from "@pi-workspace/herdr
 export const DEFAULT_IMPLEMENT_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"];
 
 /** Tool allowlist used when the review agent file omits `tools`. */
-export const DEFAULT_REVIEW_TOOLS = ["read", "grep", "find", "ls"];
+export const DEFAULT_REVIEW_TOOLS = ["read", "grep", "find", "ls", "bash"];
 
 /** Thinking levels accepted in an agent file's `thinking` field (Pi's `--thinking` set). */
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** Tool allowlist for the PR-description worker. */
+export const DESCRIBE_TOOLS = ["read", "grep", "find", "ls", "bash"];
+
+/** Curated skills for the PR-description worker. */
+export const DESCRIBE_SKILLS = ["pr"];
 
 /** Default curated implementer/repairer skill set. */
 export const DEFAULT_IMPLEMENT_SKILLS = ["tdd", "diagnosing-bugs", "deslop"];
@@ -101,6 +107,8 @@ export interface LoopSettings {
   implement: RoleSettings;
   repair: RoleSettings;
   review: RoleSettings;
+  /** PR-description worker; always the blessed role file, not configurable. */
+  describe: RoleSettings;
   repairRounds: number;
   watchdog: WatchdogSettings;
   recovery: RecoverySettings;
@@ -108,16 +116,24 @@ export interface LoopSettings {
   appendSystemPrompt?: string;
 }
 
-type Role = "implement" | "repair" | "review";
+type Role = "implement" | "repair" | "review" | "describe";
 
 const AGENT_FILES: Record<Role, string> = {
   implement: "./loop-implement.md",
   repair: "./loop-repair.md",
   review: "./loop-reviewer.md",
+  describe: "./loop-pr.md",
 };
 
 function defaultTools(role: Role): string[] {
-  return role === "review" ? DEFAULT_REVIEW_TOOLS : DEFAULT_IMPLEMENT_TOOLS;
+  if (role === "review") return DEFAULT_REVIEW_TOOLS;
+  if (role === "describe") return DESCRIBE_TOOLS;
+  return DEFAULT_IMPLEMENT_TOOLS;
+}
+
+/** The PR-description role, read from its blessed file. */
+function describeRole(): RoleSettings {
+  return { ...readAgent("describe", blessedAgentsDir(), undefined), skills: [...DESCRIBE_SKILLS] };
 }
 
 function readAgent(role: Role, settingsDir: string, ref: unknown): Omit<RoleSettings, "skills"> {
@@ -146,13 +162,13 @@ function readAgent(role: Role, settingsDir: string, ref: unknown): Omit<RoleSett
   // An explicit empty list falls back to the role default so empty never
   // widens to Pi's full default toolset.
   const tools = agent.tools?.length ? agent.tools : [...defaults];
+  // The reviewer may run commands for evidence; the controller still refuses a
+  // review that changed the artifact. File-editing tools stay forbidden.
   if (role === "review") {
-    const forbidden = tools.filter(
-      (tool) => tool === "bash" || tool === "edit" || tool === "write",
-    );
+    const forbidden = tools.filter((tool) => tool === "edit" || tool === "write");
     if (forbidden.length > 0)
       throw new Error(
-        `Review agent file ${filePath} requests mutating tools (${forbidden.join(", ")}); the reviewer must stay read-only`,
+        `Review agent file ${filePath} requests editing tools (${forbidden.join(", ")}); the reviewer must not edit files`,
       );
   }
   if (agent.thinking !== undefined && !THINKING_LEVELS.includes(agent.thinking))
@@ -280,6 +296,7 @@ export function defaultLoopSettings(): LoopSettings {
     implement: { ...implement, skills: [...DEFAULT_IMPLEMENT_SKILLS] },
     repair: { ...repair, skills: [...DEFAULT_IMPLEMENT_SKILLS] },
     review: { ...review, skills: [] },
+    describe: describeRole(),
     repairRounds: DEFAULT_REPAIR_ROUNDS,
     watchdog: { ...DEFAULT_WATCHDOG },
     recovery: {
@@ -329,6 +346,7 @@ export function loadLoopSettings(settingsPath: string): LoopSettings {
       ...review,
       skills: readSkills("review", "reviewSkills", resolved, config.reviewSkills),
     },
+    describe: describeRole(),
     repairRounds:
       config.repairRounds === undefined
         ? DEFAULT_REPAIR_ROUNDS
@@ -374,6 +392,7 @@ function skillNames(settings: LoopSettings): Set<string> {
     ...settings.implement.skills,
     ...settings.repair.skills,
     ...settings.review.skills,
+    ...settings.describe.skills,
   ]);
 }
 

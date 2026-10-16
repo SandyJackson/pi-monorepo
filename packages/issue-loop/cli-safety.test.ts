@@ -31,11 +31,13 @@ cliTest(
     const finished = readState(runDir);
     expect(finished.status).toBe("done");
     expect(finished.head).toBe(manual);
+    // The manual commit changed the publication HEAD, so it is described afresh.
+    expect(finished.prDescription?.head).toBe(manual);
     expect(
       finished.sessions.filter((session: { name: string }) =>
-        session.name.includes("parent review"),
+        session.name.includes("parent describe"),
       ),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(readFileSync(join(state.worktree, "feature.txt"), "utf8")).toBe(
       "Manual integration fix\n",
     );

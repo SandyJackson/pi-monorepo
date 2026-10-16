@@ -11,7 +11,7 @@ A small local controller for one parent GitHub issue. It implements direct child
 - Requirements live in the parent and ticket bodies. Comments are never fetched or forwarded, so copy approved decisions into the relevant body before starting.
 - A check command that terminates and exits nonzero on failure. No watch mode.
 
-Worker models and thinking levels are resolved per role at start, from the defaults or `--settings`. Fresh implementation conversations use the implement role's model/thinking; fresh child and advisory reviews use the review role's model/thinking; and a repair reopens the originating conversation and preserves its model/thinking. The new worktree loads Pi resources with `--approve`, which trusts project-local resources without bypassing your command permission extension. Ambient extensions are disabled for every worker (`--no-extensions`); only the curated loop skills you select are loaded. Authenticate Pi first so workers never face an interactive login.
+Worker models and thinking levels are resolved per role at start, from the defaults or `--settings`. Fresh implementation conversations use the implement role's model/thinking; fresh child reviews use the review role's model/thinking; the PR-description worker uses `agents/loop-pr.md`; and a repair reopens the originating conversation and preserves its model/thinking. The new worktree loads Pi resources with `--approve`, which trusts project-local resources without bypassing your command permission extension. Ambient extensions are disabled for every worker (`--no-extensions`); only the curated loop skills you select are loaded. Authenticate Pi first so workers never face an interactive login.
 
 Workers run through Pi's supervised RPC mode, so the controller correlates commands, waits for the settled run, and reads the authoritative final message rather than inferring completion from free text. Pi's own provider retries stay enabled and do not consume the controller's repair rounds.
 
@@ -20,8 +20,8 @@ Workers run through Pi's supervised RPC mode, so the controller correlates comma
 1. `start` a run against a parent issue. The controller prints its run directory and works through the children on one feature branch.
 2. Follow `summary.md` or the console. Each child is implemented, checked, committed, and independently reviewed. Findings are repaired in the reviewer's conversation, then a fresh reviewer assesses the result.
 3. If the run stops, read `summary.md`, fix or finish the work in the run worktree, and `resume` (see [Resume after a failure or manual fix](#resume-after-a-failure-or-manual-fix)).
-4. Once every child is accepted and the required checks pass, the controller pushes the branch, opens one PR, and posts an advisory whole-artifact review as a PR comment.
-5. Review the PR yourself. It keeps each child's feature commit and `fixup!` repairs. Squashing, autosquashing, merging, and any further changes are yours to decide; the controller never merges, rebases, or repairs the PR.
+4. Once every child is accepted and the required checks pass, a worker writes the PR description with the `pr` skill, and the controller pushes the branch and opens one draft PR.
+5. Run a full review of the whole artifact (`/skill:code-review mode=full`), then review the PR yourself and mark it ready. It keeps each child's feature commit and `fixup!` repairs. Squashing, autosquashing, merging, and any further changes are yours to decide; the controller never merges, rebases, or repairs the PR.
 
 ## Start
 
@@ -43,6 +43,8 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
   --issue 123 \
   --check 'make test'
 ```
+
+`--base BRANCH` starts from that branch on `origin` and targets the final draft PR at it. Omit it to use the remote default branch. Use the branch name, such as `--base tests/audit`, not `origin/tests/audit`. The controller fetches and pins its remote commit at launch; local unpushed commits and uncommitted changes are excluded, and resume keeps the pinned base even if the remote branch advances. The branch must already exist on `origin`.
 
 `--setup` is optional. A fresh worktree has no untracked dependencies such as `node_modules`, so provide setup when you need it. It runs before the first ticket and again on resume after a failed setup, so keep it repeatable.
 
@@ -84,13 +86,14 @@ Agent files use the agent markdown format: frontmatter with `model`, `thinking`,
 
 Without `--settings`, the roles use the blessed files in `agents/` (`loop-implement.md`, `loop-repair.md`, `loop-reviewer.md`); implement and repair get the curated trio `tdd`, `diagnosing-bugs`, `deslop`, and review gets none. A settings file replaces one or more role files — the blessed files double as the template for user-authored replacements. Omitting `implementSkills`/`repairSkills` keeps the trio and omitting `reviewSkills` keeps empty; an explicit list (including `[]`) replaces the default.
 
-Workers always start with `--no-skills`: they never inherit ambient workspace or user skills. `implementSkills` / `reviewSkills` name curated loop skills by short name (closed set, from `packages/issue-loop/loop-skills/`; currently `tdd`, `deslop`, `diagnosing-bugs`). The reviewer default stays empty. At `start` the controller copies the selected skills into `<run>/skills/` and workers load them via `--skill`; `resume` reuses the copy.
+Workers always start with `--no-skills`: they never inherit ambient workspace or user skills. `implementSkills` / `reviewSkills` name curated loop skills by short name (closed set, from `packages/issue-loop/loop-skills/`; currently `tdd`, `deslop`, `diagnosing-bugs`, `pr`). The reviewer default stays empty, and the PR-description worker always gets `pr`. At `start` the controller copies the selected skills into `<run>/skills/` and workers load them via `--skill`; `resume` reuses the copy.
 
 Blessed role files ship with the package and can be referenced from your settings file (paths resolve relative to it):
 
 - `agents/loop-implement.md` — implement worker: reaches for `/skill:tdd`, `/skill:diagnosing-bugs`, and `/skill:deslop` explicitly, with ponytail simplicity tags (`delete/stdlib/native/yagni/shrink`) baked in.
 - `agents/loop-repair.md` — repair worker: keeps the reviewer's diagnosis, edits only what the findings require, and retracts a wrong finding instead of manufacturing a change.
-- `agents/loop-reviewer.md` — review worker: single-pass Standards + Spec review condensed from the code-review skill and code-reviewer agent, ending in the required structured outcome.
+- `agents/loop-pr.md` — PR-description worker: writes the draft PR body with `/skill:pr` and never uses closing keywords. Not configurable; it always gets the `pr` skill and `read,grep,find,ls,bash`.
+- `agents/loop-reviewer.md` — review worker: the code-review skill's quick review (understand first, the four axes, the flag gate and P0-P3 priorities) for one ticket, using commands as evidence and ending in the required structured outcome.
 
 ```json
 {
@@ -100,7 +103,7 @@ Blessed role files ship with the package and can be referenced from your setting
 }
 ```
 
-An absent `tools` field keeps the built-ins (implement: `read,grep,find,ls,bash,edit,write`; review: `read,grep,find,ls`). An explicit list replaces them. A reviewer asking for `bash`, `edit`, or `write` fails at startup.
+An absent `tools` field keeps the built-ins (implement: `read,grep,find,ls,bash,edit,write`; review: `read,grep,find,ls,bash`). An explicit list replaces them. A reviewer asking for `edit` or `write` fails at startup.
 
 Resolved models, tools, prompts, and shared text land in `state.json` at start. `resume` reuses that snapshot even if the source files change or disappear. Repairs keep the originating conversation's model/thinking (see above). There is no discovery or template language.
 
@@ -114,21 +117,23 @@ The runner prints its run directory before starting work. It sits beside the sou
   sessions/
   logs/
   review.patch
+  pr.patch
   pr.md
   review-observations.md
 ```
 
-The original checkout is untouched and its uncommitted work excluded. The feature branch starts from the remote default branch fetched at launch. Branch, worktree, and run files survive success or failure.
+The original checkout is untouched and its uncommitted work excluded. The feature branch starts from the remote default branch, or the branch selected with `--base`, fetched at launch. Branch, worktree, and run files survive success or failure.
 
 ## What runs
 
 1. Snapshot the parent and open direct child bodies, plus native dependencies. Sub-issue order survives API pagination; dependencies pick the next eligible ticket. Closed children stay out.
 2. Implement one eligible ticket in a fresh session.
-3. Run configured checks, then create the work commit with normal hooks, then start a fresh read-only reviewer with requirements, the cumulative child patch since the original baseline, and the check log. The first changed work commit is the child's feature anchor; later changed repairs are standard `fixup!` commits targeting it. Controller commits keep their readable feature/fixup subject and carry stable `Loop-Run`/`Loop-Step` trailers. The reviewer returns a structured outcome: `pass` (no critical or major finding), `changes_requested` (at least one critical or major finding), or `incomplete`/`blocked`. Findings carry axis, severity, location, and description; the controller assigns their identities and reviewed-artifact reference. A pass cannot carry material findings. A clean hook mutation is rechecked before review. An actionable code/test/lint hook failure returns to the last editing session as repair feedback and spends a code-repair round; a signing/identity/configuration failure preserves the staged work and stops for recovery; a hook that leaves the worktree dirty stops with the work preserved, and an unchanged resume stops again rather than turning the hook's leftovers into a fixup. Hooks are never bypassed. An interrupted editing phase's saved files stay uncommitted and are reviewed as HEAD plus the content tree, so resuming unchanged never manufactures a work commit. The commit intent is persisted before Git runs, so a crash between the commit and the state save is reconciled on resume from its verified parent lineage, content tree, and trailers; a provable commit is recorded once without duplication, and an ambiguous one blocks with diagnostics and preserved work.
-4. When that assessment passes and the child has an earlier `changes_requested` verdict, the controller runs one read-only audit in the same reviewer conversation and the same phase-task budget. The audit receives only the latest failed verdict's findings and the intervening repair/retraction explanation, and must pass on the unchanged artifact before acceptance. A `changes_requested` verdict persists the findings, then closes the settled review process and reopens the same session with the dedicated repair guidance/skills and additive editing tools. The repair keeps the conversation's model, thinking, and cached prefix; a fresh independent reviewer then assesses the changed artifact. A failed required check returns to the last editing conversation and spends one code-repair round. A no-change retraction records its explanation, spends one round, and is reviewed independently. At most three configurable code-repair rounds per child (including check failures and retractions), then the child stops with the findings preserved.
+3. Run configured checks, then create the work commit with normal hooks, then start a fresh reviewer with requirements, the cumulative child patch since the original baseline, and the check log. The first changed work commit is the child's feature anchor; later changed repairs are standard `fixup!` commits targeting it. Controller commits keep their readable feature/fixup subject and carry stable `Loop-Run`/`Loop-Step` trailers. The reviewer may run commands (tests, the changed behaviour, mutation probes it restores) but never edits. It returns a structured outcome: `pass` (no P0, P1 or P2 finding), `changes_requested` (at least one P0, P1 or P2 finding), or `incomplete`/`blocked`. Findings carry an axis (`correctness-requirements`, `design-maintainability`, `tests-verification`, `security-resilience`), a priority (`P0`-`P3`), a location, and a description; the controller assigns their identities and reviewed-artifact reference. A pass cannot carry a P0-P2 finding. A clean hook mutation is rechecked before review. An actionable code/test/lint hook failure returns to the last editing session as repair feedback and spends a code-repair round; a signing/identity/configuration failure preserves the staged work and stops for recovery; a hook that leaves the worktree dirty stops with the work preserved, and an unchanged resume stops again rather than turning the hook's leftovers into a fixup. Hooks are never bypassed. An interrupted editing phase's saved files stay uncommitted and are reviewed as HEAD plus the content tree, so resuming unchanged never manufactures a work commit. The commit intent is persisted before Git runs, so a crash between the commit and the state save is reconciled on resume from its verified parent lineage, content tree, and trailers; a provable commit is recorded once without duplication, and an ambiguous one blocks with diagnostics and preserved work.
+4. When that assessment passes and the child has an earlier `changes_requested` verdict, the controller runs one non-editing audit in the same reviewer conversation and the same phase-task budget. The audit receives only the latest failed verdict's findings and the intervening repair/retraction explanation, and must pass on the unchanged artifact before acceptance. A `changes_requested` verdict persists the findings, then closes the settled review process and reopens the same session with the dedicated repair guidance/skills and additive editing tools. The repair keeps the conversation's model, thinking, and cached prefix; a fresh independent reviewer then assesses the changed artifact. A failed required check returns to the last editing conversation and spends one code-repair round. A no-change retraction records its explanation, spends one round, and is reviewed independently. At most three configurable code-repair rounds per child (including check failures and retractions), then the child stops with the findings preserved.
 5. Record the accepted SHA separately from the work commits, and retain each earlier artifact-linked verdict alongside the latest so a repair cannot erase the assessment it answered. The reviewer never edits, and the controller guards the branch, HEAD, index, and worktree (including relevant untracked files) before and after review, so a changed artifact can never be accepted with an old verdict.
 6. Publication gate. Once every child is accepted, the controller runs the configured checks against the aggregate artifact and refuses to publish an uncommitted or failing worktree. A failed gate blocks with the work preserved; the controller never commits parent integration work or introduces parent fixup anchors.
-7. Push only the feature branch and open one PR with its unsquashed feature/fixup history. Only after the PR exists does a fresh read-only reviewer assess the parent requirements, every child, and the whole cumulative artifact. The advisory verdict is posted as a marked PR comment with its findings, summary, and reviewed HEAD/content-tree IDs. Passing ticket observations from earlier reviews also appear in the comment as historical notes, not a reconciled outstanding-issues list; later changes may resolve them. Reviewer text never goes into the PR description, where closing keywords could affect issue closure. Material findings do not trigger automatic parent repairs or block completion. Publication retries reuse the PR and update the owning author's managed observations section. The PR description, other authors' comments, and human text outside the section are preserved. Ambiguous or damaged section markers stop publication for inspection. Warnings, staleness, and resume behavior are described in [Advisory warnings and staleness](#advisory-warnings-and-staleness).
+7. PR description. A fresh worker reads the requirements, the whole patch since the base, and the check log, and writes the PR body with the `pr` skill. It may run commands for evidence but never edits; a changed artifact refuses the description. The controller rewrites any closing keyword before an issue reference (`Fixes #12`, `closes: owner/repo#3`, an issue URL) to `Refs` and adds a note saying it did so, so only its own `Closes` lines decide which issues close. The description is recorded for the publication HEAD; a resume reuses it, and a changed HEAD gets a new one. A blocked description stops the run before publication.
+8. Push only the feature branch and open one draft PR with its unsquashed feature/fixup history. The body is the worker's description followed by the controller's section: a note that a full review of the whole artifact (`/skill:code-review mode=full`) is required before the PR is marked ready, the check command, the ticket list, and the `Closes` lines. Reviewer text never goes into the PR description. P3 observations from the latest passing ticket reviews are posted as a marked PR comment with their reviewed HEAD/content-tree IDs: historical notes, not a reconciled outstanding-issues list. No comment is posted when there are none. Publication retries reuse the PR and update the owning author's managed observations section. The PR description, other authors' comments, and human text outside the section are preserved. The comment is found again by its hidden marker, recorded ID, and owning login; ambiguous or damaged markers, an account change, or a missing recorded comment stop publication rather than posting a duplicate.
 
 ### Phase outcomes
 
@@ -139,9 +144,11 @@ Workers must end each phase with a structured outcome that is valid for that pha
 | Implement, repair | `complete` | Checks run, then the work commit. |
 | Implement, repair | `incomplete` | One same-session continuation; a second stops the phase. |
 | Implement, repair | `blocked` | The child stops with the blockers recorded. |
-| Review, audit | `pass` | No critical or major finding. Accepts the child, after the audit when an earlier verdict requested changes. |
-| Review, audit | `changes_requested` | At least one critical or major finding. The same conversation becomes the repair. |
+| Review, audit | `pass` | No P0, P1 or P2 finding. Accepts the child, after the audit when an earlier verdict requested changes. |
+| Review, audit | `changes_requested` | At least one P0, P1 or P2 finding. The same conversation becomes the repair. |
 | Review, audit | `incomplete` / `blocked` | One continuation for `incomplete`; otherwise the child stops. |
+| PR description | `complete` | `body` holds the description; publication follows. |
+| PR description | `incomplete` / `blocked` | One continuation for `incomplete`; otherwise the run stops before publication. |
 
 A malformed outcome, one that is not valid for the phase, or a `pass` after failed required checks gets one same-session correction.
 
@@ -208,16 +215,6 @@ Manual commits are fine mid-ticket or mid-review if they descend from accepted h
 
 Git hooks always run and are never bypassed. A clean hook mutation is rechecked before review. A recognized code, test, lint, or formatting failure (including a failed recheck) returns to the last editing conversation as repair feedback and spends a code-repair round. A signing, identity, or configuration failure, a tooling or unrecognized failure, and a hook that leaves the worktree dirty all preserve the staged work and stop. Fix the cause in the run worktree or your Git configuration, then resume. A dirty hook's leftovers are never turned into a fixup, so an unchanged resume stops again.
 
-### Advisory warnings and staleness
-
-The advisory review never blocks the PR, but the run reports a `Warning:` on stderr, in `summary.md`, and in the PR comment when:
-
-- the review was unavailable: execution failed after bounded recovery, or the worktree changed after publication or during the review. No assessment is presented for a mixed-version read.
-- the review finished `incomplete` or `blocked`.
-- the remote branch advanced past the reviewed SHA. The findings stay attached to the SHA they describe and are labelled stale.
-
-These outcomes persist. Resume republishes the recorded warning or findings instead of running another review. The PR is found again by its branch, and the comment by its hidden marker, recorded ID, and owning login; an account change or a missing recorded comment stops rather than posting a duplicate.
-
 ### Old run state
 
 Run state is versioned and older versions never resume. `resume` refuses an older `state.json` before taking the run lock or launching a worker, and leaves the state file, worktree, branch, and sessions exactly as they were. Preserve any work from that worktree, reread the issue bodies, and start a new run. Never bump the version field by hand.
@@ -229,7 +226,7 @@ Sessions carry a stable run prefix, ticket or parent, role, and attempt number:
 ```text
 loop/owner/project/123-<timestamp>-<id> · #124 implement · attempt 1
 loop/owner/project/123-<timestamp>-<id> · #124 review · attempt 1
-loop/owner/project/123-<timestamp>-<id> · parent review · attempt 1
+loop/owner/project/123-<timestamp>-<id> · parent describe · attempt 1
 ```
 
 Explicit `--name` values stop this workspace's `session-auto-name` extension from renaming them. Names and session paths are recorded before Pi launches, failed attempts included. The summary has the exact commands. You can also use:
@@ -245,7 +242,7 @@ A session file may be missing if Pi died before its first persisted response. Th
 
 ## Trust and deliberate limits
 
-This command authorizes controller-owned commits, branch pushes, and PR creation outside Pi's bash permission extension. Workers run with ambient extensions and skills disabled and are told not to commit or touch GitHub; the reviewer gets no bash, edit, or write tools. The implementer can run bash and edit files. Only the curated loop skills named in the settings are loaded.
+This command authorizes controller-owned commits, branch pushes, and PR creation outside Pi's bash permission extension. Workers run with ambient extensions and skills disabled and are told not to commit or touch GitHub; the reviewer can run bash for evidence but gets no edit or write tools, and the controller refuses a review that changed the artifact. The implementer can run bash and edit files. Only the curated loop skills named in the settings are loaded.
 
 Skipping comments shrinks unsolicited input, but issue bodies remain untrusted. Prompts plus a worktree are not a sandbox. Run only against repos, dependencies, bodies, and extensions you trust. Setup and check commands run with your privileges. Git hooks stay enabled and are never bypassed; a clean mutation is rechecked before review, a recognized code/test/lint failure (including a failed recheck) returns to the last editing session, and a signing/configuration, tooling, or unrecognized failure or dirty hook preserves work and stops.
 
