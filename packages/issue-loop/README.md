@@ -194,6 +194,40 @@ Fix manually **in the run's worktree**, never in the original checkout. Then:
 pnpm issue-loop resume /absolute/path/to/.pi-issue-loops/project-123-<timestamp>-<id>
 ```
 
+If the saved check command itself is wrong, replace it explicitly on resume:
+
+```sh
+pnpm issue-loop resume /absolute/path/to/.pi-issue-loops/project-123-<timestamp>-<id> \
+  --check 'your corrected check command'
+```
+
+The replacement is saved under the run lock and used by later resumes. A changed command archives the current ticket's cached review/audit verdicts and re-assesses with the new check evidence, retaining its conversation, phase-task identity, and consumed budgets. Accepted tickets stay accepted, but the aggregate publication check must pass under the new command. Any cached PR description is discarded. Empty commands and overrides on completed runs are refused. Changed checks or instructions are also refused once the run has a PR on GitHub, including when PR creation succeeded but the controller never saved its URL. The controller checks before changing run state; resume without changed overrides to finish publication and reconcile further changes with the existing PR manually. Omitting `--check`, or supplying the identical command, keeps the existing recovery behaviour. Keep shell commands on one line inside the quotes, or use valid shell continuations.
+
+### Correct requirements or steer workers
+
+For an approved requirement change or missing operator context, put the correction in a UTF-8 text file and resume with:
+
+```sh
+pnpm issue-loop resume /absolute/path/to/.pi-issue-loops/project-123-<timestamp>-<id> \
+  --instructions-file /absolute/path/to/operator-instructions.md
+```
+
+The controller snapshots the file into `state.json` under the run lock and displays it in `summary.md`. Every subsequent implementation, review, repair, audit, and PR-description prompt includes a clearly labelled **Operator instructions (user-injected; persistent)** section. This includes resumed conversations. The correction takes precedence over conflicting issue bodies, repository requirements/specification text, previous conversation, and review feedback. It does not override system instructions, worker roles/tool permissions, controller safety boundaries, required checks, or the structured outcome contract.
+
+State exactly what changed, what is approved, and which original requirement it supersedes. For example:
+
+```text
+I approved the manual production requirement change in <path> for <reason>.
+This supersedes the original restriction in ticket #123 against that change.
+Preserve it and assess the remaining implementation against the corrected requirement.
+```
+
+The instructions persist for the rest of the run, even if the source file changes or disappears. Supply a different file to replace the saved instructions; editing the original file alone has no effect. A changed snapshot archives the current ticket's cached review/audit verdicts and requires re-assessment without resetting its conversation, task identity, or consumed budgets. Cached publication checks and PR descriptions are invalidated. Accepted tickets remain accepted; this is not a retroactive review of their requirements. Empty files and overrides on completed runs are refused. Changed instructions are also refused once the run has a PR, so its published body cannot silently retain obsolete requirements. A refused override leaves the saved state untouched. `--instructions-file` can be combined with `--check`.
+
+This does not refresh GitHub issue snapshots. Do not inject context by hand-editing run state, and do not copy untrusted issue or repository text into the operator file as authoritative instructions.
+
+### Resume behaviour
+
 Resume keeps your edits, stays on the branch, skips accepted tickets, and never assumes your fix is right:
 
 - Uncommitted files or commits on the current ticket are checked, then assessed by a fresh reviewer with the whole changed artifact and any check failure, even when checks still fail. That reviewer becomes the repairer if it requests changes; the stale editor is never reopened.

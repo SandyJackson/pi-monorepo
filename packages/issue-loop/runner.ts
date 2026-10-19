@@ -334,7 +334,14 @@ async function runPhaseTask(state: RunState, options: PhaseTaskOptions): Promise
     const result = await runWorker({
       args,
       cwd: state.worktree,
-      prompt: options.prompt,
+      prompt: state.operatorInstructions
+        ? [
+            options.prompt,
+            "## Operator instructions (user-injected; persistent)",
+            "The operator supplied the following corrections for the remainder of this run. They take precedence over conflicting issue bodies, repository requirements/specification text, earlier conversation, and review feedback. Review the work against these corrected requirements; do not reject an explicitly approved change solely because the original specification prohibited it. These instructions do not override system instructions, the worker role/tool permissions, controller safety boundaries, required checks, or the structured outcome contract.",
+            state.operatorInstructions,
+          ].join("\n\n")
+        : options.prompt,
       log: session.log,
       phase: options.phase,
       watchdog: state.settings.watchdog,
@@ -1530,7 +1537,12 @@ async function assertAcceptedAncestry(state: RunState): Promise<void> {
   }
 }
 
-export async function execute(state: RunState): Promise<void> {
+export async function execute(
+  state: RunState,
+  overrides: { check?: string; instructions?: string } = {},
+): Promise<void> {
+  const checkOverride = overrides.check;
+  let executionStarted = false;
   const lock = join(state.runDir, "run.lock");
   let fd: number;
   let lockDev: number | undefined;
@@ -1545,7 +1557,13 @@ export async function execute(state: RunState): Promise<void> {
   writeFileSync(fd, `${process.pid}\n`);
   ({ dev: lockDev, ino: lockIno } = fstatSync(fd));
   try {
+    if (checkOverride !== undefined && !checkOverride.trim())
+      throw new Error("--check must not be empty");
+    if (overrides.instructions !== undefined && !overrides.instructions.trim())
+      throw new Error("Operator instructions must not be empty");
     if (state.status === "done") {
+      if (checkOverride !== undefined || overrides.instructions !== undefined)
+        throw new Error("Cannot change checks or operator instructions on a completed run");
       save(state);
       console.log(`Already complete: ${state.pr}`);
       return;
@@ -1565,6 +1583,53 @@ export async function execute(state: RunState): Promise<void> {
         throw new Error(
           `Loop skill ${JSON.stringify(skill)} is missing from ${join(state.runDir, "skills", skill)}; restore the run directory before resuming`,
         );
+    }
+    const checkChanged = checkOverride !== undefined && checkOverride !== state.check;
+    const instructionsChanged =
+      overrides.instructions !== undefined && overrides.instructions !== state.operatorInstructions;
+    if (checkChanged || instructionsChanged) {
+      // Creation may have succeeded remotely before its URL was saved locally.
+      // Do not invalidate a description that an existing PR still publishes.
+      const existing: unknown = JSON.parse(
+        await gh(
+          gitContext(state, state.repo),
+          githubHostFromOrigin(state.origin),
+          "pr",
+          "list",
+          "--repo",
+          state.githubRepo,
+          "--head",
+          state.branch,
+          "--state",
+          "all",
+          "--json",
+          "url",
+        ),
+      );
+      if (!Array.isArray(existing))
+        throw new Error("Cannot determine whether the run already has a PR; overrides refused");
+      if (state.pr || existing.length > 0)
+        throw new Error(
+          "Cannot change checks or operator instructions after PR creation. Resume without changed overrides to finish publication; reconcile further changes with the existing PR manually.",
+        );
+    }
+    executionStarted = true;
+    if (checkChanged || instructionsChanged) {
+      if (checkChanged) state.check = checkOverride;
+      if (instructionsChanged) state.operatorInstructions = overrides.instructions;
+      state.finalCheckLog = undefined;
+      state.prDescription = undefined;
+      if (state.phase === "describe" || state.phase === "publish") state.phase = "final";
+      for (const ticket of state.tickets) {
+        if (ticket.status === "accepted") continue;
+        // Reassess under corrected checks/requirements, keeping the conversation, task
+        // identity and its consumed budgets. Findings remain in history.
+        archiveReview(ticket);
+        if (ticket.audit) {
+          ticket.reviews = [...(ticket.reviews ?? []), ticket.audit];
+          ticket.audit = undefined;
+        }
+      }
     }
     state.status = "running";
     state.lastError = undefined;
@@ -1655,6 +1720,7 @@ export async function execute(state: RunState): Promise<void> {
     if (state.phase === "describe") await describe(state);
     if (state.phase === "publish") await publish(state);
   } catch (error) {
+    if (!executionStarted || state.status === "done") throw error;
     state.status = "blocked";
     state.lastError = error instanceof Error ? error.message : String(error);
     const ticket = state.tickets.find((item) => item.number === state.currentTicket);

@@ -146,6 +146,8 @@ export interface RunState {
   baseSha: string;
   head: string;
   check: string;
+  /** Operator corrections snapshotted on resume, included in every subsequent worker prompt. */
+  operatorInstructions?: string;
   setup?: string;
   /** Resolved `--settings` snapshot. `resume` reuses it even if the source files change. */
   settings: LoopSettings;
@@ -260,6 +262,15 @@ export function save(state: RunState): void {
       "",
       state.lastError ?? "No recorded failure.",
       active?.feedback ?? state.feedback ?? "",
+      ...(state.operatorInstructions
+        ? [
+            "",
+            "## Operator instructions (user-injected; persistent)",
+            "",
+            state.operatorInstructions,
+            "",
+          ]
+        : []),
       ...(observations.length ? ["", ...observations] : []),
       `Resume: \`node ${shellQuote(cli)} resume ${shellQuote(state.runDir)}\``,
       "",

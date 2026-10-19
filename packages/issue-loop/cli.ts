@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { gh, githubHostFromOrigin, snapshot } from "./github.ts";
@@ -17,7 +17,7 @@ import { load, RUN_STATE_VERSION, type RunState, save } from "./state.ts";
 
 const usage = `Usage:
   node packages/issue-loop/run.mjs start --repo PATH --issue NUMBER --check COMMAND [--base BRANCH] [--setup COMMAND] [--timeout SECONDS] [--settings PATH]
-  node packages/issue-loop/run.mjs resume RUN_DIRECTORY
+  node packages/issue-loop/run.mjs resume RUN_DIRECTORY [--check COMMAND] [--instructions-file PATH]
 
 Requires Node 22.18+ or 24+, Git, authenticated gh and Pi 0.99.1 or newer. macOS/Linux only.
 Starts from origin's default branch, or --base BRANCH fetched from origin. The PR targets that branch.
@@ -35,6 +35,8 @@ This command trusts the project's Pi resources and runs setup/check commands wit
 It commits accepted work, pushes only its feature branch and opens one PR. It never merges.
 Issues stay open until a human merges the final PR. Workers use explicit names and load no ambient extensions.
 Resume preserves manual fixes and checks/reviews the blocked ticket before implementing more changes.
+resume --check replaces the saved check command without resetting repair or worker budgets.
+resume --instructions-file snapshots operator corrections for all subsequent worker prompts.
 State, summary and sessions are kept in ../.pi-issue-loops/<run>/ beside the source repository.
 `;
 
@@ -48,10 +50,26 @@ async function main(): Promise<void> {
     throw new Error("This first version supports macOS and Linux only");
   await assertSupportedPi();
   if (action === "resume") {
-    if (args.length !== 1 || args[0].startsWith("-")) throw new Error(usage);
-    const state = load(resolve(args[0]));
+    const { values, positionals } = parseArgs({
+      args,
+      allowPositionals: true,
+      options: {
+        check: { type: "string" },
+        "instructions-file": { type: "string" },
+      },
+    });
+    if (positionals.length !== 1) throw new Error(usage);
+    if (values.check !== undefined && !values.check.trim())
+      throw new Error("--check must not be empty");
+    const instructions =
+      values["instructions-file"] === undefined
+        ? undefined
+        : readFileSync(resolve(values["instructions-file"]), "utf8");
+    if (instructions !== undefined && !instructions.trim())
+      throw new Error("--instructions-file must contain non-empty instructions");
+    const state = load(resolve(positionals[0]));
     console.log(`Run directory: ${state.runDir}`);
-    await execute(state);
+    await execute(state, { check: values.check, instructions });
     return;
   }
   if (action !== "start") throw new Error(usage);
