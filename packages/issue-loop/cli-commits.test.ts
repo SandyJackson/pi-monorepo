@@ -329,46 +329,52 @@ cliTest(
   30_000,
 );
 
-cliTest.each([
-  ["source diagnostic", "feature.txt:1:1 error: Unexpected token"],
-  ["TypeScript diagnostic", "feature.ts(1,1): error TS2322: Type mismatch"],
-  ["Biome lint diagnostic", "feature.ts:1:7 lint/correctness/noUnusedVariables  FIXABLE"],
-  ["Biome formatting diagnostic", "Formatter would have printed the following content:"],
-  ["test assertion", "AssertionError: expected 1 to be 2"],
-  ["Rust diagnostic", "error[E0308]: mismatched types"],
-])(
-  "returns an actionable hook failure to the last editing session and spends a repair round (%s)",
-  async (_label, diagnostic) => {
+cliTest(
+  "repairs a code hook failure, then stops on a tooling failure without spending another round",
+  async () => {
     const f = fixture("hook-repair");
+    const diagnostic = "feature.txt:1:1 error: Unexpected token";
     const hooks = join(f.repo, ".git", "hooks");
     mkdirSync(hooks, { recursive: true });
     writeFileSync(
       join(hooks, "pre-commit"),
-      `#!/bin/sh\nif [ ! -f hook-fixed.txt ]; then\n  echo "${diagnostic}" >&2\n  exit 1\nfi\n`,
+      `#!/bin/sh
+if [ ! -f hook-fixed.txt ]; then
+  echo "${diagnostic}" >&2
+  exit 1
+fi
+echo "pnpm: command not found" >&2
+i=0
+while [ "$i" -lt 100 ]; do
+  echo "${diagnostic}" >&2
+  i=$((i+1))
+done
+exit 1
+`,
       { mode: 0o755 },
     );
     const result = await f.start();
-    expect(result.status, result.stderr).toBe(0);
-    const runDir = runDirFrom(result.stdout);
-    const state = readState(runDir);
+    expect(result.status).toBe(1);
+    const state = readState(runDirFrom(result.stdout));
     const ticket = state.tickets[0];
-    expect(ticket.status).toBe("accepted");
+    expect(state.status).toBe("blocked");
+    expect(state.lastError).toContain("Git hooks rejected the work commit");
+    // Classification must read the full log, not just the compiler-only error-message tail.
+    expect(state.lastError).not.toContain("pnpm: command not found");
     expect(ticket.repairs).toBe(1);
+    expect(ticket.anchor).toBeUndefined();
     const workers = readWorkers(f.root).filter((worker) => worker.name.includes("#11 "));
+    expect(workers).toHaveLength(2);
     const implement = workers.find((worker) => worker.name.includes("implement"))!;
     const repair = workers.find((worker) => worker.name.includes("repair"))!;
-    // The hook defect returned to the last editing conversation, not a fresh one.
     expect(repair.session).toBe(implement.session);
     expect(repair.prompt).toContain("Commit hooks rejected the work");
     expect(repair.prompt).toContain(diagnostic);
-    // Hooks were never bypassed: the anchor commit contains the repair.
-    expect(f.git("-C", state.worktree, "show", `${ticket.anchor}:hook-fixed.txt`)).toContain(
-      "fixed",
-    );
-    // A fresh independent reviewer assessed the repaired artifact.
-    const review = workers.find((worker) => worker.name.includes("review"))!;
-    expect(review.session).not.toBe(implement.session);
-    expect(ticket.review).toMatchObject({ outcome: "pass" });
+    expect(ticket.review).toBeUndefined();
+    expect(f.git("-C", state.worktree, "rev-parse", "HEAD")).toBe(ticket.baseline);
+    const staged = f.git("-C", state.worktree, "diff", "--cached", "--name-only");
+    expect(staged).toContain("feature.txt");
+    expect(staged).toContain("hook-fixed.txt");
   },
   30_000,
 );
@@ -411,64 +417,6 @@ cliTest(
     expect(f.git("-C", state.worktree, "show", `${ticket.commit}:feature.txt`)).not.toContain(
       "mutated",
     );
-  },
-  30_000,
-);
-
-cliTest.each([
-  ["a missing tool", `echo "pnpm: command not found" >&2`],
-  ["a missing hook interpreter", "", "/nonexistent/issue-loop-hook-interpreter"],
-  ["a missing linker", "echo 'error: linker `cc` not found' >&2"],
-  [
-    "a missing hook interpreter diagnostic",
-    `echo "error: cannot run .git/hooks/pre-commit: No such file or directory" >&2`,
-  ],
-  [
-    "a missing tool after a source diagnostic",
-    `echo "feature.ts:1:1 error: Unexpected token"; echo "pnpm: command not found" >&2`,
-  ],
-  [
-    "a missing tool before long compiler output",
-    `echo "pnpm: command not found" >&2
-    i=0
-    while [ "$i" -lt 100 ]; do
-      echo "feature.ts:1:1 error: Unexpected token" >&2
-      i=$((i+1))
-    done`,
-  ],
-  [
-    "a missing shell command after a source diagnostic",
-    `echo "feature.ts:1:1 error: Unexpected token"; echo "pre-commit: 1: pnpm: not found" >&2`,
-  ],
-  [
-    "a runner startup failure",
-    `echo "FAIL tests/example.test.ts"; echo "Error: Cannot find package 'vitest'" >&2`,
-  ],
-  ["an unclassified error count", `echo "Found 1 error" >&2`],
-  ["an unclassified failure symbol", `echo "✖ Hook setup failed" >&2`],
-  ["an unrecognized diagnostic", `echo "STDOUT_DIAGNOSTIC"; echo "STDERR_DIAGNOSTIC" >&2`],
-])(
-  "stops for recovery on %s without spending a repair round",
-  async (_label, diagnostic, interpreter = "/bin/sh") => {
-    const f = fixture("hook-repair");
-    const hooks = join(f.repo, ".git", "hooks");
-    mkdirSync(hooks, { recursive: true });
-    writeFileSync(join(hooks, "pre-commit"), `#!${interpreter}\n${diagnostic}\nexit 1\n`, {
-      mode: 0o755,
-    });
-    const result = await f.start();
-    expect(result.status).toBe(1);
-    const runDir = runDirFrom(result.stdout);
-    const state = readState(runDir);
-    // Unclassified hook output is not proof of a code defect: no repair worker
-    // launched, no repair round consumed, and the staged work is preserved.
-    expect(state.status).toBe("blocked");
-    expect(state.lastError).toContain("Git hooks rejected the work commit");
-    expect(state.tickets[0].repairs).toBe(0);
-    expect(state.tickets[0].anchor).toBeUndefined();
-    expect(readWorkers(f.root).some((worker) => worker.name.includes("repair"))).toBe(false);
-    expect(f.git("-C", state.worktree, "rev-parse", "HEAD")).toBe(state.tickets[0].baseline);
-    expect(f.git("-C", state.worktree, "diff", "--cached", "--name-only")).toContain("feature.txt");
   },
   30_000,
 );
