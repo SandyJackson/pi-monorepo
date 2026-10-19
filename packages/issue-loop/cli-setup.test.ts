@@ -75,6 +75,7 @@ it("normalizes an empty agent tools list to the role defaults", () => {
     JSON.stringify({
       implementAgent: "./agents/implement.md",
       reviewAgent: "./agents/review.md",
+      extensions: [],
     }),
     "utf8",
   );

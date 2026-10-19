@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { gh, githubHostFromOrigin, snapshot } from "./github.ts";
+import { assertWorkerModels } from "./pi-models.ts";
 import { assertSupportedPi } from "./pi-version.ts";
 import { type CommandContext, git, originUrl } from "./process.ts";
 import { execute } from "./runner.ts";
@@ -26,10 +27,11 @@ Uses direct open GitHub child issues and native dependencies.
 --timeout overrides the setup and check command deadlines (300 to 7200 seconds; default 3600).
 Worker supervision uses the watchdog policy in the settings snapshot.
 --settings points at an optional JSON file customizing worker models, tool allowlists,
-role guidance, per-role loop skills, repair rounds, watchdog policy, controller
-recovery policy, controller command deadlines, and a shared system-prompt addition
+role guidance, an explicit extension allowlist, per-role loop skills, repair rounds,
+watchdog policy, controller recovery policy, controller command deadlines, and a shared system-prompt addition
 (see Customizing workers below). Workers always start with --no-skills and --no-extensions;
-only curated loop skills named in the settings file are loaded.
+only allowlisted extensions and curated loop skills named in the settings file are loaded.
+Default extensions are installed pi-claude-bridge and pi-web-access packages under Pi's agent directory.
 
 This command trusts the project's Pi resources and runs setup/check commands with your privileges.
 It commits accepted work, pushes only its feature branch and opens one PR. It never merges.
@@ -69,7 +71,7 @@ async function main(): Promise<void> {
       throw new Error("--instructions-file must contain non-empty instructions");
     const state = load(resolve(positionals[0]));
     console.log(`Run directory: ${state.runDir}`);
-    await execute(state, { check: values.check, instructions });
+    await execute(state, { check: values.check, instructions, preflightModels: true });
     return;
   }
   if (action !== "start") throw new Error(usage);
@@ -106,6 +108,7 @@ async function main(): Promise<void> {
   // Settings are resolved above, so even the top-level probe uses the run's Git deadline.
   const probe: CommandContext = { cwd: resolve(values.repo), timeoutMs: settings.deadlines.gitMs };
   const repo = await git(probe, "rev-parse", "--show-toplevel");
+  await assertWorkerModels(settings, repo);
   const repoContext: CommandContext = { cwd: repo, timeoutMs: settings.deadlines.gitMs };
   const origin = await originUrl(repoContext);
   const host = githubHostFromOrigin(origin);

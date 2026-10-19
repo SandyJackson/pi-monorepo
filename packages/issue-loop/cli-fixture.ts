@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, it } from "vitest";
 import type { RunState } from "./state.ts";
+import { installDefaultExtensions } from "./test-fixtures/extensions.ts";
 
 const roots: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -28,9 +29,12 @@ export function fixture(mode = "pass") {
   const bin = join(root, "bin");
   const home = join(root, "home");
   for (const path of [repo, bin, home]) mkdirSync(path);
+  const agentDir = join(home, ".pi", "agent");
+  installDefaultExtensions(agentDir);
   const env = {
     ...process.env,
     HOME: home,
+    PI_CODING_AGENT_DIR: agentDir,
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_AUTHOR_NAME: "Loop Test",
@@ -41,6 +45,8 @@ export function fixture(mode = "pass") {
     FIXTURE_ROOT: root,
     FIXTURE_MODE: mode,
     FIXTURE_REVIEW_BODY: "",
+    FIXTURE_MODEL_EXTENSION: "",
+    FIXTURE_MISSING_MODEL: "",
   };
   const git = (...args: string[]) =>
     execFileSync("git", args, {

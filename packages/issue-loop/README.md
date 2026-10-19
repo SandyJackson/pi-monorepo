@@ -1,17 +1,18 @@
 # GitHub issue loop
 
-A small local controller for one parent GitHub issue. It implements direct child tickets one by one on a single feature branch, runs your checks and independent Pi reviews, and opens one final PR. No workflow engine or Pi extension is required.
+A small local controller for one parent GitHub issue. It implements direct child tickets one by one on a single feature branch, runs your checks and independent Pi reviews, and opens one final PR. No workflow engine is required.
 
 ## Requirements
 
 - macOS or Linux; Node 22.18+ or Node 24+.
 - `git`, authenticated `gh`, and authenticated `pi` on PATH. Pi must be 0.99.1 or newer and support RPC mode (`--mode rpc`), `--name`, `--session`, `--approve`, `--no-extensions`, and tool allowlists. The controller preflights the installed version before launching any worker.
+- Default workers require `pi-claude-bridge` and `pi-web-access` installed in Pi's agent directory. Install them with `pi install npm:pi-claude-bridge` and `pi install npm:pi-web-access`, or provide a different extension list and matching models/tools via `--settings`.
 - A GitHub.com repository with `origin` pointing at the repo holding the parent issue. Fetch and push URLs must match. GitHub identity comes from `origin`, not `GH_REPO`.
 - Open, implementation-ready child issues linked through GitHub's native sub-issue feature. Native blocked-by dependencies are respected. Task-list links are ignored.
 - Requirements live in the parent and ticket bodies. Comments are never fetched or forwarded, so copy approved decisions into the relevant body before starting.
 - A check command that terminates and exits nonzero on failure. No watch mode.
 
-Worker models and thinking levels are resolved per role at start, from the defaults or `--settings`. Fresh implementation conversations use the implement role's model/thinking; fresh child reviews use the review role's model/thinking; the PR-description worker uses `agents/loop-pr.md`; and a repair reopens the originating conversation and preserves its model/thinking. The new worktree loads Pi resources with `--approve`, which trusts project-local resources without bypassing your command permission extension. Ambient extensions are disabled for every worker (`--no-extensions`); only the curated loop skills you select are loaded. Authenticate Pi first so workers never face an interactive login.
+Worker models and thinking levels are resolved per role at start, from the defaults or `--settings`. Fresh implementation conversations use the implement role's model/thinking; fresh child reviews use the review role's model/thinking; the PR-description worker uses `agents/loop-pr.md`; and a repair reopens the originating conversation and preserves its model/thinking. The new worktree loads Pi resources with `--approve`, which trusts project-local resources. Ambient extensions are disabled for every worker (`--no-extensions`); only explicitly allowlisted extensions and selected curated loop skills load. Include any required provider or command-permission extension in the allowlist. Authenticate Pi first so workers never face an interactive login.
 
 Workers run through Pi's supervised RPC mode, so the controller correlates commands, waits for the settled run, and reads the authoritative final message rather than inferring completion from free text. Pi's own provider retries stay enabled and do not consume the controller's repair rounds.
 
@@ -52,7 +53,7 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
 
 ## Customizing workers
 
-`--settings ./loop-settings.json` overrides worker models, thinking levels, tool allowlists, role guidance, and a shared system-prompt addition. Every field is optional.
+`--settings ./loop-settings.json` overrides worker models, thinking levels, tool allowlists, role guidance, extensions, and a shared system-prompt addition. Every field is optional.
 
 ```json
 {
@@ -79,6 +80,26 @@ node /path/to/pi-monorepo/packages/issue-loop/run.mjs start \
 ```
 
 Every field is optional. `repairRounds`, `watchdog`, `recovery`, and `deadlines` override individual values; [Supervision, recovery, and budgets](#supervision-recovery-and-budgets) lists the defaults.
+
+### Provider extensions
+
+Default workers load only the installed `pi-claude-bridge` and `pi-web-access` packages from `<agent-dir>/npm/node_modules/`. The agent directory comes from Pi's `getAgentDir()`: `PI_CODING_AGENT_DIR` when set, otherwise `~/.pi/agent`. No packages are installed automatically; a missing default package fails startup.
+
+A settings file that omits `extensions` inherits those two defaults. An explicit list replaces them, and `"extensions": []` disables both. To select different installed extension files or package directories:
+
+```json
+{
+  "extensions": ["./node_modules/pi-claude-bridge"]
+}
+```
+
+Explicit paths resolve relative to the settings file, not the target repository or worker worktree. Absolute paths also work. Package sources such as `npm:pi-claude-bridge` are not accepted here; install the package first. Package directories are resolved to extension entrypoint files before launching Pi, so their skills, prompts and themes do not load. For repeatable installs, pin exact package versions and commit the lockfile.
+
+Before creating a run, the controller checks model selection for implementation, review, and PR description using Pi RPC with the same extension allowlist as workers. It uses `--offline` to skip Pi's startup network checks, sends no prompt and makes no model request. Repairs inherit the originating conversation's model. An unavailable model fails early with the role, selected model, and extension paths. Roles without an explicit model check Pi's default selection. This checks model discovery, not credentials or provider availability.
+
+The resolved paths and package-directory versions, when present, are recorded in `state.json`. Resume reuses those paths and repeats the model check; older snapshots without an allowlist load no extensions. Extension code is not copied or version-enforced. Keep it installed at the recorded paths and version for the duration of a run.
+
+### Roles and skills
 
 Same-conversation repair appends the transition guidance, repair skills, and additive editing tools to the reviewer's existing conversation, so the diagnosis, earlier messages, model/thinking, and initial definitions stay in place. `repairAgent` supplies repair prompt guidance and additive tools, and `repairSkills` supplies additive skills. The `repairAgent` model and thinking values do not replace the originating conversation's values; a repair never starts on a separately selected model. That inheritance is intentional: it preserves context and keeps the prefix eligible for provider cache reuse. Provider cache reuse is best-effort: where a provider or configuration cannot encode additive tool definitions, the same-session repair still runs but the prefix may miss the cache. See [Verification](#verification) for what offline tests can and cannot show.
 
@@ -276,7 +297,7 @@ A session file may be missing if Pi died before its first persisted response. Th
 
 ## Trust and deliberate limits
 
-This command authorizes controller-owned commits, branch pushes, and PR creation outside Pi's bash permission extension. Workers run with ambient extensions and skills disabled and are told not to commit or touch GitHub; the reviewer can run bash for evidence but gets no edit or write tools, and the controller refuses a review that changed the artifact. The implementer can run bash and edit files. Only the curated loop skills named in the settings are loaded.
+This command authorizes controller-owned commits, branch pushes, and PR creation outside Pi's bash permission extension. Workers run with ambient extensions and skills disabled and are told not to commit or touch GitHub; the reviewer can run bash for evidence but gets no edit or write tools, and the controller refuses a review that changed the artifact. The implementer can run bash and edit files. Only explicitly allowlisted extensions and the curated loop skills named in the settings are loaded.
 
 Skipping comments shrinks unsolicited input, but issue bodies remain untrusted. Prompts plus a worktree are not a sandbox. Run only against repos, dependencies, bodies, and extensions you trust. Setup and check commands run with your privileges. Git hooks stay enabled and are never bypassed; a clean mutation is rechecked before review, a recognized code/test/lint failure (including a failed recheck) returns to the last editing session, and a signing/configuration, tooling, or unrecognized failure or dirty hook preserves work and stops.
 

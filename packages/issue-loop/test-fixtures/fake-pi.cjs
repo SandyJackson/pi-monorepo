@@ -6,6 +6,33 @@ if (args.includes("--version")) {
   console.log(process.env.FIXTURE_PI_VERSION || "0.99.2");
   process.exit(0);
 }
+if (args.includes("--no-session") && args.includes("rpc")) {
+  fs.appendFileSync(
+    path.join(process.env.FIXTURE_ROOT, "preflights.jsonl"),
+    `${JSON.stringify({ args, cwd: process.cwd() })}\n`,
+  );
+  const model = args.includes("--model") ? value("--model") : "default";
+  const extension = process.env.FIXTURE_MODEL_EXTENSION;
+  if (
+    model === process.env.FIXTURE_MISSING_MODEL ||
+    (extension && args.includes("--no-extensions") && !args.includes(extension))
+  ) {
+    console.error(`Error: Model "${model}" not found. Use --list-models to see available models.`);
+    process.exit(1);
+  }
+  const request = JSON.parse(fs.readFileSync(0, "utf8"));
+  if (request.type !== "get_state") process.exit(1);
+  console.log(
+    JSON.stringify({
+      type: "response",
+      id: request.id,
+      command: "get_state",
+      success: true,
+      data: { model: { id: model } },
+    }),
+  );
+  process.exit(0);
+}
 const name = value("--name") || "";
 const session = value("--session");
 // Session files are the conversation history a real Pi process reloads on restart.

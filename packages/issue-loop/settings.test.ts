@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_DEADLINES,
   DEFAULT_IMPLEMENT_TOOLS,
@@ -10,14 +10,25 @@ import {
   DEFAULT_REVIEW_TOOLS,
   DEFAULT_WATCHDOG,
   DESCRIBE_TOOLS,
+  defaultLoopSettings,
   loadLoopSettings,
   materializeLoopSkills,
   validateLoopSkills,
 } from "./settings.js";
+import { installDefaultExtensions } from "./test-fixtures/extensions.ts";
 
 const roots: string[] = [];
+let agentDir: string;
+
+beforeEach(() => {
+  agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "loop-agent-test-"));
+  roots.push(agentDir);
+  installDefaultExtensions(agentDir);
+  vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+});
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -64,6 +75,10 @@ describe("loadLoopSettings", () => {
     const settingsPath = path.join(dir, "loop-settings.json");
     const settings = loadLoopSettings(settingsPath);
     expect(settings).toEqual({
+      extensions: [
+        { path: path.join(agentDir, "npm", "node_modules", "pi-claude-bridge"), version: "1.2.3" },
+        { path: path.join(agentDir, "npm", "node_modules", "pi-web-access"), version: "1.2.3" },
+      ],
       implement: {
         agentName: "implement",
         model: "provider/implement-model",
@@ -109,9 +124,9 @@ describe("loadLoopSettings", () => {
     const settings = loadLoopSettings(settingsPath);
     expect(settings.implement).toEqual({
       agentName: "loop-implement",
-      model: "opencode-go/deepseek-v4.1-flash",
-      thinking: "high",
-      tools: DEFAULT_IMPLEMENT_TOOLS,
+      model: "claude-bridge/claude-opus-5-5",
+      thinking: "medium",
+      tools: [...DEFAULT_IMPLEMENT_TOOLS, "web_search", "fetch_content", "get_search_content"],
       skills: ["tdd", "diagnosing-bugs", "deslop"],
       promptBody: expect.stringContaining("/skill:tdd"),
     });
@@ -144,6 +159,60 @@ describe("loadLoopSettings", () => {
     });
     const settings = loadLoopSettings(settingsPath);
     expect(settings.appendSystemPrompt).toBeUndefined();
+  });
+
+  it("loads installed bridge and web packages from PI_CODING_AGENT_DIR by default", () => {
+    const expected = [
+      { path: path.join(agentDir, "npm", "node_modules", "pi-claude-bridge"), version: "1.2.3" },
+      { path: path.join(agentDir, "npm", "node_modules", "pi-web-access"), version: "1.2.3" },
+    ];
+    expect(defaultLoopSettings().extensions).toEqual(expected);
+    const settingsPath = writeSettingsDir({ "loop-settings.json": "{}" });
+    expect(loadLoopSettings(settingsPath).extensions).toEqual(expected);
+  });
+
+  it("allows an explicit empty list to disable default extensions", () => {
+    fs.rmSync(path.join(agentDir, "npm"), { recursive: true });
+    const settingsPath = writeSettingsDir({ "loop-settings.json": '{"extensions":[]}' });
+    expect(loadLoopSettings(settingsPath).extensions).toEqual([]);
+  });
+
+  it("reports a missing default package without silently dropping it", () => {
+    fs.rmSync(path.join(agentDir, "npm", "node_modules", "pi-web-access"), { recursive: true });
+    expect(() => defaultLoopSettings()).toThrow(/Cannot load loop extension.*pi-web-access/);
+  });
+
+  it("resolves extension paths and records package versions", () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({ extensions: ["./bridge", "./provider.ts"] }),
+      "provider.ts": "export default () => {};",
+    });
+    const dir = path.dirname(settingsPath);
+    fs.mkdirSync(path.join(dir, "bridge"));
+    fs.writeFileSync(
+      path.join(dir, "bridge", "package.json"),
+      JSON.stringify({ version: "1.2.3" }),
+    );
+    expect(loadLoopSettings(settingsPath).extensions).toEqual([
+      { path: path.join(dir, "bridge"), version: "1.2.3" },
+      { path: path.join(dir, "provider.ts") },
+    ]);
+  });
+
+  it.each(["bridge", [42], [""], ["  "]])("rejects invalid extension lists (%j)", (extensions) => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({ extensions }),
+    });
+    expect(() => loadLoopSettings(settingsPath)).toThrow(
+      /extensions.*array of non-empty file paths/,
+    );
+  });
+
+  it("rejects missing extensions before creating a run", () => {
+    const settingsPath = writeSettingsDir({
+      "loop-settings.json": JSON.stringify({ extensions: ["./missing.ts"] }),
+    });
+    expect(() => loadLoopSettings(settingsPath)).toThrow(/Cannot load loop extension.*missing.ts/);
   });
 
   it("parses per-role skill short names", () => {
@@ -260,8 +329,8 @@ describe("loadLoopSettings", () => {
     });
     const settings = loadLoopSettings(settingsPath);
     expect(settings.implement.agentName).toBe("loop-implement");
-    expect(settings.implement.model).toBe("opencode-go/deepseek-v4.1-flash");
-    expect(settings.implement.thinking).toBe("high");
+    expect(settings.implement.model).toBe("claude-bridge/claude-opus-5-5");
+    expect(settings.implement.thinking).toBe("medium");
     expect(settings.implement.tools).toEqual([
       "read",
       "grep",
@@ -270,6 +339,9 @@ describe("loadLoopSettings", () => {
       "bash",
       "edit",
       "write",
+      "web_search",
+      "fetch_content",
+      "get_search_content",
     ]);
     expect(settings.implement.skills).toEqual(["tdd", "diagnosing-bugs", "deslop"]);
     expect(settings.implement.promptBody).toContain("/skill:tdd");

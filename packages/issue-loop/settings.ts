@@ -4,8 +4,9 @@
  * A settings file is a JSON object whose agent fields reference agent-format
  * markdown files (YAML frontmatter `model`/`thinking`/`tools` plus a prompt body).
  */
-import { cpSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type ParsedAgentFile, parseAgentFileContent } from "@pi-workspace/herdr-subagent/agents";
 
 /** Tool allowlist used when the implement or repair agent file omits `tools`. */
@@ -102,8 +103,16 @@ export const DEFAULT_RECOVERY: RecoverySettings = {
   transientBackoffMs: [5_000, 15_000],
 };
 
+export interface LoopExtension {
+  path: string;
+  /** Installed package version at start, when the path is a package directory. */
+  version?: string;
+}
+
 /** Resolved settings snapshot stored with the run; `resume` reuses it verbatim. */
 export interface LoopSettings {
+  /** Explicitly loaded extensions. Absent in older snapshots means none. */
+  extensions?: LoopExtension[];
   implement: RoleSettings;
   repair: RoleSettings;
   review: RoleSettings;
@@ -215,6 +224,32 @@ function readSkills(role: Role, field: string, settingsPath: string, value: unkn
   return [...value];
 }
 
+function readExtensions(settingsPath: string, value: unknown): LoopExtension[] {
+  if (value === undefined)
+    value = ["pi-claude-bridge", "pi-web-access"].map((name) =>
+      resolve(getAgentDir(), "npm", "node_modules", name),
+    );
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim()))
+    throw new Error(`"extensions" in ${settingsPath} must be an array of non-empty file paths`);
+  return value.map((ref: string) => {
+    const path = resolve(dirname(settingsPath), ref);
+    try {
+      const stat = statSync(path);
+      if (!stat.isFile() && !stat.isDirectory()) throw new Error("not a file or directory");
+      const manifest = join(path, "package.json");
+      const version =
+        stat.isDirectory() && existsSync(manifest)
+          ? JSON.parse(readFileSync(manifest, "utf8")).version
+          : undefined;
+      return { path, ...(typeof version === "string" ? { version } : {}) };
+    } catch (error) {
+      throw new Error(
+        `Cannot load loop extension ${path}: ${error instanceof Error ? error.message : String(error)}. Install the package with pi install or override "extensions" in loop settings.`,
+      );
+    }
+  });
+}
+
 function readInteger(
   field: string,
   settingsPath: string,
@@ -293,6 +328,7 @@ export function defaultLoopSettings(): LoopSettings {
   const repair = readAgent("repair", blessed, undefined);
   const review = readAgent("review", blessed, undefined);
   return {
+    extensions: readExtensions(join(getAgentDir(), "settings.json"), undefined),
     implement: { ...implement, skills: [...DEFAULT_IMPLEMENT_SKILLS] },
     repair: { ...repair, skills: [...DEFAULT_IMPLEMENT_SKILLS] },
     review: { ...review, skills: [] },
@@ -326,6 +362,7 @@ export function loadLoopSettings(settingsPath: string): LoopSettings {
     throw new Error(`Settings file ${resolved} must contain a JSON object`);
   const config = raw as Record<string, unknown>;
   const settingsDir = dirname(resolved);
+  const extensions = readExtensions(resolved, config.extensions);
   const inline = config.appendSystemPrompt;
   if (inline !== undefined && typeof inline !== "string")
     throw new Error(`"appendSystemPrompt" in ${resolved} must be a string`);
@@ -360,6 +397,7 @@ export function loadLoopSettings(settingsPath: string): LoopSettings {
       min: 1,
       max: 24 * 60 * 60_000,
     }),
+    extensions,
     ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
   };
 }

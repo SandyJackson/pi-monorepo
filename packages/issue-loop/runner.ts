@@ -22,6 +22,7 @@ import {
   type WorkCommit,
 } from "./artifact.ts";
 import { getIssue, gh, githubHostFromOrigin } from "./github.ts";
+import { assertWorkerModels, workerExtensionArgs } from "./pi-models.ts";
 import { type CommandContext, command, git, originUrl } from "./process.ts";
 import {
   type Finding,
@@ -310,9 +311,7 @@ async function runPhaseTask(state: RunState, options: PhaseTaskOptions): Promise
     "--mode",
     "rpc",
     "--approve",
-    // Ambient extensions are disabled for every worker; only the explicitly
-    // selected loop skills and tool allowlist load.
-    "--no-extensions",
+    ...(await workerExtensionArgs(state.settings)),
     "--name",
     session.name,
     "--session",
@@ -1539,7 +1538,7 @@ async function assertAcceptedAncestry(state: RunState): Promise<void> {
 
 export async function execute(
   state: RunState,
-  overrides: { check?: string; instructions?: string } = {},
+  overrides: { check?: string; instructions?: string; preflightModels?: boolean } = {},
 ): Promise<void> {
   const checkOverride = overrides.check;
   let executionStarted = false;
@@ -1569,6 +1568,11 @@ export async function execute(
       return;
     }
     await verifyOrigin(state);
+    if (overrides.preflightModels)
+      await assertWorkerModels(
+        state.settings,
+        existsSync(state.worktree) ? state.worktree : state.repo,
+      );
     mkdirSync(join(state.runDir, "sessions"), { recursive: true, mode: 0o700 });
     mkdirSync(join(state.runDir, "logs"), { recursive: true, mode: 0o700 });
     // Skills were copied into the run dir at start; resume reuses the copy.

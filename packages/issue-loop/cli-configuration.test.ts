@@ -40,6 +40,16 @@ cliTest(
     const runDir = runDirFrom(result.stdout);
     const state = readState(runDir);
     expect(state.settings).toEqual({
+      extensions: [
+        {
+          path: join(f.env.PI_CODING_AGENT_DIR, "npm", "node_modules", "pi-claude-bridge"),
+          version: "1.2.3",
+        },
+        {
+          path: join(f.env.PI_CODING_AGENT_DIR, "npm", "node_modules", "pi-web-access"),
+          version: "1.2.3",
+        },
+      ],
       implement: {
         agentName: "implement",
         model: "test-provider/implement-model",

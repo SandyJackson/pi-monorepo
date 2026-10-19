@@ -6,6 +6,7 @@
     "node": "^22.18.0 || >=24.0.0"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.99.2",
     "@pi-workspace/herdr-subagent": "workspace:*"
   }
 }
