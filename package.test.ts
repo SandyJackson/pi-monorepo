@@ -25,8 +25,8 @@ describe("Pi workspace package", () => {
     expect(manifest.keywords).toContain("pi-package");
   });
 
-  it("requires Node 22 or newer", () => {
-    expect(manifest.engines.node).toBe(">=22");
+  it("requires Node 22.18 or newer for native TypeScript tooling", () => {
+    expect(manifest.engines.node).toBe(">=22.18.0");
   });
 
   it.each(["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai", "@earendil-works/pi-tui"])(

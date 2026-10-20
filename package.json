@@ -3,6 +3,12 @@
   "private": true,
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "pnpm test:fast",
+    "test:fast": "pnpm exec vitest run --config vitest.fast.config.ts",
+    "test:issue-loop": "pnpm exec vitest run packages/issue-loop --maxWorkers=4",
+    "test:all": "pnpm exec vitest run --maxWorkers=4",
+    "test:affected": "node scripts/test-affected.ts",
+    "check:affected": "node scripts/test-affected.ts --check",
     "issue-loop": "node packages/issue-loop/run.mjs",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
@@ -13,7 +19,7 @@
     "pi-package"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18.0"
   },
   "pi": {
     "extensions": [

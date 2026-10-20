@@ -20,3 +20,7 @@ pre-push:
     # History audit on push: catches secrets committed with --no-verify on this clone.
     - name: secrets (betterleaks history)
       run: betterleaks git . --log-opts="origin/master..HEAD" --redact
+
+    - name: affected checks
+      use_stdin: true
+      run: pnpm check:affected --pre-push
