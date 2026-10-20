@@ -7,3 +7,16 @@ pre-commit:
 
     - name: typecheck
       run: pnpm exec tsc --noEmit
+
+    # Fast staged-diff secrets scan (betterleaks v1.9.0, detect-only).
+    # Pinned syntax note: v2 replaces --pre-commit/--staged with
+    # `git diff --cached ... | betterleaks stdin --git-diff` — update this job on v2 stable.
+    - name: secrets (betterleaks staged)
+      run: betterleaks git . --pre-commit --staged --redact
+
+pre-push:
+  parallel: true
+  jobs:
+    # History audit on push: catches secrets committed with --no-verify on this clone.
+    - name: secrets (betterleaks history)
+      run: betterleaks git . --log-opts="origin/master..HEAD" --redact
