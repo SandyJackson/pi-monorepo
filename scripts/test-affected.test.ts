@@ -146,6 +146,20 @@ it("selects consumers from workspace manifests", () => {
   expect(plan.integrationTests).toContain("packages/issue-loop/cli-lifecycle.test.ts");
 });
 
+it("selects all tests for a deleted package whose ignored node_modules remain", () => {
+  const f = fixture();
+  writeFileSync(join(f.root, ".git/info/exclude"), "node_modules/\n");
+  rmSync(join(f.root, "packages/session-auto-name"), { recursive: true });
+  f.write("packages/session-auto-name/node_modules/dep/index.js", "module.exports = {};\n");
+  const plan = f.plan();
+  expect(plan.changedFiles).toEqual([
+    "packages/session-auto-name/index.ts",
+    "packages/session-auto-name/package.json",
+  ]);
+  expect(plan.scope).toBe("all");
+  expect(plan.reason).toContain("packages/session-auto-name/");
+});
+
 it("selects all tests if the default comparison ref is unavailable", () => {
   const f = fixture(false);
   expect(f.plan().scope).toBe("all");

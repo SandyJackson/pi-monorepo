@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { globSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, globSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -18,29 +18,36 @@ function git(root: string, ...args: string[]): string {
 }
 
 function workspacePackages(root: string): WorkspacePackage[] {
-  return readdirSync(join(root, "packages"), { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => {
-      const directory = `packages/${entry.name}`;
-      const manifest = JSON.parse(
-        readFileSync(join(root, directory, "package.json"), "utf8"),
-      ) as Record<string, unknown>;
-      if (typeof manifest.name !== "string")
-        throw new Error(`Missing package name in ${directory}/package.json`);
-      const dependencies = [
-        "dependencies",
-        "peerDependencies",
-        "devDependencies",
-        "optionalDependencies",
-      ].flatMap((field) => {
-        const value = manifest[field];
-        if (value === undefined) return [];
-        if (!value || typeof value !== "object" || Array.isArray(value))
-          throw new Error(`Invalid ${field} in ${directory}/package.json`);
-        return Object.keys(value);
-      });
-      return { directory, name: manifest.name, dependencies };
-    });
+  return (
+    readdirSync(join(root, "packages"), { withFileTypes: true })
+      // A removed package can leave ignored files such as node_modules/ behind;
+      // its changed paths then have no owner and select the full suite.
+      .filter(
+        (entry) =>
+          entry.isDirectory() && existsSync(join(root, "packages", entry.name, "package.json")),
+      )
+      .map((entry) => {
+        const directory = `packages/${entry.name}`;
+        const manifest = JSON.parse(
+          readFileSync(join(root, directory, "package.json"), "utf8"),
+        ) as Record<string, unknown>;
+        if (typeof manifest.name !== "string")
+          throw new Error(`Missing package name in ${directory}/package.json`);
+        const dependencies = [
+          "dependencies",
+          "peerDependencies",
+          "devDependencies",
+          "optionalDependencies",
+        ].flatMap((field) => {
+          const value = manifest[field];
+          if (value === undefined) return [];
+          if (!value || typeof value !== "object" || Array.isArray(value))
+            throw new Error(`Invalid ${field} in ${directory}/package.json`);
+          return Object.keys(value);
+        });
+        return { directory, name: manifest.name, dependencies };
+      })
+  );
 }
 
 function changes(root: string, explicitBase: string | undefined, pushInput: string | undefined) {
