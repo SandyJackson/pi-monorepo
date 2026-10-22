@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 
@@ -7,8 +8,20 @@ const script = path.join(import.meta.dirname, "sync-upstream-skills.sh");
 let fixture: string;
 let consumer: string;
 
+// Isolated from user and system config so fixture commits never depend on,
+// or write to, anything outside the temporary repositories.
+const gitEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_AUTHOR_NAME: "Sync test",
+  GIT_AUTHOR_EMAIL: "sync-test@example.invalid",
+  GIT_COMMITTER_NAME: "Sync test",
+  GIT_COMMITTER_EMAIL: "sync-test@example.invalid",
+};
+
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" });
+  return execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf8" });
 }
 
 function writeSkill(repo: string, name: string, body: string): void {
@@ -18,14 +31,12 @@ function writeSkill(repo: string, name: string, body: string): void {
 }
 
 beforeEach(() => {
-  fixture = fs.mkdtempSync(path.join(process.cwd(), ".sync-test-"));
+  fixture = fs.mkdtempSync(path.join(os.tmpdir(), "sync-test-"));
   const upstream = path.join(fixture, "upstream");
   consumer = path.join(fixture, "consumer");
   for (const repo of [upstream, consumer]) {
     fs.mkdirSync(repo);
     git(repo, "init", "-b", "main");
-    git(repo, "config", "user.name", "Sync test");
-    git(repo, "config", "user.email", "sync-test@example.invalid");
   }
   writeSkill(upstream, "skills/engineering/code-review", "upstream review\n");
   writeSkill(upstream, "skills/productivity/control", "upstream control\n");
@@ -47,7 +58,7 @@ function sync(...args: string[]): string {
   return execFileSync("bash", [script, ...args], {
     cwd: consumer,
     encoding: "utf8",
-    env: { ...process.env, TMPDIR: fixture },
+    env: { ...gitEnv, TMPDIR: fixture },
   });
 }
 
