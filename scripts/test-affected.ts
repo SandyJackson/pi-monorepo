@@ -135,7 +135,7 @@ function main(): void {
   const commands: string[][] = values.check ? [["lint"], ["typecheck"]] : [];
   commands.push(["test:fast"]);
   if (plan.integrationTests.length)
-    commands.push(["exec", "vitest", "run", ...plan.integrationTests, "--maxWorkers=4"]);
+    commands.push(["exec", "vitest", "run", ...plan.integrationTests]);
   if (values.list) {
     console.log(
       JSON.stringify({ ...plan, changedFiles: detected.changedFiles, commands }, null, 2),

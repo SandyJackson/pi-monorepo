@@ -5,6 +5,8 @@ export const SLOW_TEST_PATTERNS = [
   "**/*.integration.test.ts",
   "**/*.smoke.test.ts",
   "packages/herdr-subagent/delegated-task-startup.test.ts",
+  // Builds real repositories; any scripts/ change already selects the full suite.
+  "scripts/test-affected.test.ts",
 ];
 
 export interface WorkspacePackage {

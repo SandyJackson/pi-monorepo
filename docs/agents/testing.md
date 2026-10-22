@@ -21,11 +21,11 @@ pnpm exec vitest run packages/issue-loop/hook-failures.test.ts
 pnpm exec vitest run packages/issue-loop/cli-commits.test.ts -t "repairs a code hook failure"
 ```
 
-Before work is ready, use `pnpm check:affected`. The fast tests run before the selected integration tests, and each test runs only once. A failed command stops the check. Integration runs use four workers to limit subprocess contention.
+Before work is ready, use `pnpm check:affected`. The fast tests run before the selected integration tests, and each test runs only once. A failed command stops the check. `vitest.config.ts` uses two thirds of the CPUs and runs at most three issue-loop CLI tests concurrently per file, which bounds subprocess contention while keeping the longest file from setting the suite's duration.
 
 ## What is fast?
 
-`vitest.fast.config.ts` extends the normal configuration. `scripts/test-policy.ts` owns the slow-test patterns. Currently these are issue-loop `cli-*.test.ts`, `*.integration.test.ts`, `*.smoke.test.ts`, and the real-Pi delegated-task startup tests. Remaining tests include settings, parsers, artifact classification, worker state-machine tests, resource checks, and inexpensive package tests.
+`vitest.fast.config.ts` extends the normal configuration. `scripts/test-policy.ts` owns the slow-test patterns. Currently these are issue-loop `cli-*.test.ts`, `*.integration.test.ts`, `*.smoke.test.ts`, the real-Pi delegated-task startup tests, and the affected-selection tests in `scripts/test-affected.test.ts` (a `scripts/` change selects the full suite anyway). Remaining tests include settings, parsers, artifact classification, worker state-machine tests, resource checks, and inexpensive package tests.
 
 New tests use the cheapest seam that proves the behaviour. Keep representative CLI/RPC/process tests for wiring, real Git, signals, shutdown and crash recovery. Test diagnostic-string variations and workflow policy through smaller interfaces. A `.md` suffix does not make a runtime resource ordinary documentation.
 
