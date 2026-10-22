@@ -14,11 +14,11 @@ const execFileAsync = promisify(execFile);
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
-// Fixture-based CLI tests run concurrently within each file: each fixture owns
-// its temporary directories and subprocess environment. Without this the
-// longest file bounds the suite. `maxConcurrency` in vitest.config.ts caps the
-// overlap so real Git and worker subprocesses do not saturate the machine.
-export const cliTest: typeof it.concurrent = it.concurrent;
+// Fixture-based CLI tests run sequentially within each file. Every test spawns
+// real Git and worker subprocesses, and the watchdog tests depend on wall-clock
+// windows: overlapping tests within a file made healthy workers look stalled.
+// Parallelism across files provides the speedup instead.
+export const cliTest: typeof it = it;
 export const cli = resolve(import.meta.dirname, "run.mjs");
 
 export function fixture(mode = "pass") {

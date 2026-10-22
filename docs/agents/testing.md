@@ -21,7 +21,7 @@ pnpm exec vitest run packages/issue-loop/hook-failures.test.ts
 pnpm exec vitest run packages/issue-loop/cli-commits.test.ts -t "repairs a code hook failure"
 ```
 
-Before work is ready, use `pnpm check:affected`. The fast tests run before the selected integration tests, and each test runs only once. A failed command stops the check. `vitest.config.ts` uses two thirds of the CPUs and runs at most three issue-loop CLI tests concurrently per file, which bounds subprocess contention while keeping the longest file from setting the suite's duration.
+Before work is ready, use `pnpm check:affected`. The fast tests run before the selected integration tests, and each test runs only once. A failed command stops the check. `vitest.config.ts` uses two thirds of the CPUs. Issue-loop CLI tests run sequentially within each file: their watchdog tests depend on wall-clock windows, and overlapping them made healthy workers look stalled.
 
 ## What is fast?
 
