@@ -21,7 +21,8 @@
       "./packages/herdr-bridge/index.ts",
       "./packages/session-auto-name/index.ts",
       "./packages/code-actions/index.ts",
-      "./packages/worktree-trust/index.ts"
+      "./packages/worktree-trust/index.ts",
+      "./packages/ketch/index.ts"
     ],
     "skills": [
       "./skills"
@@ -34,6 +35,7 @@
     "@pi-workspace/herdr-bridge": "workspace:*",
     "@pi-workspace/herdr-contract": "workspace:*",
     "@pi-workspace/herdr-subagent": "workspace:*",
+    "@pi-workspace/ketch": "workspace:*",
     "@pi-workspace/session-auto-name": "workspace:*",
     "@pi-workspace/worktree-trust": "workspace:*",
     "@tmustier/pi-code-actions": "workspace:*"
