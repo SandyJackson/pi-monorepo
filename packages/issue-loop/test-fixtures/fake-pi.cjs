@@ -3,7 +3,7 @@ const path = require("node:path");
 const args = process.argv.slice(2);
 const value = (flag) => args[args.indexOf(flag) + 1];
 if (args.includes("--version")) {
-  console.log(process.env.FIXTURE_PI_VERSION || "0.99.2");
+  console.log(process.env.FIXTURE_PI_VERSION || "1.3.0");
   process.exit(0);
 }
 if (args.includes("--no-session") && args.includes("rpc")) {

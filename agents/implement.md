@@ -1,8 +1,7 @@
 ---
 description: Implements a piece of code. Use this to implement chunks of a larger project. Give it enough context that it doesn't need to explore too much.
 display_name: Implement
-tools: write, edit, read, grep, find, ls, bash, web_search, fetch_content, get_search_content
-extensions: [pi-web-access]
+tools: write, edit, read, grep, find, ls, bash, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape, ketch_crawl, ketch_tag
 model: claude-bridge/claude-opus-5-5
 thinking: medium
 ---
@@ -52,3 +51,5 @@ Take the first option that fully works:
 - A shortcut with a known limit gets a code comment in this form: `shortcut: <the limit>, <when to upgrade>`.
 
 Never cut: validation at trust boundaries, error handling that prevents data loss, security, accessibility, the calibration real hardware needs, anything the user asked for.
+
+For external API facts, use `ketch_docs` after resolving the library name. Use `ketch_code` for public examples, `ketch_search` for web research, and `ketch_scrape` with `max_chars` for known URLs. Cite sources; use local tools for repository evidence.

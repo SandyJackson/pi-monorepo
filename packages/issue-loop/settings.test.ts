@@ -77,7 +77,7 @@ describe("loadLoopSettings", () => {
     expect(settings).toEqual({
       extensions: [
         { path: path.join(agentDir, "npm", "node_modules", "pi-claude-bridge"), version: "1.2.3" },
-        { path: path.join(agentDir, "npm", "node_modules", "pi-web-access"), version: "1.2.3" },
+        { path: path.join(agentDir, "git", "github.com", "1broseidon", "ketch"), version: "1.2.3" },
       ],
       implement: {
         agentName: "implement",
@@ -126,7 +126,7 @@ describe("loadLoopSettings", () => {
       agentName: "loop-implement",
       model: "claude-bridge/claude-opus-5-5",
       thinking: "medium",
-      tools: [...DEFAULT_IMPLEMENT_TOOLS, "web_search", "fetch_content", "get_search_content"],
+      tools: DEFAULT_IMPLEMENT_TOOLS,
       skills: ["tdd", "diagnosing-bugs", "deslop"],
       promptBody: expect.stringContaining("/skill:tdd"),
     });
@@ -153,6 +153,25 @@ describe("loadLoopSettings", () => {
     expect(settings.appendSystemPrompt).toBeUndefined();
   });
 
+  it("enables codemode for every blessed role and Ketch only for research roles", () => {
+    const settings = defaultLoopSettings();
+    const ketchTools = [
+      "ketch_search",
+      "ketch_code",
+      "ketch_docs",
+      "ketch_scrape",
+      "ketch_crawl",
+      "ketch_tag",
+    ];
+    for (const role of ["implement", "repair", "review", "describe"] as const) {
+      expect(settings[role].tools).toContain("codemode");
+      expect(settings[role].tools.filter((tool) => tool.startsWith("ketch_"))).toEqual(
+        role === "describe" ? [] : ketchTools,
+      );
+      expect(settings[role].tools).not.toEqual(expect.arrayContaining(["web_search"]));
+    }
+  });
+
   it("ignores unknown top-level keys", () => {
     const settingsPath = writeSettingsDir({
       "loop-settings.json": JSON.stringify({ implementModel: "provider/x" }),
@@ -161,10 +180,10 @@ describe("loadLoopSettings", () => {
     expect(settings.appendSystemPrompt).toBeUndefined();
   });
 
-  it("loads installed bridge and web packages from PI_CODING_AGENT_DIR by default", () => {
+  it("loads installed bridge and Ketch packages from PI_CODING_AGENT_DIR by default", () => {
     const expected = [
       { path: path.join(agentDir, "npm", "node_modules", "pi-claude-bridge"), version: "1.2.3" },
-      { path: path.join(agentDir, "npm", "node_modules", "pi-web-access"), version: "1.2.3" },
+      { path: path.join(agentDir, "git", "github.com", "1broseidon", "ketch"), version: "1.2.3" },
     ];
     expect(defaultLoopSettings().extensions).toEqual(expected);
     const settingsPath = writeSettingsDir({ "loop-settings.json": "{}" });
@@ -178,8 +197,8 @@ describe("loadLoopSettings", () => {
   });
 
   it("reports a missing default package without silently dropping it", () => {
-    fs.rmSync(path.join(agentDir, "npm", "node_modules", "pi-web-access"), { recursive: true });
-    expect(() => defaultLoopSettings()).toThrow(/Cannot load loop extension.*pi-web-access/);
+    fs.rmSync(path.join(agentDir, "git", "github.com", "1broseidon", "ketch"), { recursive: true });
+    expect(() => defaultLoopSettings()).toThrow(/Cannot load loop extension.*ketch/);
   });
 
   it("resolves extension paths and records package versions", () => {
@@ -331,24 +350,13 @@ describe("loadLoopSettings", () => {
     expect(settings.implement.agentName).toBe("loop-implement");
     expect(settings.implement.model).toBe("claude-bridge/claude-opus-5-5");
     expect(settings.implement.thinking).toBe("medium");
-    expect(settings.implement.tools).toEqual([
-      "read",
-      "grep",
-      "find",
-      "ls",
-      "bash",
-      "edit",
-      "write",
-      "web_search",
-      "fetch_content",
-      "get_search_content",
-    ]);
+    expect(settings.implement.tools).toEqual(DEFAULT_IMPLEMENT_TOOLS);
     expect(settings.implement.skills).toEqual(["tdd", "diagnosing-bugs", "deslop"]);
     expect(settings.implement.promptBody).toContain("/skill:tdd");
     expect(settings.review.agentName).toBe("loop-reviewer");
     expect(settings.review.model).toBe("openai-codex/gpt-6.1-sol");
     expect(settings.review.thinking).toBe("high");
-    expect(settings.review.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
+    expect(settings.review.tools).toEqual(DEFAULT_REVIEW_TOOLS);
     expect(settings.review.skills).toEqual([]);
     expect(settings.review.promptBody).toContain("## Flag gate");
     expect(() => validateLoopSkills(settings)).not.toThrow();

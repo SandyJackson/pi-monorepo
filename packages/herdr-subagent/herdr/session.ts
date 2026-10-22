@@ -220,7 +220,7 @@ function createPromptLease(body: string, instruction: string): PromptLease {
 // ---------------------------------------------------------------------------
 
 function buildAgentArguments(task: DelegatedTask, promptArgs: string[]): string[] {
-  const argv: string[] = [];
+  const argv: string[] = ["--no-mcp"];
   if (task.config.model) argv.push("--model", task.config.model);
   if (task.config.thinking) argv.push("--thinking", task.config.thinking);
   if (task.config.tools !== undefined && task.config.tools.length > 0) {

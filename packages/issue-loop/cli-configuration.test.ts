@@ -46,7 +46,7 @@ cliTest(
           version: "1.2.3",
         },
         {
-          path: join(f.env.PI_CODING_AGENT_DIR, "npm", "node_modules", "pi-web-access"),
+          path: join(f.env.PI_CODING_AGENT_DIR, "git", "github.com", "1broseidon", "ketch"),
           version: "1.2.3",
         },
       ],
@@ -262,10 +262,10 @@ cliTest(
   "preflights the installed Pi version before launching workers",
   async () => {
     const f = fixture();
-    f.env.FIXTURE_PI_VERSION = "0.98.5";
+    f.env.FIXTURE_PI_VERSION = "0.99.2";
     const result = await f.start();
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("older than the supported baseline 0.99.1");
+    expect(result.stderr).toContain("older than the supported baseline 1.3.0");
     expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
     expect(existsSync(join(f.root, "pr.json"))).toBe(false);
   },

@@ -110,7 +110,13 @@ describe("herdr/session — launch invariants", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(capturedArgs).toMatchObject({
         name: expect.stringMatching(/^sa-/),
-        args: expect.arrayContaining(["--model", "openai/gpt-5", "--tools", "read,write"]),
+        args: expect.arrayContaining([
+          "--no-mcp",
+          "--model",
+          "openai/gpt-5",
+          "--tools",
+          "read,write",
+        ]),
       });
       const args = (capturedArgs as { args: string[] }).args;
       // Order: name, model, optional thinking, tools, system prompt, task file, placeholder

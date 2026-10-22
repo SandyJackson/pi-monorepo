@@ -14,7 +14,7 @@ export async function workerExtensionArgs(settings: LoopSettings): Promise<strin
     agentDir: getAgentDir(),
     settingsManager: SettingsManager.inMemory(),
   });
-  const args = ["--no-extensions"];
+  const args = ["--no-extensions", "--no-mcp", "--extension", "builtin:codemode"];
   for (const { path } of settings.extensions ?? []) {
     const resources = await manager.resolveExtensionSources([path]);
     const entries = resources.extensions.filter((entry) => entry.enabled);

@@ -10,6 +10,7 @@ import {
   readWorkers,
   runDirFrom,
 } from "./cli-fixture.ts";
+import { DEFAULT_REVIEW_TOOLS, DESCRIBE_TOOLS } from "./settings.ts";
 
 cliTest(
   "accepts dependent tickets on one branch and opens one final PR without closing issues",
@@ -35,7 +36,9 @@ cliTest(
     expect(new Set(workers.map((worker) => worker.session)).size).toBe(workers.length);
     const reviews = workers.filter((worker) => worker.name.includes("review"));
     expect(reviews).toHaveLength(2);
-    expect(reviews.every((worker) => worker.args.includes("read,grep,find,ls,bash"))).toBe(true);
+    expect(reviews.every((worker) => worker.args.includes(DEFAULT_REVIEW_TOOLS.join(",")))).toBe(
+      true,
+    );
     expect(workers.every((worker) => worker.args.includes("--no-skills"))).toBe(true);
     // RPC mode with ambient extensions disabled for every worker.
     expect(
@@ -65,7 +68,7 @@ cliTest(
     // One PR-description worker, with the pr skill and no editing tools.
     const describers = workers.filter((worker) => worker.name.includes("parent describe"));
     expect(describers).toHaveLength(1);
-    expect(describers[0].args).toContain("read,grep,find,ls,bash");
+    expect(describers[0].args).toContain(DESCRIBE_TOOLS.join(","));
     expect(describers[0].args.some((arg: string) => arg.endsWith(join("skills", "pr")))).toBe(true);
     expect(describers[0].prompt).toContain('"body"');
     expect(existsSync(join(runDir, "skills", "pr", "SKILL.md"))).toBe(true);

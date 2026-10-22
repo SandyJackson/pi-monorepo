@@ -20,7 +20,7 @@ const usage = `Usage:
   node packages/issue-loop/run.mjs start --repo PATH --issue NUMBER --check COMMAND [--base BRANCH] [--setup COMMAND] [--timeout SECONDS] [--settings PATH]
   node packages/issue-loop/run.mjs resume RUN_DIRECTORY [--check COMMAND] [--instructions-file PATH]
 
-Requires Node 22.18+ or 24+, Git, authenticated gh and Pi 0.99.1 or newer. macOS/Linux only.
+Requires Node 22.18+ or 24+, Git, authenticated gh and Pi 1.3.0 or newer. macOS/Linux only.
 Starts from origin's default branch, or --base BRANCH fetched from origin. The PR targets that branch.
 Uses direct open GitHub child issues and native dependencies.
 --setup runs once in the new worktree; --check runs after every change and before final publication.
@@ -31,7 +31,7 @@ role guidance, an explicit extension allowlist, per-role loop skills, repair rou
 watchdog policy, controller recovery policy, controller command deadlines, and a shared system-prompt addition
 (see Customizing workers below). Workers always start with --no-skills and --no-extensions;
 only allowlisted extensions and curated loop skills named in the settings file are loaded.
-Default extensions are installed pi-claude-bridge and pi-web-access packages under Pi's agent directory.
+Default extensions are installed pi-claude-bridge (npm) and Ketch (git) packages under Pi's agent directory.
 
 This command trusts the project's Pi resources and runs setup/check commands with your privileges.
 It commits accepted work, pushes only its feature branch and opens one PR. It never merges.

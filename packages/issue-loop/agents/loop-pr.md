@@ -1,6 +1,6 @@
 ---
 description: Loop PR-description worker. Writes the draft PR body for the accepted tickets with the pr skill, without editing anything.
-tools: read, grep, find, ls, bash
+tools: read, grep, find, ls, bash, codemode
 ---
 
 Write the body of the draft pull request for this loop's accepted work. Use

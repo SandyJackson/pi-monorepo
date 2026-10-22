@@ -8,7 +8,7 @@ It supports two installation modes: **local development** (symlink) and **GitHub
 - Node.js >= 22
 - pnpm (for local development only; Pi bundles its own pnpm)
 - Git (for GitHub installation)
-- [pi-web-access](https://github.com/earendil-works/pi-web-access) (separate package, required by `docs-researcher` and `explain` agents)
+- [Ketch](https://github.com/1broseidon/ketch) and its Pi package for agents that need external research
 
 ## Local Development Installation
 
@@ -68,16 +68,17 @@ pi update             # pulls latest default branch for all installed packages
 /reload               # applies changes to the running session
 ```
 
-## pi-web-access (External Dependency)
+## Ketch external dependency
 
-The `docs-researcher` and `explain` agents require the `pi-web-access` package, which is maintained separately.
-Install it alongside this workspace:
+Install the Ketch CLI using its [installation instructions](https://github.com/1broseidon/ketch#installation), then install its Pi package alongside this workspace:
 
 ```bash
-pi install npm:pi-web-access
+pi install git:github.com/1broseidon/ketch
 ```
 
-`pi-web-access` is **not** vendored or republished by this workspace.
+The `docs-researcher`, `explain`, `implement`, and `code-reviewer` agents allow all six `ketch_*` tools. The codebase analyser and refactor agent use local evidence only. All workspace agents explicitly enable the built-in `codemode` tool, including agents with restricted tool lists. Use a Pi version that provides `codemode`.
+
+Ordinary subagents inherit Pi's globally loaded extensions but disable built-in MCP support with `--no-mcp`, so codemode cannot expose tools from configured MCP servers. Agent frontmatter does not select extensions; the `tools` field selects registered tools. Ketch is maintained separately and is not vendored or republished by this workspace. The issue loop has its own explicit extension defaults; see its [provider extensions](../packages/issue-loop/README.md#provider-extensions).
 
 ## Agent Setup
 
@@ -124,6 +125,6 @@ If migrating from a previous dotfiles-based installation:
    - `~/.config/pi/agent/auth.json` (authentication)
    - `~/.config/pi/agent/models.json` (model catalog)
    - `~/.config/pi/agent/trust.json` (project trust decisions)
-   - npm packages in `~/.config/pi/agent/npm/` (e.g., pi-web-access)
+   - External packages in `~/.config/pi/agent/npm/` and `~/.config/pi/agent/git/`
 5. **Restart Pi** or run `/reload`
 6. **Verify** with `pi list` that the workspace appears

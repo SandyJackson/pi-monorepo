@@ -111,10 +111,10 @@ export interface AgentConfig {
    * passed via `--tools`, so the child gets Pi's standard built-in tools).
    * Values are matched against Pi's tool registry by exact registered name —
    * plain built-in names (`read`, `bash`, ...) and plain extension tool names
-   * (`web_search`, ...). There is no `ext:<package>/<tool>` syntax; unknown
+   * (`ketch_search`, ...). There is no `ext:<package>/<tool>` syntax; unknown
    * names are silently ignored. To disable all built-in tools while keeping
    * extension tools, list the extension tool names explicitly, e.g.
-   * `tools: web_search` (only that extension tool).
+   * `tools: ketch_search` (only that extension tool).
    */
   tools?: string[];
   /**

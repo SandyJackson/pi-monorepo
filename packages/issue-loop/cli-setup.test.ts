@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { expect, it, onTestFinished } from "vitest";
 import { cliTest, fixture, readState, runDirFrom } from "./cli-fixture.ts";
 import { gh, githubHostFromOrigin } from "./github.ts";
-import { loadLoopSettings } from "./settings.ts";
+import { DEFAULT_IMPLEMENT_TOOLS, DEFAULT_REVIEW_TOOLS, loadLoopSettings } from "./settings.ts";
 
 it("derives the GitHub host from common origin URL forms", () => {
   expect(githubHostFromOrigin("git@github.com:owner/repo.git")).toBe("github.com");
@@ -80,8 +80,8 @@ it("normalizes an empty agent tools list to the role defaults", () => {
     "utf8",
   );
   const settings = loadLoopSettings(join(dir, "loop-settings.json"));
-  expect(settings.implement.tools).toEqual(["read", "grep", "find", "ls", "bash", "edit", "write"]);
-  expect(settings.review.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
+  expect(settings.implement.tools).toEqual(DEFAULT_IMPLEMENT_TOOLS);
+  expect(settings.review.tools).toEqual(DEFAULT_REVIEW_TOOLS);
 });
 
 cliTest(

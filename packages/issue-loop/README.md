@@ -5,8 +5,8 @@ A small local controller for one parent GitHub issue. It implements direct child
 ## Requirements
 
 - macOS or Linux; Node 22.18+ or Node 24+.
-- `git`, authenticated `gh`, and authenticated `pi` on PATH. Pi must be 0.99.1 or newer and support RPC mode (`--mode rpc`), `--name`, `--session`, `--approve`, `--no-extensions`, and tool allowlists. The controller preflights the installed version before launching any worker.
-- Default workers require `pi-claude-bridge` and `pi-web-access` installed in Pi's agent directory. Install them with `pi install npm:pi-claude-bridge` and `pi install npm:pi-web-access`, or provide a different extension list and matching models/tools via `--settings`.
+- `git`, authenticated `gh`, and authenticated `pi` on PATH. Pi must be 1.3.0 or newer and support RPC mode (`--mode rpc`), `--name`, `--session`, `--approve`, `--no-extensions`, `--no-mcp`, `builtin:codemode`, and tool allowlists. The controller preflights the installed version before launching any worker.
+- Default workers require `pi-claude-bridge` and Ketch installed in Pi's agent directory, plus the `ketch` CLI on PATH. Install the Pi packages with `pi install npm:pi-claude-bridge` and `pi install git:github.com/1broseidon/ketch`, or provide a different extension list and matching models/tools via `--settings`.
 - A GitHub.com repository with `origin` pointing at the repo holding the parent issue. Fetch and push URLs must match. GitHub identity comes from `origin`, not `GH_REPO`.
 - Open, implementation-ready child issues linked through GitHub's native sub-issue feature. Native blocked-by dependencies are respected. Task-list links are ignored.
 - Requirements live in the parent and ticket bodies. Comments are never fetched or forwarded, so copy approved decisions into the relevant body before starting.
@@ -83,7 +83,7 @@ Every field is optional. `repairRounds`, `watchdog`, `recovery`, and `deadlines`
 
 ### Provider extensions
 
-Default workers load only the installed `pi-claude-bridge` and `pi-web-access` packages from `<agent-dir>/npm/node_modules/`. The agent directory comes from Pi's `getAgentDir()`: `PI_CODING_AGENT_DIR` when set, otherwise `~/.pi/agent`. No packages are installed automatically; a missing default package fails startup.
+Default workers load only the installed `pi-claude-bridge` package from `<agent-dir>/npm/node_modules/pi-claude-bridge` and Ketch from `<agent-dir>/git/github.com/1broseidon/ketch`. The agent directory comes from Pi's `getAgentDir()`: `PI_CODING_AGENT_DIR` when set, otherwise `~/.pi/agent`. No packages are installed automatically; a missing default package fails startup.
 
 A settings file that omits `extensions` inherits those two defaults. An explicit list replaces them, and `"extensions": []` disables both. To select different installed extension files or package directories:
 
@@ -100,6 +100,8 @@ Before creating a run, the controller checks model selection for implementation,
 The resolved paths and package-directory versions, when present, are recorded in `state.json`. Resume reuses those paths and repeats the model check; older snapshots without an allowlist load no extensions. Extension code is not copied or version-enforced. Keep it installed at the recorded paths and version for the duration of a run.
 
 ### Roles and skills
+
+All blessed roles explicitly enable `codemode`. The launcher loads `builtin:codemode` despite `--no-extensions` and disables built-in MCP support with `--no-mcp`. Implementation, repair, and review allow all six `ketch_*` tools for external documentation and public examples. The PR-description worker uses local evidence only. Custom agent files with explicit `tools` lists replace these defaults, so include `codemode` and any required Ketch tools yourself. Existing runs retain their snapshotted tools and extensions on resume; these defaults apply to new runs.
 
 Same-conversation repair appends the transition guidance, repair skills, and additive editing tools to the reviewer's existing conversation, so the diagnosis, earlier messages, model/thinking, and initial definitions stay in place. `repairAgent` supplies repair prompt guidance and additive tools, and `repairSkills` supplies additive skills. The `repairAgent` model and thinking values do not replace the originating conversation's values; a repair never starts on a separately selected model. That inheritance is intentional: it preserves context and keeps the prefix eligible for provider cache reuse. Provider cache reuse is best-effort: where a provider or configuration cannot encode additive tool definitions, the same-session repair still runs but the prefix may miss the cache. See [Verification](#verification) for what offline tests can and cannot show.
 
@@ -320,9 +322,9 @@ Tests drive the public `start`/`resume` commands against temporary Git worktrees
 An opt-in offline smoke checks the installed Pi:
 
 ```sh
-ISSUE_LOOP_PI_SMOKE=1 pnpm exec vitest run packages/issue-loop/pi.smoke.test.ts
+ISSUE_LOOP_PI_SMOKE=1 ISSUE_LOOP_PI_BIN=/absolute/path/to/pi pnpm exec vitest run packages/issue-loop/pi.smoke.test.ts
 ```
 
-It runs the controller's version preflight, starts Pi in worker RPC mode with extensions and skills disabled, checks correlated LF-framed `get_state`/`get_messages` responses for the requested session path and name, and requires a clean exit when stdin closes. It sends no prompt, so no model or provider is called. It is skipped by default because the result depends on the local Pi install.
+It starts two Pi processes, one for standalone tool restrictions and one for loop extension loading. It checks that codemode is active, loop research tools are registered, local-only roles omit Ketch, and configured MCP processes never start or expose tools. It also checks correlated LF-framed RPC responses and clean shutdown. No prompt, model request, research call, or provider credit is used. It is skipped by default because it requires installed Pi and Ketch packages. Set `ISSUE_LOOP_PI_BIN` to the installed Pi executable; otherwise pnpm may select the repository's older development binary.
 
 Limits: fixture and offline tests verify same-session construction and reuse, not provider cache hits; cache reuse depends on the provider and is best-effort. No paid end-to-end smoke is included or authorized. Model quality and a first live run still want human supervision.
