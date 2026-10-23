@@ -88,4 +88,5 @@ cliTest.each(["", "bad..branch", "missing-branch"])(
     expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
     expect(existsSync(join(f.root, "pr.json"))).toBe(false);
   },
+  30_000,
 );

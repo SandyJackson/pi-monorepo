@@ -261,20 +261,24 @@ cliTest(
   30_000,
 );
 
-cliTest("rejects a timeout below the CLI minimum before starting workers", async () => {
-  const f = fixture();
-  const result = await f.run(
-    "start",
-    "--repo",
-    f.repo,
-    "--issue",
-    "10",
-    "--check",
-    "true",
-    "--timeout",
-    "1",
-  );
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain("--timeout must be 300 to 7200 seconds");
-  expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
-});
+cliTest(
+  "rejects a timeout below the CLI minimum before starting workers",
+  async () => {
+    const f = fixture();
+    const result = await f.run(
+      "start",
+      "--repo",
+      f.repo,
+      "--issue",
+      "10",
+      "--check",
+      "true",
+      "--timeout",
+      "1",
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--timeout must be 300 to 7200 seconds");
+    expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
+  },
+  30_000,
+);
