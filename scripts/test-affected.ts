@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, globSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { withIntegrationLock } from "./integration-lock.ts";
 import {
   planAffectedTests,
   SLOW_TEST_PATTERNS,
@@ -156,7 +157,8 @@ function main(): void {
     console.log(`Affected packages: ${plan.affectedPackages.join(", ")}`);
   for (const args of commands) {
     console.log(`\n> pnpm ${args.join(" ")}`);
-    const child = spawnSync("pnpm", args, { cwd: root, stdio: "inherit" });
+    const run = () => spawnSync("pnpm", args, { cwd: root, stdio: "inherit" });
+    const child = args[0] === "exec" ? withIntegrationLock("pnpm check:affected", run) : run();
     if (child.error) throw child.error;
     if (child.status !== 0) process.exit(child.status ?? 1);
   }

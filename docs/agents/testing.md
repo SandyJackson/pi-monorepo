@@ -23,6 +23,8 @@ pnpm exec vitest run packages/issue-loop/cli-commits.test.ts -t "repairs a code 
 
 Before work is ready, use `pnpm check:affected`. The fast tests run before the selected integration tests, and each test runs only once. A failed command stops the check. `vitest.config.ts` uses two thirds of the CPUs. Issue-loop CLI tests run sequentially within each file: their watchdog tests depend on wall-clock windows, and overlapping them made healthy workers look stalled.
 
+Integration runs share two machine-wide slots (`scripts/integration-lock.ts`), so a third concurrent agent queues instead of overlapping. Many CLI tests assert wall-clock deadlines: on a 12-core machine, two or three overlapping suites passed, while four failed healthy tests in every suite. `check:affected`/`test:affected` hold a slot for the integration step only; `test:all` and `test:issue-loop` hold one for the whole run. A waiting run prints the holders' pids and commands and gives up after 20 minutes. A slot whose holder has exited is reclaimed. `PI_MONOREPO_INTEGRATION_SLOTS` changes the slot count. Targeted `pnpm exec vitest run` commands do not take a slot.
+
 ## What is fast?
 
 `vitest.fast.config.ts` extends the normal configuration. `scripts/test-policy.ts` owns the slow-test patterns. Currently these are issue-loop `cli-*.test.ts`, `*.integration.test.ts`, `*.smoke.test.ts`, the real-Pi delegated-task startup tests, and the affected-selection tests in `scripts/test-affected.test.ts` (a `scripts/` change selects the full suite anyway). Remaining tests include settings, parsers, artifact classification, worker state-machine tests, resource checks, and inexpensive package tests.
