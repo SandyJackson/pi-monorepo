@@ -8,16 +8,24 @@ Worktrees are managed with worktrunk load the skill for more information.
 
 ## Checks
 
-Confirm a change cheapest first, so lint and type errors fail in seconds
-rather than after the two-minute test suite:
+While iterating, run the relevant tests, e.g.
+`pnpm exec vitest run packages/issue-loop/cli-lifecycle.test.ts -t "<test name>"`.
+Routine checks are cheapest first:
 
 1. `pnpm lint` (fix with `pnpm lint:fix`)
 2. `pnpm typecheck`
-3. `pnpm exec vitest run` (full suite)
+3. `pnpm test:fast`
 
-While iterating, scope Vitest to what you are changing, e.g.
-`pnpm exec vitest run packages/issue-loop/cli-lifecycle.test.ts -t "<test name>"`.
-The full suite already includes every package's tests, so run it once at the end.
+Before declaring work ready or pushing, run `pnpm check:affected`. It runs lint,
+typecheck, the fast suite, and integration tests for changed packages and their
+workspace consumers. Pre-push runs it automatically against Git's pushed refs.
+Use `pnpm test:affected --list` to preview selection, or `--base REF` to choose
+a comparison base for an explicit check.
+
+Use `pnpm test:all` for shared tooling/dependency changes, broad refactors, or
+uncertain impact, not after every local change. The selector falls back to the
+full suite for shared or unclassified inputs. See `docs/agents/testing.md` when
+changing check selection, hooks, or test tiers, or diagnosing a slow check.
 
 Always invoke repo binaries with `pnpm exec`, never `npx`.
 `npx` can resolve unpinned versions (notably biome) that disagree

@@ -307,15 +307,13 @@ No parallel tickets, recursive planning, per-ticket PRs, live pane management, d
 
 ## Verification
 
-Run the checks cheapest first, so a lint or type error fails in seconds rather than after the two-minute suite:
-
-```sh
-pnpm lint
-pnpm typecheck
-pnpm exec vitest run
-```
-
-The full suite includes the issue-loop tests. While iterating, `pnpm exec vitest run packages/issue-loop/cli-lifecycle.test.ts -t "<name>"` runs a single scenario; the whole package is nearly as slow as the full suite.
+Use `pnpm test:fast` for routine feedback. While iterating,
+`pnpm exec vitest run packages/issue-loop/cli-lifecycle.test.ts -t "<name>"`
+runs a single integration scenario. Before work is ready, run `pnpm check:affected`;
+issue-loop code, agent definitions and curated skills select its integration tests.
+`pnpm test:issue-loop` explicitly runs the whole package. The full suite is
+`pnpm test:all`, reserved for shared changes or uncertain impact. See
+[the repository check policy](../../docs/agents/testing.md) for selection and hooks.
 
 Tests drive the public `start`/`resume` commands against temporary Git worktrees and fake Pi/GitHub executables: no models, no GitHub mutations, no provider credits. Watchdog, backoff, and grace timing use a virtual clock in the worker tests; CLI tests use short deadlines and synchronize on fixture events rather than long sleeps.
 

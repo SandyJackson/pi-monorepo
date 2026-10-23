@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import {
   assertOutcomeConsistent,
   DESCRIBE_OUTCOME_EXAMPLES,
@@ -1015,6 +1015,42 @@ describe("supervised worker watchdog", () => {
     await wd.clock.advance(300);
     await wd.clock.advance(200);
     await expect(promise).rejects.toThrow(/checkpoint-grace/);
+  });
+
+  it("settles when signalling an exited but unreaped worker group reports EPERM", async () => {
+    // macOS reports EPERM, not ESRCH, for a process group whose members have all
+    // exited but not been reaped. A worker that exits as soon as it acknowledges
+    // the abort leaves exactly that window before the controller signals it.
+    const realKill = process.kill.bind(process);
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if (pid < 0 && signal !== 0)
+        throw Object.assign(new Error("kill EPERM"), { code: "EPERM", syscall: "kill" });
+      return realKill(pid, signal);
+    });
+    try {
+      const wd = startWatchdog();
+      const promise = wd.start({
+        watchdog: {
+          silenceMs: 1_000,
+          checkpointGraceMs: 500,
+          abortGraceMs: 300,
+          sigkillEscalationMs: 200,
+        },
+      });
+      await wd.accepted();
+      wd.inject(startTool("a"));
+      await waitForLog(wd.log, "tool_execution_start");
+      await wd.clock.advance(1_000);
+      await wd.waitForCommand("steer");
+      await wd.clock.advance(500);
+      await wd.waitForCommand("abort");
+      await waitForLog(wd.log, '"command":"abort"');
+      await wd.clock.advance(200);
+      await expect(promise).rejects.toThrow(/checkpoint-grace/);
+      expect(kill).toHaveBeenCalledWith(expect.any(Number), "SIGTERM");
+    } finally {
+      kill.mockRestore();
+    }
   });
 
   it("preserves the hard ceiling across resume using consumed runtime", async () => {

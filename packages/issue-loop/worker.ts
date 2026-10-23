@@ -582,7 +582,9 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerRunResult
       try {
         process.kill(-child.pid, signal);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        // macOS reports EPERM instead of ESRCH while the exited group awaits reaping.
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ESRCH" && code !== "EPERM") throw error;
       }
     };
     const clearTimer = (handle: unknown) => {

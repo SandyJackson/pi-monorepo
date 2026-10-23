@@ -15,9 +15,9 @@ afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 // Fixture-based CLI tests run sequentially within each file. Every test spawns
-// real Git and worker subprocesses, and overlapping them within a file as well
-// as across files saturates a machine (mass 30s timeouts under default workers).
-// Parallelism across slice files provides the speedup instead.
+// real Git and worker subprocesses, and the watchdog tests depend on wall-clock
+// windows: overlapping tests within a file made healthy workers look stalled.
+// Parallelism across files provides the speedup instead.
 export const cliTest: typeof it = it;
 export const cli = resolve(import.meta.dirname, "run.mjs");
 
