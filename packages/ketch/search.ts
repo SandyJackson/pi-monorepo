@@ -2,10 +2,17 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { flag, positional, toggle } from "./args.ts";
 import { defined, heading, items, str, strs } from "./fields.ts";
-import { ErrorOutput, errorResult, type KetchDetails, type Rendered, runJson } from "./result.ts";
+import { renderers } from "./render.ts";
+import {
+  DEFAULT_MAX_CHARS,
+  ErrorOutput,
+  errorResult,
+  type KetchDetails,
+  type Rendered,
+  runJson,
+} from "./result.ts";
 import type { Exec } from "./runner.ts";
 
-const DEFAULT_MAX_CHARS = 6000;
 const TIMEOUT_MS = 120_000;
 // Backend names join into one comma-separated flag value, so they can't contain commas.
 const BACKEND_NAME = /^[a-z0-9_-]+$/i;
@@ -63,6 +70,7 @@ export function createSearchTool(exec: Exec): ToolDefinition<typeof SearchParams
   return {
     name: "ketch_search",
     label: "ketch search",
+    ...renderers<typeof SearchParams>("search"),
     description:
       "Search the web with the operator's default backend. With scrape, each result includes " +
       `the first ${DEFAULT_MAX_CHARS} characters of its page unless max_chars says otherwise.`,

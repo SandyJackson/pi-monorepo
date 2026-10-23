@@ -15,6 +15,9 @@ import {
 import { Type } from "typebox";
 import { type ErrorKind, type Exec, runKetch, warningsOf } from "./runner.ts";
 
+/** Characters kept per fetched page unless a call sets max_chars. */
+export const DEFAULT_MAX_CHARS = 6000;
+
 // Said once per error instead of in every tool description.
 const MEANING: Record<ErrorKind, string> = {
   validation: "fix the input; retrying it unchanged will fail again",
