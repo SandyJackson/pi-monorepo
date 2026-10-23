@@ -2,6 +2,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { flag, positional, toggle } from "./args.ts";
 import { defined, heading, int, items, str } from "./fields.ts";
+import { renderers } from "./render.ts";
 import { ErrorOutput, errorResult, type KetchDetails, type Rendered, runJson } from "./result.ts";
 import type { Exec } from "./runner.ts";
 
@@ -46,6 +47,7 @@ export function createCodeTool(exec: Exec): ToolDefinition<typeof CodeParams, Ke
   return {
     name: "ketch_code",
     label: "ketch code",
+    ...renderers<typeof CodeParams>("code"),
     description: "Search public open-source code to see how real projects use an API.",
     promptSnippet: "Find real-world usage in public code",
     parameters: CodeParams,

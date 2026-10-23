@@ -2,6 +2,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { flag, positional, toggle } from "./args.ts";
 import { defined, heading, int, items, str, strs } from "./fields.ts";
+import { renderers } from "./render.ts";
 import { ErrorOutput, errorResult, type KetchDetails, type Rendered, runJson } from "./result.ts";
 import type { Exec } from "./runner.ts";
 
@@ -65,6 +66,7 @@ export function createDocsTool(exec: Exec): ToolDefinition<typeof DocsParams, Ke
   return {
     name: "ketch_docs",
     label: "ketch docs",
+    ...renderers<typeof DocsParams>("docs"),
     description:
       "Search a library's own documentation. Resolve the library name to an ID first, " +
       "then search with library set to that ID.",

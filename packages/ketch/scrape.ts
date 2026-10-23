@@ -2,10 +2,17 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { flag, positional, toggle } from "./args.ts";
 import { defined, heading, items, str } from "./fields.ts";
-import { ErrorOutput, errorResult, type KetchDetails, type Rendered, runJson } from "./result.ts";
+import { renderers } from "./render.ts";
+import {
+  DEFAULT_MAX_CHARS,
+  ErrorOutput,
+  errorResult,
+  type KetchDetails,
+  type Rendered,
+  runJson,
+} from "./result.ts";
 import type { Exec } from "./runner.ts";
 
-const DEFAULT_MAX_CHARS = 6000;
 const MAX_URLS = 20;
 const TIMEOUT_MS = 120_000;
 
@@ -63,6 +70,7 @@ export function createScrapeTool(exec: Exec): ToolDefinition<typeof ScrapeParams
   return {
     name: "ketch_scrape",
     label: "ketch scrape",
+    ...renderers<typeof ScrapeParams>("scrape"),
     description:
       `Fetch URLs as markdown, ${DEFAULT_MAX_CHARS} characters per page unless max_chars says otherwise. ` +
       "For crawls, raw HTML or a headless browser, run the ketch CLI with bash.",
