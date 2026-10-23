@@ -31,7 +31,8 @@ role guidance, an explicit extension allowlist, per-role loop skills, repair rou
 watchdog policy, controller recovery policy, controller command deadlines, and a shared system-prompt addition
 (see Customizing workers below). Workers always start with --no-skills and --no-extensions;
 only allowlisted extensions and curated loop skills named in the settings file are loaded.
-Default extensions are installed pi-claude-bridge (npm) and Ketch (git) packages under Pi's agent directory.
+Default extensions are the installed pi-claude-bridge package under Pi's agent directory and this
+workspace's Ketch tools package.
 
 This command trusts the project's Pi resources and runs setup/check commands with your privileges.
 It commits accepted work, pushes only its feature branch and opens one PR. It never merges.

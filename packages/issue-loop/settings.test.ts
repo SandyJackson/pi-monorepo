@@ -14,6 +14,7 @@ import {
   loadLoopSettings,
   materializeLoopSkills,
   validateLoopSkills,
+  WORKSPACE_KETCH,
 } from "./settings.js";
 import { installDefaultExtensions } from "./test-fixtures/extensions.ts";
 
@@ -77,7 +78,7 @@ describe("loadLoopSettings", () => {
     expect(settings).toEqual({
       extensions: [
         { path: path.join(agentDir, "npm", "node_modules", "pi-claude-bridge"), version: "1.2.3" },
-        { path: path.join(agentDir, "git", "github.com", "1broseidon", "ketch"), version: "1.2.3" },
+        { path: WORKSPACE_KETCH },
       ],
       implement: {
         agentName: "implement",
@@ -155,14 +156,7 @@ describe("loadLoopSettings", () => {
 
   it("enables codemode for every blessed role and Ketch only for research roles", () => {
     const settings = defaultLoopSettings();
-    const ketchTools = [
-      "ketch_search",
-      "ketch_code",
-      "ketch_docs",
-      "ketch_scrape",
-      "ketch_crawl",
-      "ketch_tag",
-    ];
+    const ketchTools = ["ketch_search", "ketch_code", "ketch_docs", "ketch_scrape"];
     for (const role of ["implement", "repair", "review", "describe"] as const) {
       expect(settings[role].tools).toContain("codemode");
       expect(settings[role].tools.filter((tool) => tool.startsWith("ketch_"))).toEqual(
@@ -180,10 +174,10 @@ describe("loadLoopSettings", () => {
     expect(settings.appendSystemPrompt).toBeUndefined();
   });
 
-  it("loads installed bridge and Ketch packages from PI_CODING_AGENT_DIR by default", () => {
+  it("loads the installed bridge and the workspace Ketch package by default", () => {
     const expected = [
       { path: path.join(agentDir, "npm", "node_modules", "pi-claude-bridge"), version: "1.2.3" },
-      { path: path.join(agentDir, "git", "github.com", "1broseidon", "ketch"), version: "1.2.3" },
+      { path: WORKSPACE_KETCH },
     ];
     expect(defaultLoopSettings().extensions).toEqual(expected);
     const settingsPath = writeSettingsDir({ "loop-settings.json": "{}" });
@@ -197,8 +191,8 @@ describe("loadLoopSettings", () => {
   });
 
   it("reports a missing default package without silently dropping it", () => {
-    fs.rmSync(path.join(agentDir, "git", "github.com", "1broseidon", "ketch"), { recursive: true });
-    expect(() => defaultLoopSettings()).toThrow(/Cannot load loop extension.*ketch/);
+    fs.rmSync(path.join(agentDir, "npm", "node_modules", "pi-claude-bridge"), { recursive: true });
+    expect(() => defaultLoopSettings()).toThrow(/Cannot load loop extension.*pi-claude-bridge/);
   });
 
   it("resolves extension paths and records package versions", () => {

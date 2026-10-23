@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, onTestFinished, vi } from "vitest";
 import { workerExtensionArgs } from "./pi-models.ts";
-import { defaultLoopSettings } from "./settings.ts";
+import { defaultLoopSettings, WORKSPACE_KETCH } from "./settings.ts";
 import { installDefaultExtensions } from "./test-fixtures/extensions.ts";
 
 it("loads codemode explicitly and disables MCP even without package extensions", async () => {
@@ -24,7 +24,7 @@ it("loads codemode explicitly and disables MCP even without package extensions",
     "--extension",
     join(root, "npm", "node_modules", "pi-claude-bridge", "index.js"),
     "--extension",
-    join(root, "git", "github.com", "1broseidon", "ketch", "index.js"),
+    join(WORKSPACE_KETCH, "index.ts"),
   ]);
   settings.extensions = [];
   expect(await workerExtensionArgs(settings)).toEqual([

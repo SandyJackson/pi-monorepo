@@ -8,7 +8,7 @@ We replace the upstream Ketch pi package (`git:github.com/1broseidon/ketch`) wit
 
 ## Considered options
 
-- **Upstream pi package, as is.** It has the fixed cost and the raw results. Its tools can't be re-registered from another extension because Pi keeps the first registration of a name.
+- **Upstream pi package, as is.** It has the fixed cost and the raw results. It can't be installed beside workspace tools of the same names, because Pi 1.3 refuses to load an extension that registers a name already taken.
 - **`ketch mcp serve` with `codemode` exposure.** This removes the fixed cost, but every tool's description is the upstream text, the results stay raw, and the TUI cards are lost. `deferred` exposure only delays the cost, since `tool_search` loads every matching Ketch tool fully declared.
 - **Slim tools that call the upstream tools through `ctx.executeTool`.** This still depends on the upstream schemas, and the upstream tools must stay registered.
 

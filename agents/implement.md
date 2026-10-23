@@ -1,7 +1,7 @@
 ---
 description: Implements a piece of code. Use this to implement chunks of a larger project. Give it enough context that it doesn't need to explore too much.
 display_name: Implement
-tools: write, edit, read, grep, find, ls, bash, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape, ketch_crawl, ketch_tag
+tools: write, edit, read, grep, find, ls, bash, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape
 model: claude-bridge/claude-opus-5-5
 thinking: medium
 ---

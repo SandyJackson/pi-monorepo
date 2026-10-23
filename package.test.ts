@@ -41,6 +41,7 @@ describe("Pi workspace package", () => {
     "@pi-workspace/herdr-contract",
     "@pi-workspace/herdr-subagent",
     "@pi-workspace/herdr-bridge",
+    "@pi-workspace/ketch",
     "@pi-workspace/session-auto-name",
     "@tmustier/pi-code-actions",
   ])("links %s through the workspace", (name) => {
@@ -53,6 +54,10 @@ describe("Pi workspace package", () => {
       expect(entry).toMatch(/\.ts$/);
       expect(statSync(resolve(root, entry)).isFile(), entry).toBe(true);
     }
+  });
+
+  it("ships the workspace Ketch tools", () => {
+    expect(manifest.pi.extensions).toContain("./packages/ketch/index.ts");
   });
 
   it("registers existing skill directories", () => {

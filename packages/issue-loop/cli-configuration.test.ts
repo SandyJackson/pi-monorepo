@@ -18,6 +18,7 @@ import {
   DEFAULT_REPAIR_ROUNDS,
   DEFAULT_WATCHDOG,
   DESCRIBE_TOOLS,
+  WORKSPACE_KETCH,
 } from "./settings.ts";
 
 cliTest(
@@ -45,10 +46,7 @@ cliTest(
           path: join(f.env.PI_CODING_AGENT_DIR, "npm", "node_modules", "pi-claude-bridge"),
           version: "1.2.3",
         },
-        {
-          path: join(f.env.PI_CODING_AGENT_DIR, "git", "github.com", "1broseidon", "ketch"),
-          version: "1.2.3",
-        },
+        { path: WORKSPACE_KETCH },
       ],
       implement: {
         agentName: "implement",

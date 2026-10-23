@@ -9,6 +9,7 @@ import {
   runDirFrom,
   writeLoopSettings,
 } from "./cli-fixture.ts";
+import { WORKSPACE_KETCH } from "./settings.ts";
 
 function installBridge(root: string): void {
   mkdirSync(join(root, "skills", "unselected"), { recursive: true });
@@ -27,24 +28,24 @@ function installBridge(root: string): void {
 }
 
 cliTest(
-  "starts with the installed default bridge and Ketch extensions without a settings file",
+  "starts with the installed bridge and the workspace Ketch extension without a settings file",
   async () => {
     const f = fixture();
     const bridge = join(f.env.PI_CODING_AGENT_DIR, "npm", "node_modules", "pi-claude-bridge");
-    const ketch = join(f.env.PI_CODING_AGENT_DIR, "git", "github.com", "1broseidon", "ketch");
+    const ketch = WORKSPACE_KETCH;
     f.env.FIXTURE_MODEL_EXTENSION = join(bridge, "index.js");
     const result = await f.start();
     expect(result.status, result.stderr).toBe(0);
     expect(readState(runDirFrom(result)).settings.extensions).toEqual([
       { path: bridge, version: "1.2.3" },
-      { path: ketch, version: "1.2.3" },
+      { path: ketch },
     ]);
     for (const worker of readWorkers(f.root)) {
       expect(worker.args).toContain("--no-extensions");
       expect(worker.args).toContain("--no-mcp");
       expect(worker.args).toContain("builtin:codemode");
       expect(worker.args).toContain(join(bridge, "index.js"));
-      expect(worker.args).toContain(join(ketch, "index.js"));
+      expect(worker.args).toContain(join(ketch, "index.ts"));
       expect(worker.args).not.toContain(bridge);
       expect(worker.args).not.toContain(ketch);
     }
@@ -56,13 +57,13 @@ cliTest(
   "reports a missing default package before creating a run",
   async () => {
     const f = fixture();
-    rmSync(join(f.env.PI_CODING_AGENT_DIR, "git", "github.com", "1broseidon", "ketch"), {
+    rmSync(join(f.env.PI_CODING_AGENT_DIR, "npm", "node_modules", "pi-claude-bridge"), {
       recursive: true,
     });
     const result = await f.start();
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Cannot load loop extension");
-    expect(result.stderr).toContain("ketch");
+    expect(result.stderr).toContain("pi-claude-bridge");
     expect(existsSync(join(f.root, ".pi-issue-loops"))).toBe(false);
     expect(existsSync(join(f.root, "workers.jsonl"))).toBe(false);
   },

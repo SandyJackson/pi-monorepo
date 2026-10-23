@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { expect, it } from "vitest";
 import { workerExtensionArgs } from "./pi-models.ts";
-import { defaultLoopSettings } from "./settings.ts";
+import { defaultLoopSettings, WORKSPACE_KETCH } from "./settings.ts";
 
 /**
  * Offline smoke against the installed Pi executable. Opt-in because the result
@@ -20,7 +20,7 @@ it.runIf(process.env.ISSUE_LOOP_PI_SMOKE === "1").each(["standalone", "loop"] as
     const sessionPath = join(root, "smoke.jsonl");
     const sessionName = "loop smoke · offline";
     const settings = defaultLoopSettings();
-    const ketch = settings.extensions!.find(({ path }) => path.endsWith("/ketch"))!;
+    const ketch = settings.extensions!.find(({ path }) => path === WORKSPACE_KETCH)!;
     settings.extensions = [ketch];
     const agentDir = join(root, "agent");
     mkdirSync(agentDir);
@@ -128,9 +128,7 @@ it.runIf(process.env.ISSUE_LOOP_PI_SMOKE === "1").each(["standalone", "loop"] as
       expect(registry.commands).not.toContain("mcp");
       expect(existsSync(mcpStarted)).toBe(false);
       expect(registry.active.filter((name: string) => name.startsWith("ketch_"))).toEqual(
-        mode === "loop"
-          ? ["ketch_search", "ketch_code", "ketch_docs", "ketch_scrape", "ketch_crawl", "ketch_tag"]
-          : [],
+        mode === "loop" ? ["ketch_search", "ketch_code", "ketch_docs", "ketch_scrape"] : [],
       );
       // Closing stdin requests an orderly shutdown.
       child.stdin.end();

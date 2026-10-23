@@ -1,6 +1,6 @@
 # Ketch CLI wrapper extension (proposal)
 
-Status: draft for review. Nothing is built yet. Decision recorded in [ADR-0010](../adr/0010-own-the-ketch-tools-and-skill.md).
+Status: implemented for [issue #53](https://github.com/SandyJackson/pi-monorepo/issues/53). This is the design record; where it and the code differ, the code and [ADR-0010](../adr/0010-own-the-ketch-tools-and-skill.md) are authoritative. See Implementation notes for what changed while building.
 
 ## Problem
 
@@ -12,7 +12,7 @@ The MCP route (`ketch mcp serve` with `codemode` exposure) hides the declaration
 
 Write our own extension that shells out to the `ketch` CLI. It doesn't wrap the upstream tools. It registers four small tools, each returning compact markdown to the model and typed JSON to codemode scripts.
 
-Uninstall the upstream pi package when this lands. Pi keeps the first registration of a tool name across extensions (`runner.js:getAllRegisteredTools`), so running both would be unpredictable. The upstream `ketch` skill ships in the same package and goes with it. A workspace skill replaces it (see Skill).
+Uninstall the upstream pi package when this lands. Pi 1.3 refuses to load an extension that registers a tool name another extension already holds, so the two packages can't both be installed. The upstream `ketch` skill ships in the same package and goes with it. A workspace skill replaces it (see Skill).
 
 ## Tool set
 
@@ -57,7 +57,7 @@ If the measured cost is still too high, switch to `exposure: "codemode"` with a 
 | Part | Source | Why |
 |---|---|---|
 | Process runner, exit-code mapping, kill and timeout handling | upstream `ketch.ts` (`runKetch`, `runCommand`) | handles ENOENT, abort and timeouts and classifies them |
-| Arg builders: `flag` (`--x=value`), `each` + `csvField`, `positional` (`--`), scrape URLs as one JSON array | upstream `ketch.ts` | prevents values parsed as flags, pflag CSV splitting of regexes, and subcommand names read as commands |
+| Arg builders: `flag` (`--x=value`), `positional` (`--`), scrape URLs as one JSON array | upstream `ketch.ts` | prevents values parsed as flags and subcommand names read as commands |
 | Arg builder tests | upstream `ketch.cli.test.ts`, arg parts of `ketch.test.ts` | pin the hardening |
 | Markdown formatters | `sovorn-c/pi-ketch` `src/format.ts` at `34fc3df` | compact results instead of raw JSON |
 | Truncation with temp-file spill | `sovorn-c/pi-ketch` `src/output.ts` | same pattern as Pi's `bash` |
@@ -85,7 +85,7 @@ Name and location: `skills/web-research/` at the repo root, exposed by the aggre
 Outline:
 1. Choosing a source: local files, then docs, then code, then web.
 2. Bounding page size.
-3. Corroborating with `multi`, and when to escalate to `ketch research`.
+3. Corroborating with `multi`, and the deep-research steps for a multi-part or disputed question.
 4. Citing.
 5. Crawl and tags through the CLI.
 6. One line per CLI verb, with `ketch <cmd> --help` for flags.
@@ -145,7 +145,32 @@ Captured 2026-10-22 with Pi 1.3.0, the upstream package at `2ffbadf`, and `ketch
 
 The upstream `ketch_scrape` returns that stdout as its content, so the uncapped figure is what the model receives. At roughly four characters per token, the declarations are about 2.9k tokens per request and the uncapped page is about 17k tokens. These are estimates, not tokenizer counts.
 
-After building, repeat the same capture with the workspace extension and record it in the PR.
+### After
+
+Captured 2026-10-23 the same way, with Pi 1.3.0 and only codemode and the workspace extension loaded.
+
+| Tool | Upstream | Workspace |
+|---|---|---|
+| `ketch_search` | 2,493 | 1,235 |
+| `ketch_code` | 1,558 | 950 |
+| `ketch_docs` | 1,546 | 1,135 |
+| `ketch_scrape` | 2,251 | 1,067 |
+| `ketch_crawl`, `ketch_tag` | 3,830 | not registered |
+| **Total** | **11,678** | **4,387** |
+
+Tool snippets in the system prompt fell from 549 to about 230 characters. A scrape of the same Python asyncio page returns at most 6,000 characters of page body by default, against 67,598 before.
+
+## Implementation notes
+
+What changed from the design above while building:
+
+- **Tool-name conflicts are fatal.** Pi 1.3 fails to load the second extension (`Tool "ketch_scrape" conflicts with ...`), rather than keeping the first registration.
+- **`outputSchema` adds to the declaration.** While codemode is active, Pi appends each direct tool's codemode return type to its description, about 330 characters for `ketch_scrape`.
+- **No CSV quoting.** None of the four tools sends a list flag, so `each` and `csvField` weren't ported. `multi` joins backend names with commas, and the tool rejects a name that isn't a plain identifier.
+- **Batch failures arrive on stderr.** `ketch scrape` reports a failed URL in a batch as a `warn:` line, not as an entry in the JSON, so the tools return those as `warnings`.
+- **`ketch research` is not a CLI command.** It was a workflow in upstream's skill; `web-research` describes the steps instead.
+- **The issue loop loads this package by path.** Workers start with `--no-extensions`, so the loop's default extension list points at `packages/ketch`, which carries a `pi.extensions` manifest. The loop no longer needs the upstream package installed.
+
 
 ## Open questions
 

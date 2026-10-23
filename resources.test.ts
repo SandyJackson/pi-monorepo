@@ -22,6 +22,17 @@ it("resolves code-review to the workspace skill", () => {
   );
 });
 
+it("resolves web-research to the workspace skill", () => {
+  const { skills } = loadSkills({
+    cwd: ROOT,
+    skillPaths: manifest.pi.skills,
+    includeDefaults: false,
+  });
+  expect(skills.find((skill) => skill.name === "web-research")?.filePath).toBe(
+    path.join(ROOT, "skills/web-research/SKILL.md"),
+  );
+});
+
 function findSkillFiles(directory: string): string[] {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     if (entry.name.startsWith(".") || !entry.isDirectory()) return [];
@@ -55,7 +66,7 @@ describe("agent tool provisioning", () => {
       const searchTools = agent.tools?.filter((tool) => tool.startsWith("ketch_"));
       expect(searchTools).toEqual(
         ["docs-researcher", "explain", "implement", "code-reviewer"].includes(agent.name)
-          ? ["ketch_search", "ketch_code", "ketch_docs", "ketch_scrape", "ketch_crawl", "ketch_tag"]
+          ? ["ketch_search", "ketch_code", "ketch_docs", "ketch_scrape"]
           : [],
       );
     },

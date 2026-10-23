@@ -1,6 +1,6 @@
 ---
 description: Loop review worker. Independently reviews one ticket's patch against its requirements across the code-review axes, using commands as evidence but never editing.
-tools: read, grep, find, ls, bash, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape, ketch_crawl, ketch_tag
+tools: read, grep, find, ls, bash, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape
 model: openai-codex/gpt-6.1-sol
 thinking: high
 ---
