@@ -234,6 +234,24 @@ it("does not select branch changes when only a remote branch is deleted", () => 
   ).toBe("fast");
 });
 
+it("ignores pushed tags that do not point at the checkout", () => {
+  const f = fixture();
+  f.git("tag", "-a", "v1", "-m", "Release", f.base);
+  const tag = f.git("rev-parse", "v1");
+  f.write("packages/session-auto-name/index.ts", "export const changed = true;\n");
+  f.commit();
+  const plan = f.plan(["--pre-push"], `refs/tags/v1 ${tag} refs/tags/v1 ${"0".repeat(40)}\n`);
+  expect(plan.scope).toBe("fast");
+});
+
+it("checks a branch pushed from a non-branch local ref", () => {
+  const f = fixture();
+  f.write("packages/issue-loop/index.ts", "export const changed = true;\n");
+  const head = f.commit();
+  const plan = f.plan(["--pre-push"], `HEAD ${head} refs/heads/work ${"0".repeat(40)}\n`);
+  expect(plan.scope).toBe("affected");
+});
+
 it("refuses malformed pre-push input", () => {
   const f = fixture();
   const result = f.run(["--pre-push"], "not a git update\n");

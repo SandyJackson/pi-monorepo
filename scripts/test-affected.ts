@@ -85,13 +85,15 @@ function changes(root: string, explicitBase: string | undefined, pushInput: stri
     const head = git(root, "rev-parse", "HEAD").trim();
     for (const line of pushInput.trim().split("\n")) {
       const fields = line.trim().split(/\s+/);
-      const [, local, , remote] = fields;
+      const [, local, remoteRef, remote] = fields;
       if (
         fields.length !== 4 ||
         ![local, remote].every((oid) => /^[a-f\d]{40}(?:[a-f\d]{24})?$/i.test(oid))
       )
         throw new Error("Malformed pre-push ref update");
-      if (/^0+$/.test(local)) continue;
+      // Only branch updates carry code to check; tags may point at any commit.
+      // The local ref can be HEAD or a commit, so classify by the remote ref.
+      if (/^0+$/.test(local) || !remoteRef.startsWith("refs/heads/")) continue;
       const commit = git(root, "rev-parse", "--verify", `${local}^{commit}`).trim();
       if (commit !== head)
         throw new Error(
