@@ -9,6 +9,9 @@ import { basename, dirname, join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type ParsedAgentFile, parseAgentFileContent } from "@pi-workspace/herdr-subagent/agents";
 
+/** The workspace's Ketch tools package, which ships beside the issue loop. */
+export const WORKSPACE_KETCH = resolve(import.meta.dirname, "..", "ketch");
+
 /** Tool allowlist used when the implement or repair agent file omits `tools`. */
 export const DEFAULT_IMPLEMENT_TOOLS = [
   "read",
@@ -23,8 +26,6 @@ export const DEFAULT_IMPLEMENT_TOOLS = [
   "ketch_code",
   "ketch_docs",
   "ketch_scrape",
-  "ketch_crawl",
-  "ketch_tag",
 ];
 
 /** Tool allowlist used when the review agent file omits `tools`. */
@@ -39,8 +40,6 @@ export const DEFAULT_REVIEW_TOOLS = [
   "ketch_code",
   "ketch_docs",
   "ketch_scrape",
-  "ketch_crawl",
-  "ketch_tag",
 ];
 
 /** Thinking levels accepted in an agent file's `thinking` field (Pi's `--thinking` set). */
@@ -254,10 +253,7 @@ function readSkills(role: Role, field: string, settingsPath: string, value: unkn
 
 function readExtensions(settingsPath: string, value: unknown): LoopExtension[] {
   if (value === undefined)
-    value = [
-      resolve(getAgentDir(), "npm", "node_modules", "pi-claude-bridge"),
-      resolve(getAgentDir(), "git", "github.com", "1broseidon", "ketch"),
-    ];
+    value = [resolve(getAgentDir(), "npm", "node_modules", "pi-claude-bridge"), WORKSPACE_KETCH];
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim()))
     throw new Error(`"extensions" in ${settingsPath} must be an array of non-empty file paths`);
   return value.map((ref: string) => {

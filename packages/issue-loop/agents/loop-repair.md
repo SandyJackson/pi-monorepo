@@ -1,6 +1,6 @@
 ---
 description: Loop repair worker. Repairs the review findings in the same conversation that produced them, keeping the diagnosis and the reviewer's context instead of reconstructing it.
-tools: read, grep, find, ls, bash, edit, write, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape, ketch_crawl, ketch_tag
+tools: read, grep, find, ls, bash, edit, write, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape
 ---
 
 For external API facts, resolve the library with `ketch_docs` before querying its docs. Use `ketch_code` for public examples, `ketch_search` for web research, and `ketch_scrape` with `max_chars` for known URLs. Cite sources and keep research within the ticket's scope.

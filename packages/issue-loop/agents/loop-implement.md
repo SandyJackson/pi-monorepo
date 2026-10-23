@@ -1,6 +1,6 @@
 ---
 description: Loop implementation worker. Implements one ticket against its requirements using the tdd, diagnosing-bugs, and deslop loop skills, with a bias toward the shortest correct diff.
-tools: read, grep, find, ls, bash, edit, write, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape, ketch_crawl, ketch_tag
+tools: read, grep, find, ls, bash, edit, write, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape
 model: claude-bridge/claude-opus-5-5
 thinking: medium
 ---

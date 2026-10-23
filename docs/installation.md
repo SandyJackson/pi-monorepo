@@ -8,7 +8,7 @@ It supports two installation modes: **local development** (symlink) and **GitHub
 - Node.js >= 22
 - pnpm (for local development only; Pi bundles its own pnpm)
 - Git (for GitHub installation)
-- [Ketch](https://github.com/1broseidon/ketch) and its Pi package for agents that need external research
+- The [Ketch](https://github.com/1broseidon/ketch) CLI on PATH, for agents that do external research
 
 ## Local Development Installation
 
@@ -68,17 +68,19 @@ pi update             # pulls latest default branch for all installed packages
 /reload               # applies changes to the running session
 ```
 
-## Ketch external dependency
+## Ketch CLI
 
-Install the Ketch CLI using its [installation instructions](https://github.com/1broseidon/ketch#installation), then install its Pi package alongside this workspace:
+The workspace's own Ketch package registers `ketch_search`, `ketch_code`, `ketch_docs` and `ketch_scrape`, and runs the `ketch` CLI for each call. Install the CLI using its [installation instructions](https://github.com/1broseidon/ketch#installation); nothing else is needed. Crawls, bookmarks and the other options these tools leave out go through the CLI directly, as the `web-research` skill describes. [ADR-0010](adr/0010-own-the-ketch-tools-and-skill.md) explains why the workspace owns these tools.
+
+If you previously installed Ketch's own Pi package, remove it. Both packages register `ketch_scrape` and the other tool names, and Pi 1.3 refuses to load an extension whose tool name is already taken:
 
 ```bash
-pi install git:github.com/1broseidon/ketch
+pi remove git:github.com/1broseidon/ketch
 ```
 
-The `docs-researcher`, `explain`, `implement`, and `code-reviewer` agents allow all six `ketch_*` tools. The codebase analyser and refactor agent use local evidence only. All workspace agents explicitly enable the built-in `codemode` tool, including agents with restricted tool lists. Use a Pi version that provides `codemode`.
+The `docs-researcher`, `explain`, `implement`, and `code-reviewer` agents allow the four `ketch_*` tools. `explain` has no `bash`, so it cannot crawl or bookmark; use `docs-researcher` for that. The codebase analyser and refactor agent use local evidence only. All workspace agents explicitly enable the built-in `codemode` tool, including agents with restricted tool lists. Use a Pi version that provides `codemode`.
 
-Ordinary subagents inherit Pi's globally loaded extensions but disable built-in MCP support with `--no-mcp`, so codemode cannot expose tools from configured MCP servers. Agent frontmatter does not select extensions; the `tools` field selects registered tools. Ketch is maintained separately and is not vendored or republished by this workspace. The issue loop has its own explicit extension defaults; see its [provider extensions](../packages/issue-loop/README.md#provider-extensions).
+Ordinary subagents inherit Pi's globally loaded extensions but disable built-in MCP support with `--no-mcp`, so codemode cannot expose tools from configured MCP servers. Agent frontmatter does not select extensions; the `tools` field selects registered tools. The issue loop has its own explicit extension defaults; see its [provider extensions](../packages/issue-loop/README.md#provider-extensions).
 
 ## Agent Setup
 
@@ -102,8 +104,8 @@ The workspace exposes these resources through its `package.json`:
 
 | Resource type | Entry point | Contents |
 |---|---|---|
-| Extensions | `pi.extensions` array | 5 child packages (bash-permission, herdr-subagent, herdr-bridge, session-auto-name, herdr-contract) |
-| Skills | `pi.skills` array | `skills/` directory with 23 skills |
+| Extensions | `pi.extensions` array | 6 child packages (herdr-subagent, herdr-bridge, session-auto-name, code-actions, worktree-trust, ketch) |
+| Skills | `pi.skills` array | `skills/` directory with 35 skills |
 | Agents | `agents/` directory | Workspace definitions discovered by herdr-subagent |
 | Documentation | `docs/` directory | Bash policy, agent discovery, installation guide |
 

@@ -1,7 +1,7 @@
 ---
 description: Independent, read-only code review following the code-review skill
 display_name: Code Reviewer
-tools: read, grep, find, ls, bash, subagent, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape, ketch_crawl, ketch_tag
+tools: read, grep, find, ls, bash, subagent, codemode, ketch_search, ketch_code, ketch_docs, ketch_scrape
 model: openai-codex/gpt-6.1-sol
 thinking: high
 timeout: 90

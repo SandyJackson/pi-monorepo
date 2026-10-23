@@ -5,7 +5,6 @@ import { join } from "node:path";
 export function installDefaultExtensions(agentDir: string): void {
   for (const [name, root] of [
     ["pi-claude-bridge", join(agentDir, "npm", "node_modules", "pi-claude-bridge")],
-    ["ketch-pi", join(agentDir, "git", "github.com", "1broseidon", "ketch")],
   ]) {
     mkdirSync(root, { recursive: true });
     writeFileSync(join(root, "index.js"), "export default () => {};\n");
