@@ -116,6 +116,28 @@ it("escalates immediately on another interrupt while descendant cleanup is pendi
   expect(vi.getTimerCount()).toBe(0);
 });
 
+it("settles when signalling an exited but unreaped command group reports EPERM", async () => {
+  const child = runningChild();
+  // macOS reports EPERM, not ESRCH, for a process group whose members have all
+  // exited but not been reaped, e.g. when the deadline fires as the leader exits.
+  const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+    if (signal === "SIGTERM") queueMicrotask(() => child.emit("close", 0, null));
+    throw Object.assign(new Error("kill EPERM"), { code: "EPERM", syscall: "kill" });
+  });
+  const stopped = expect(
+    command("test-command", [], { cwd: ".", timeoutMs: 100 }),
+  ).rejects.toMatchObject({
+    name: "CommandStoppedError",
+    message: "Timed out running test-command\n",
+  });
+  await vi.advanceTimersByTimeAsync(100);
+  await vi.advanceTimersByTimeAsync(2_000);
+  await stopped;
+  expect(kill).toHaveBeenCalledWith(-child.pid, "SIGTERM");
+  expect(kill).toHaveBeenCalledWith(-child.pid, "SIGKILL");
+  expect(vi.getTimerCount()).toBe(0);
+});
+
 it("escalates a stubborn timed-out command to SIGKILL using virtual time", async () => {
   const child = runningChild();
   const kill = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
