@@ -1,14 +1,9 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { flag, positional, toggle } from "./args.ts";
-import {
-  ErrorOutput,
-  errorResult,
-  type KetchDetails,
-  successResult,
-  warningsBlock,
-} from "./result.ts";
-import { type Exec, runKetch, warningsOf } from "./runner.ts";
+import { defined, heading, items, str } from "./fields.ts";
+import { ErrorOutput, errorResult, type KetchDetails, type Rendered, runJson } from "./result.ts";
+import type { Exec } from "./runner.ts";
 
 const DEFAULT_MAX_CHARS = 6000;
 const MAX_URLS = 20;
@@ -50,7 +45,6 @@ const ScrapeOutput = Type.Object({
 });
 
 type ScrapePage = Static<typeof ScrapePage>;
-type ScrapeOutput = Static<typeof ScrapeOutput>;
 
 /**
  * The URLs always travel as one JSON-array argument: the CLI reads a lone
@@ -72,7 +66,7 @@ export function createScrapeTool(exec: Exec): ToolDefinition<typeof ScrapeParams
     description:
       `Fetch URLs as markdown, ${DEFAULT_MAX_CHARS} characters per page unless max_chars says otherwise. ` +
       "For crawls, raw HTML or a headless browser, run the ketch CLI with bash.",
-    promptSnippet: "ketch_scrape to read a page when you already have its URL",
+    promptSnippet: "Read a page when you already have its URL",
     parameters: ScrapeParams,
     outputSchema: Type.Union([ScrapeOutput, ErrorOutput]),
     async execute(_id, p, signal) {
@@ -82,45 +76,29 @@ export function createScrapeTool(exec: Exec): ToolDefinition<typeof ScrapeParams
       if (single && batch.length > 0) {
         return errorResult("validation", "give url or urls, not both");
       }
-      const r = await runKetch(exec, scrapeArgs(p, single ? [single] : batch), signal, TIMEOUT_MS);
-      if (!r.ok) return errorResult(r.kind, r.message);
-
-      const pages = parsePages(r.stdout);
-      if (!pages) return errorResult("upstream", "ketch scrape returned output that isn't JSON");
-      const warnings = warningsOf(r.stderr);
-      const output: ScrapeOutput = warnings.length > 0 ? { pages, warnings } : { pages };
-      return successResult(formatPages(pages) + warningsBlock(warnings), output);
+      const urls = single ? [single] : batch;
+      return runJson(exec, scrapeArgs(p, urls), signal, TIMEOUT_MS, render);
     },
   };
 }
 
-/** One URL prints an object, several print an array. */
-function parsePages(stdout: string): ScrapePage[] | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return undefined;
-  }
-  const items = Array.isArray(parsed) ? parsed : [parsed];
-  return items.map((item) => {
-    const raw = (item ?? {}) as Record<string, unknown>;
-    const page: ScrapePage = {
-      url: String(raw.url ?? ""),
-      markdown: typeof raw.markdown === "string" ? raw.markdown : "",
-    };
-    if (typeof raw.title === "string" && raw.title) page.title = raw.title;
-    return page;
-  });
-}
-
-function formatPages(pages: ScrapePage[]): string {
-  if (pages.length === 0) return "No pages were fetched.";
-  return pages
-    .map((page, i) => {
-      const label = page.title ?? page.url;
-      const heading = pages.length > 1 ? `${i + 1}. ${label}` : label;
-      return `## [${heading}](${page.url})\n\n${page.markdown}`;
-    })
-    .join("\n\n");
+function render(json: unknown): Rendered {
+  const pages = items(json).map(
+    (raw): ScrapePage =>
+      defined({
+        url: str(raw, "url") ?? "",
+        title: str(raw, "title"),
+        markdown: str(raw, "markdown") ?? "",
+      }),
+  );
+  const text =
+    pages.length === 0
+      ? "No pages were fetched."
+      : pages
+          .map(
+            (page, i) =>
+              `${heading(page.title ?? page.url, page.url, i, pages.length)}\n\n${page.markdown}`,
+          )
+          .join("\n\n");
+  return { text, output: { pages } };
 }

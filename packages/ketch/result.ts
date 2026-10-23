@@ -13,7 +13,7 @@ import {
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ErrorKind } from "./runner.ts";
+import { type ErrorKind, type Exec, runKetch, warningsOf } from "./runner.ts";
 
 // Said once per error instead of in every tool description.
 const MEANING: Record<ErrorKind, string> = {
@@ -62,7 +62,7 @@ export function errorResult(kind: ErrorKind, message: string): KetchResult {
  * Caps `text` at Pi's default output limits. When it is cut, the full text is
  * written to a temp file and the visible text ends with a note naming it.
  */
-export async function successResult(text: string, structured: Structured): Promise<KetchResult> {
+async function successResult(text: string, structured: Structured): Promise<KetchResult> {
   const details: KetchDetails = { result: structured };
   const truncation = truncateHead(text, {
     maxBytes: DEFAULT_MAX_BYTES,
@@ -85,6 +85,35 @@ export async function successResult(text: string, structured: Structured): Promi
   };
 }
 
-export function warningsBlock(warnings: string[]): string {
-  return warnings.length === 0 ? "" : `\n\nWarnings:\n${warnings.map((w) => `- ${w}`).join("\n")}`;
+export interface Rendered {
+  text: string;
+  output: { [key: string]: Structured };
+}
+
+/**
+ * Runs a ketch command that prints JSON and renders the parsed value. Warnings
+ * on stderr, such as one URL of a batch failing, are added to both views.
+ */
+export async function runJson(
+  exec: Exec,
+  args: string[],
+  signal: AbortSignal | undefined,
+  timeout: number,
+  render: (json: unknown) => Rendered,
+): Promise<KetchResult> {
+  const r = await runKetch(exec, args, signal, timeout);
+  if (!r.ok) return errorResult(r.kind, r.message);
+  let json: unknown;
+  try {
+    json = JSON.parse(r.stdout);
+  } catch {
+    return errorResult("upstream", `ketch ${args[0]} returned output that isn't JSON`);
+  }
+  const { text, output } = render(json);
+  const warnings = warningsOf(r.stderr);
+  if (warnings.length === 0) return successResult(text, output);
+  return successResult(`${text}\n\nWarnings:\n${warnings.map((w) => `- ${w}`).join("\n")}`, {
+    ...output,
+    warnings,
+  });
 }

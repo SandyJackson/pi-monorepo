@@ -1,30 +1,10 @@
 import { readFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
-import { Value } from "typebox/value";
-import { describe, expect, it, vi } from "vitest";
-import type { KetchResult } from "./result.ts";
-import type { Exec, ExecResult } from "./runner.ts";
+import { describe, expect, it } from "vitest";
 import { createScrapeTool } from "./scrape.ts";
+import { failed, ok, setup as setupTool, text } from "./test-support.ts";
 
-function ok(stdout: unknown, stderr = ""): ExecResult {
-  return { stdout: JSON.stringify(stdout), stderr, code: 0, killed: false };
-}
-
-function failed(code: number, stderr: string): ExecResult {
-  return { stdout: "", stderr, code, killed: false };
-}
-
-function setup(result: ExecResult | (() => Promise<ExecResult>)) {
-  const exec = vi.fn<Exec>(typeof result === "function" ? result : async () => result);
-  const tool = createScrapeTool(exec);
-  const run = (params: Parameters<typeof tool.execute>[1]) =>
-    tool.execute("call", params, undefined, undefined, {} as never);
-  const argv = () => exec.mock.calls[0]?.[1];
-  const conforms = (r: KetchResult) => Value.Check(tool.outputSchema!, r.structuredContent);
-  return { exec, run, argv, conforms };
-}
-
-const text = (r: KetchResult) => (r.content[0] as { text: string }).text;
+const setup = (result: Parameters<typeof setupTool>[1]) => setupTool(createScrapeTool, result);
 
 const page = { url: "https://example.com/a", title: "Page A", markdown: "# A\n\nBody." };
 
@@ -141,6 +121,15 @@ describe("ketch_scrape", () => {
     const r = await run({ url: "https://example.com/a" });
 
     expect(r.structuredContent).toMatchObject({ error: { kind: "upstream" } });
+  });
+
+  it("treats a null payload as no pages", async () => {
+    const { run, conforms } = setup(ok(null));
+    const r = await run({ url: "https://example.com/a" });
+
+    expect(text(r)).toBe("No pages were fetched.");
+    expect(r.structuredContent).toEqual({ pages: [] });
+    expect(conforms(r)).toBe(true);
   });
 
   it("truncates oversized output and spills the full text to a file", async () => {
