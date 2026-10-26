@@ -30,6 +30,12 @@ A child Pi agent operating in a Herdr-managed pane, where its work remains obser
 **Visible subagent session**:
 The persistent Pi session hosting a visible subagent. A session may outlive an individual delegated task and support later turns.
 
+**Subagent inspection float**:
+An on-demand, interactive view of a running child Pi session in a tmux floating pane, explicitly not a tmux popup. Dismissing the view leaves the child running; exiting Pi inside the view ends the child process.
+_Avoid_: Subagent popup, inspection popup
+
+Tmux distinguishes floating panes from popups in its [3.8 release discussion](https://github.com/tmux/tmux/issues/5584).
+
 **Subagent delegation**:
 A request from a parent Pi session to execute one or more delegated tasks as visible subagents. The delegation is distinct from each individual task it contains.
 
@@ -41,6 +47,19 @@ The one-based position assigned once to a delegated task within its subagent del
 
 **Delegated task outcome**:
 The single terminal result of a delegated task, such as completion, timeout, abort, session closure, or an execution failure. Outcomes retain the order and delegated task numbers of their tasks.
+
+**Subagent request**:
+One instruction assigned to a child conversation, either as its initial delegated task or as a follow-up. Its identity is independent of the child process and of any attempt to retrieve its result.
+
+**Subagent request result**:
+The recorded terminal completion or failure of one subagent request. It is distinct from a parent's timeout or cancellation while trying to obtain it.
+_Avoid_: Request response
+
+**Subagent retrieval outcome**:
+The outcome of one attempt to obtain a subagent request result, including successful retrieval, timeout, cancellation, or unavailability. Ending retrieval does not itself end the child's work.
+
+**Subagent report**:
+A child-authored message to its owning parent, separate from the result of an assigned request. Sending a report does not complete a request or establish that the parent has read it.
 
 **Bash policy**:
 The versioned set of rules that determines whether a bash command is allowed, requires approval, or is denied for the workspace and its agents.
