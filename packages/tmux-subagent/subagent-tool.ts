@@ -21,7 +21,8 @@ import {
   type ExecuteDelegation,
   MAX_DELEGATED_TASKS,
 } from "./parent.ts";
-import { readAnswer } from "./pi-session.ts";
+import { readAnswer, type SessionAnswerRef } from "./pi-session.ts";
+import type { RequestRef } from "./store.ts";
 
 const TaskItem = Type.Object(
   {
@@ -102,6 +103,34 @@ const STILL_WORKING = "The child is still working on the request; nothing was st
 const OPERATOR_NOTE =
   "The operator also interacted with this child during the request; the answer may address their input.";
 
+/** How the model keeps waiting on a request whose wait ended early. */
+export function retrieveHint(request: RequestRef): string {
+  return `Use subagent_retrieve with childId ${request.childId} and requestId ${request.requestId} to keep waiting.`;
+}
+
+/** The `Child <childId>, request <requestId>` line every referenced outcome starts with. */
+export function withReference(request: RequestRef, body: string): string {
+  return `Child ${request.childId}, request ${request.requestId}\n\n${body}`;
+}
+
+/** A completed request's answer, resolved from its reference at presentation time. */
+export function completedText(
+  answerRef: SessionAnswerRef | null,
+  humanIntervened: boolean,
+): string {
+  const answer = answerRef ? readAnswer(answerRef) : null;
+  const text =
+    answer === null ? "The request completed without a final answer." : truncateAnswer(answer);
+  return humanIntervened ? `${OPERATOR_NOTE}\n\n${text}` : text;
+}
+
+export function failedText(reason: "error" | "interrupted" | "superseded", error: string): string {
+  const text = `Request failed (${reason}): ${error}`;
+  return reason === "interrupted"
+    ? `${text}\nNo result was recorded. The child may have made changes. The request will not be retried automatically.`
+    : text;
+}
+
 function truncateAnswer(answer: string): string {
   const truncation = truncateHead(answer, {
     maxBytes: DEFAULT_MAX_BYTES,
@@ -124,28 +153,20 @@ function outcomeBody(
   switch (outcome.status) {
     case "invalid":
       return outcome.error;
-    case "completed": {
-      const answer = outcome.answer ? readAnswer(outcome.answer) : null;
-      const text =
-        answer === null ? "The request completed without a final answer." : truncateAnswer(answer);
-      return outcome.humanIntervened ? `${OPERATOR_NOTE}\n\n${text}` : text;
-    }
-    case "failed": {
-      const text = `Request failed (${outcome.reason}): ${outcome.error}`;
-      return outcome.reason === "interrupted"
-        ? `${text}\nNo result was recorded. The child may have made changes. The request will not be retried automatically.`
-        : text;
-    }
+    case "completed":
+      return completedText(outcome.answer, outcome.humanIntervened);
+    case "failed":
+      return failedText(outcome.reason, outcome.error);
     case "timed_out": {
       const timeoutMs = "timeoutMs" in task ? task.timeoutMs : undefined;
       const timeoutMinutes =
         timeoutMs !== undefined ? timeoutMs / 60_000 : DEFAULT_TURN_TIMEOUT_MINUTES;
-      return `The wait timed out after ${minutes(timeoutMinutes)}. ${STILL_WORKING}`;
+      return `The wait timed out after ${minutes(timeoutMinutes)}. ${STILL_WORKING} ${retrieveHint(outcome.request)}`;
     }
     case "aborted":
       return outcome.stage === "before_launch"
         ? "The delegated task was aborted before launch. No child was created."
-        : `The wait was aborted. ${STILL_WORKING}`;
+        : `The wait was aborted. ${STILL_WORKING} ${retrieveHint(outcome.request)}`;
     case "session_closed":
       return "The child stopped before recording a result for this request. It may have made changes.";
     case "launch_failed":
@@ -165,8 +186,7 @@ function outcomeText(
   outcome: TaskResult["outcome"],
 ): string {
   const body = outcomeBody(task, outcome);
-  if (!("request" in outcome)) return body;
-  return `Child ${outcome.request.childId}, request ${outcome.request.requestId}\n\n${body}`;
+  return "request" in outcome ? withReference(outcome.request, body) : body;
 }
 
 interface CreateSubagentToolOptions {

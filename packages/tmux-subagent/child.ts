@@ -118,7 +118,19 @@ export function startChildBridge(
     for (const requestId of store.listRequestIds(childId)) {
       const request = { childId, requestId };
       if (store.readResult(request)) continue;
-      return store.readRequest(request);
+      try {
+        // Absent means the parent has not renamed it into place yet: keep the order.
+        return store.readRequest(request);
+      } catch (error) {
+        // An unreadable request can never run; settle it so the parent sees why
+        // and later requests are not blocked behind it.
+        settle(request, {
+          status: "failed",
+          reason: "error",
+          error: `The child could not read the request: ${error instanceof Error ? error.message : String(error)}`,
+          humanIntervened: false,
+        });
+      }
     }
     return undefined;
   }

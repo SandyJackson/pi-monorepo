@@ -1,7 +1,8 @@
 /**
  * End to end: a real Pi with only this extension delegates two tasks to two
  * agents, each child runs in a real tmux session on a disposable socket, and
- * the parent gets both answers back in order.
+ * the parent gets both answers back in order. A follow-up to one child after
+ * it has drained and exited resumes the saved conversation.
  *
  * The model is a local mock OpenAI-compatible endpoint (no credentials): the
  * parent's model calls `subagent` when asked to DELEGATE, each child's model
@@ -17,8 +18,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getPackageDir } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, expect, it } from "vitest";
+import { clearDrain, createParentRuntime } from "./parent.ts";
 import { readAnswer } from "./pi-session.ts";
 import { createStore } from "./store.ts";
+import { createTmuxExec } from "./tmux.ts";
 
 const hasTmux = (() => {
   try {
@@ -223,8 +226,57 @@ it.skipIf(!hasTmux)(
 
     // Idle and unattached, each drained child exits; with it the private server goes.
     await expect.poll(() => liveSessions(), { timeout: 15_000, interval: 250 }).toEqual([]);
+
+    // The parent returns, cancelling its departure; a follow-up to a stopped
+    // child resumes its saved conversation and answers.
+    const [alphaId] = childIds;
+    const parentSessionId = store.readChild(alphaId).parent.sessionId;
+    expect(clearDrain({ parentSessionId, store })).toMatchObject({ failed: [] });
+    expect(store.hasDrain(alphaId)).toBe(false);
+    const runtime = createParentRuntime({
+      parentSessionId,
+      parentCwd: projectDir,
+      isProjectTrusted: () => true,
+      sendReport: () => {},
+      deliveredReports: new Set(),
+      isIdle: () => false,
+      store,
+      tmux: createTmuxExec(socket),
+    });
+    const launcherEnv = { ...process.env };
+    Object.assign(process.env, { PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" });
+    let asked: Awaited<ReturnType<typeof runtime.ask>>;
+    try {
+      asked = await runtime.ask(alphaId, "say AGAIN", { timeoutMs: 60_000 });
+    } finally {
+      process.env = launcherEnv;
+      runtime.dispose();
+    }
+    const followUp = { childId: alphaId, requestId: "r2" };
+    if (asked.status === "rejected") throw new Error(`ask rejected: ${asked.error}`);
+    expect(asked).toMatchObject({
+      status: "submitted",
+      request: followUp,
+      retrieval: { status: "settled", result: { status: "completed" } },
+    });
+    const followUpResult = store.readResult(followUp);
+    if (followUpResult?.phase !== "settled" || followUpResult.result.status !== "completed") {
+      throw new Error("follow-up did not complete");
+    }
+    const followUpAnswer = followUpResult.result.answer;
+    expect(followUpAnswer && readAnswer(followUpAnswer)).toBe("ECHO: say AGAIN");
+    // The same conversation: the first answer is still in the one session file.
+    expect(fs.readdirSync(path.join(store.childDir(alphaId), "session"))).toHaveLength(1);
+    expect(fs.readFileSync(followUpAnswer?.path ?? "", "utf8")).toContain("ECHO: say ALPHA");
+
+    const retrieved = await runtime.retrieveResult(followUp, { timeoutMs: 1_000 });
+    expect(retrieved).toEqual({
+      status: "settled",
+      request: followUp,
+      result: followUpResult.result,
+    });
   },
-  120_000,
+  180_000,
 );
 
 function liveSessions(): string[] {

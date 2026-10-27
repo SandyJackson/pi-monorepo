@@ -193,6 +193,29 @@ describe("child bridge dispatch and settlement", () => {
     expect(fake.sent.map((sent) => sent.text)).toEqual(["First", "Second"]);
   });
 
+  it("settles an unreadable request as failed without sending it, then dispatches the next", async () => {
+    store.createRequest(child.childId, "Corrupt");
+    store.createRequest(child.childId, "Second");
+    fs.writeFileSync(
+      path.join(store.childDir(child.childId), "requests", "r1", "request.json"),
+      "{",
+    );
+    await start();
+
+    await nextPoll();
+    expect(store.readResult(ref("r1"))).toMatchObject({
+      phase: "settled",
+      result: {
+        status: "failed",
+        reason: "error",
+        error: expect.stringContaining("request.json"),
+        humanIntervened: false,
+      },
+    });
+    await nextPoll();
+    expect(fake.sent.map((sent) => sent.text)).toEqual(["Second"]);
+  });
+
   it("waits while Pi is busy, has pending messages, or shows a UI prompt", async () => {
     store.createRequest(child.childId, "Later");
     await start();

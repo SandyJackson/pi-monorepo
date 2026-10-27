@@ -296,6 +296,49 @@ describe("parent departure", () => {
     expect(logged).toHaveBeenCalledWith(expect.stringContaining(corrupt));
     logged.mockRestore();
   });
+
+  it("registers the follow-up tools, which refuse another parent's child", async () => {
+    const store = createStore(path.join(path.dirname(userAgentsDir), "subagents"));
+    const foreign = store.createChild(
+      {
+        parent: { sessionId: "other-session" },
+        worktree: projectDir,
+        cwd: projectDir,
+        agent: { name: "scout", source: "user" },
+        projectTrust: false,
+        depth: 1,
+        piCommand: ["/node", "/pi/cli.js"],
+      },
+      "",
+    );
+    store.createRequest(foreign.childId, "Task");
+    const fake = harness(true);
+    await fake.emit("session_start", { reason: "startup" });
+
+    expect(fake.tools.map((tool) => tool.name).sort()).toEqual([
+      "subagent",
+      "subagent_ask",
+      "subagent_retrieve",
+    ]);
+    const byName = (name: string) => fake.tools.find((tool) => tool.name === name) as Tool;
+    const ask = await byName("subagent_ask").execute(
+      "call",
+      { childId: foreign.childId, instruction: "Mine now" },
+      undefined,
+      undefined,
+      {} as ExtensionContext,
+    );
+    expect(ask.content[0].text).toContain("another parent");
+    await expect(
+      byName("subagent_retrieve").execute(
+        "call",
+        { childId: foreign.childId, requestId: "r1" },
+        undefined,
+        undefined,
+        {} as ExtensionContext,
+      ),
+    ).rejects.toThrow(/another parent/);
+  });
 });
 
 describe("child mode", () => {

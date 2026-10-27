@@ -12,6 +12,7 @@ import {
   discoverWorkspaceAgents,
   mergeAgentLists,
 } from "./agents.ts";
+import { createFollowUpTools } from "./ask-tools.ts";
 import { createReportTool, startChildBridge } from "./child.ts";
 import {
   clearDrain,
@@ -68,6 +69,7 @@ export default function (pi: ExtensionAPI): void {
       includeProjectAgents ? discoverProjectAgents(parentCwd) : [],
       discoverWorkspaceAgents(),
     );
+    const store = createStore();
     runtime = createParentRuntime({
       parentSessionId,
       parentSessionName: ctx.sessionManager.getSessionName(),
@@ -85,9 +87,24 @@ export default function (pi: ExtensionAPI): void {
           { deliverAs: "followUp", triggerTurn: true },
         ),
       isIdle: () => ctx.isIdle() && !ctx.hasPendingMessages(),
+      store,
     });
     // A returning parent cancels its earlier departure.
     logFailures("clear drain for", clearDrain({ parentSessionId }));
+    const [askTool, retrieveTool] = createFollowUpTools({
+      ask: runtime.ask,
+      retrieveResult: runtime.retrieveResult,
+      defaultTimeoutMinutes: (childId) => {
+        try {
+          return store.readChild(childId).agent.timeoutMinutes;
+        } catch {
+          // The runtime reports the unreadable child itself.
+          return undefined;
+        }
+      },
+    });
+    pi.registerTool(askTool);
+    pi.registerTool(retrieveTool);
     pi.registerTool(
       createSubagentTool({
         agents,
