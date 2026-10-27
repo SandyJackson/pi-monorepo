@@ -416,8 +416,9 @@ Pi arguments are identical for first launch and resume:
 - **Tools:** when the agent has a tool allowlist, append `subagent_report` to it. For a depth-1 child whose allowlist contains `subagent`, also append `subagent_ask` and `subagent_retrieve`. Pi filters extension tools against the allowlist, and every shipped agent has one. Nothing else is added. With no allowlist, Pi's default toolset already includes registered extension tools.
 - **Trust:** always pass one of the two flags, from `child.json` `projectTrust`, so a hidden child never stops at Pi's project-trust prompt before readiness. See §6 `delegate` for how the value is decided.
 - **`piCommand`:** `[process.execPath, process.argv[1]]` of the parent Pi that created the child, so the CLI resumes the child with the same Pi build, never whatever `pi` is on `PATH`.
+- **cwd:** the tmux `-c` directory is always `child.json` `cwd`. With `--session-dir`, Pi matches `--session-id` only against sessions whose recorded cwd is the launch cwd. From another directory, or when tmux falls back to `$HOME` because the directory is gone, Pi silently starts a new empty session with the same ID. `ensureLive` returns `failed` without launching when `cwd` is not an existing directory (ticket 02, probe 1).
 
-Environment: the launcher's `process.env`, minus `TMUX`, `TMUX_PANE`, and `PI_SUBAGENT_NONCE`, passed with `-e`. Nothing from the environment is written to disk.
+Environment: the launcher's `process.env`, minus `TMUX`, `TMUX_PANE`, and `PI_SUBAGENT_NONCE`, passed with `-e` on every launch. Nothing from the environment is written to disk. The child's environment is the private server's global environment, copied from whichever process started that server, overlaid with the `-e` values. Passing every variable explicitly makes each child reflect its own launcher. A variable missing from a later launcher's environment is not removed; the child inherits the server's copy. This is an accepted risk (ticket 03).
 
 `tmux.conf` sets: `prefix None`, `prefix2 None`, all root and prefix keys unbound, `status off`, `escape-time 0`, `extended-keys on`, `extended-keys-format csi-u` (Pi's documented tmux settings), `exit-empty on`, `destroy-unattached off`, `exit-unattached off`, `remain-on-exit off`. The user's tmux configuration is never loaded. **Verify:** Pi renders correctly and receives Escape, Ctrl-C, and modified keys through the nested client.
 
@@ -433,7 +434,7 @@ function startChildBridge(pi: ExtensionAPI, options: { childDir: string; nonce: 
 
 ### Startup (`session_start`)
 
-1. For each request whose `result.json` is `running` with a different nonce, write `settled` / `failed` / `interrupted`. When `session_start` reason is `reload`, the nonce is unchanged, so a request running under this nonce is also marked `interrupted`: reload discards the in-memory binding needed to settle it. **Verify:** whether `/reload` is possible during a run at all; if not, this case only arises when reloading after an unsettled abort.
+1. For each request whose `result.json` is `running` with a different nonce, write `settled` / `failed` / `interrupted`. When `session_start` reason is `reload`, the nonce is unchanged, so a request running under this nonce is also marked `interrupted`: reload discards the in-memory binding needed to settle it. Pi refuses `/reload` and `ctx.reload()` while a run is streaming, and Escape always reaches `agent_settled`, so this case only arises if the bridge missed settlement (ticket 02, probe 7).
 2. Write `status.json` (`idle`). This is the readiness signal.
 3. Start the poll loop.
 
@@ -468,7 +469,7 @@ Text equality is safe here because it is scoped to entries after the dispatch po
 
 ### Settlement
 
-Record the `outcome` from `agent_before_settle`. On `agent_settled` with a current request:
+Reset the recorded outcome at each `agent_start`, and keep the last `agent_before_settle` outcome before `agent_settled`. Pi skips `agent_before_settle` when Escape aborts a run, so `agent_settled.aborted` is the only abort signal. If `agent_settled` arrives with `aborted: false` and no recorded outcome, record `failed` / `error` with `Pi settled without an outcome` (ticket 02, probe 2). On `agent_settled` with a current request:
 
 | Condition | Result |
 |---|---|
@@ -565,8 +566,8 @@ node cli.ts stop  <childId> | --worktree <path>
 
 - **Worktree resolution:** from `#{pane_current_path}` of `--pane`, using the §3 rule. If resolution fails, show an error with `display-message`. Never fall back to listing all children.
 - **`list`:** children of the worktree grouped by parent (`name` or short session ID). Grandchildren are listed under their creating child, labelled `child <childId>`. Each entry shows child ID, agent, label, and `running` / `idle` / `blocked` / `stopped`. Read-only; never starts Pi.
-- **`pick`:** builds a `tmux display-menu` from `list`, one titled group per parent. Each item runs `open`. An empty scope shows `No subagents for this worktree`.
-- **`open`:** `ensureLive`, then on the outer server run `new-pane -O -x 90% -y 90% -t <pane> -- env -u TMUX -u TMUX_PANE tmux -L pi-subagents attach -t =sa-<childId>`. The variables are cleared in the executed command because tmux sets its own `TMUX` and `TMUX_PANE` for the new pane regardless of `-e`. Do not pass `-K` (the outer prefix must still work) or `-D` (Escape and Ctrl-C belong to Pi). If the child exits, the attach client exits and the pane closes. Opening never deletes `drain`.
+- **`pick`:** builds a `tmux display-menu` from `list`, one titled group per parent. Each item runs `open`. An empty scope shows `No subagents for this worktree`. `display-menu` is run with `-t <--pane>`. In tmux 3.8 the menu belongs to that pane's window and shows on every client viewing it; `-c` does not choose where it is drawn.
+- **`open`:** `ensureLive`, then on the outer server run `new-pane -O -x 90% -y 90% -t <pane> -- env -u TMUX -u TMUX_PANE tmux -L pi-subagents attach -t =sa-<childId>`. The variables are cleared in the executed command as hygiene: tmux 3.8 sets `TMUX_PANE` for the new pane regardless of `-e`, and the attach client has no use for the outer server's values. Clearing them is not what allows the attach; tmux refuses a nested attach only to the server that owns the client's pane, and `pi-subagents` is a different server (ticket 03). If `new-pane -O` fails because the window already has a modal pane (`window already has a modal pane`, exit 1), `open` shows that error with `display-message` and does nothing else. It does not close or reuse the existing float. Do not pass `-K` (the outer prefix must still work) or `-D` (Escape and Ctrl-C belong to Pi). If the child exits, the attach client exits and the pane closes. Opening never deletes `drain`.
 - **Dismiss:** close the float with the outer server's `kill-pane` (for example `prefix x`). This kills only the attach client.
 - **`stop`:** `kill-session` for the child or each child in the worktree. Work in progress is lost; transcripts and records are kept. The next request or `open` resumes it.
 
@@ -578,7 +579,7 @@ bind-key S run-shell -b 'node /path/to/packages/tmux-subagent/cli.ts pick --pane
 
 The outer server also needs Pi's documented key settings (`extended-keys on`, `extended-keys-format csi-u`) for modified keys to reach the nested client. The README states this; the snippet does not change it.
 
-**Verify:** `display-menu` from `run-shell -b` targets the invoking client, and `new-pane -O` works when the window is zoomed (may need `-A`).
+Verified (ticket 03): `display-menu -t <pane>` from `run-shell -b` shows on the invoking pane's window, and `new-pane -O` works when the window is zoomed without `-A`.
 
 ## 11. Package structure
 
