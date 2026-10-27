@@ -110,6 +110,8 @@ export interface Store {
   /** Allocate a child ID by exclusive `mkdir`, then write child.json and system-prompt.md. */
   createChild(child: NewChild, systemPrompt: string): ChildRecord;
   readChild(childId: ChildId): ChildRecord;
+  /** Child IDs present in the state directory, sorted. */
+  listChildIds(): ChildId[];
   /** Allocate the next request ID by exclusive `mkdir`, then write request.json. */
   createRequest(childId: ChildId, instruction: string): RequestRecord;
   readRequest(ref: RequestRef): RequestRecord | undefined;
@@ -119,13 +121,15 @@ export interface Store {
   writeResult(record: ResultRecord): void;
   readStatus(childId: ChildId): StatusRecord | undefined;
   writeStatus(childId: ChildId, record: StatusRecord): void;
-  /** Child IDs found in the children directory, in no particular order. */
-  listChildIds(): ChildId[];
   /** Allocate the next report ID and write the report, never replacing one. */
   createReport(report: NewReport): ReportRecord;
   /** Report IDs of a child in numeric order. */
   listReportIds(childId: ChildId): ReportId[];
   readReport(childId: ChildId, reportId: ReportId): ReportRecord | undefined;
+  /** Whether the parent's `drain` signal is present. */
+  hasDrain(childId: ChildId): boolean;
+  writeDrain(childId: ChildId): void;
+  removeDrain(childId: ChildId): void;
   /** Rewrite tmux.conf and return its path. */
   writeTmuxConf(content: string): string;
 }
@@ -376,10 +380,12 @@ function readDir(dir: string): string[] {
 export function createStore(root: string = defaultStoreRoot()): Store {
   const childrenDir = path.join(root, "children");
   // IDs can come from the model in later tools; never let one leave the root.
+  const isChildId = (name: string) => /^[a-z0-9][a-z0-9-]*$/.test(name);
   const childDir = (childId: ChildId) => {
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(childId)) throw new Error(`Invalid child ID: ${childId}`);
+    if (!isChildId(childId)) throw new Error(`Invalid child ID: ${childId}`);
     return path.join(childrenDir, childId);
   };
+  const drainFile = (childId: ChildId) => path.join(childDir(childId), "drain");
   const requestDir = (ref: RequestRef) => {
     if (requestNumber(ref.requestId) === undefined) {
       throw new Error(`Invalid request ID: ${ref.requestId}`);
@@ -446,6 +452,17 @@ export function createStore(root: string = defaultStoreRoot()): Store {
       return record;
     },
 
+    listChildIds() {
+      let names: string[];
+      try {
+        names = fs.readdirSync(childrenDir);
+      } catch (error) {
+        if (isMissing(error)) return [];
+        throw error;
+      }
+      return names.filter(isChildId).sort();
+    },
+
     createRequest(childId, instruction) {
       const requestsDir = path.join(childDir(childId), "requests");
       fs.mkdirSync(requestsDir, { recursive: true, mode: DIR_MODE });
@@ -488,8 +505,6 @@ export function createStore(root: string = defaultStoreRoot()): Store {
       writeJson(path.join(childDir(childId), "status.json"), record);
     },
 
-    listChildIds: () => readDir(childrenDir).filter((name) => /^[a-z0-9][a-z0-9-]*$/.test(name)),
-
     createReport(report) {
       fs.mkdirSync(path.join(childDir(report.childId), "reports"), {
         recursive: true,
@@ -511,6 +526,16 @@ export function createStore(root: string = defaultStoreRoot()): Store {
 
     readReport: (childId, reportId) =>
       readJson<ReportRecord>(reportFile(childId, reportId), checkReport(childId, reportId)),
+
+    hasDrain: (childId) => fs.existsSync(drainFile(childId)),
+
+    writeDrain(childId) {
+      writeAtomic(drainFile(childId), "");
+    },
+
+    removeDrain(childId) {
+      fs.rmSync(drainFile(childId), { force: true });
+    },
 
     writeTmuxConf(content) {
       fs.mkdirSync(root, { recursive: true, mode: DIR_MODE });

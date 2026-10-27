@@ -1,6 +1,7 @@
 /**
  * Pi adapter for tmux subagents. A Pi started with `--subagent-child` runs
- * the child bridge; any other Pi registers the `subagent` tool.
+ * the child bridge; any other Pi registers the `subagent` tool and drains its
+ * children when it departs the conversation.
  */
 
 import * as path from "node:path";
@@ -13,7 +14,9 @@ import {
 } from "./agents.ts";
 import { createReportTool, startChildBridge } from "./child.ts";
 import {
+  clearDrain,
   createParentRuntime,
+  type DrainResult,
   deliveredReportKeys,
   type ParentRuntime,
   reportEnvelope,
@@ -22,6 +25,14 @@ import { createStore } from "./store.ts";
 import { createSubagentTool } from "./subagent-tool.ts";
 
 const CHILD_FLAG = "subagent-child";
+
+/** Shutdown has no caller to report to, so failures go to stderr and are never shown as success. */
+function logFailures(action: string, result: DrainResult): void {
+  if (result.error) console.error(`Subagents: could not ${action} children: ${result.error}`);
+  for (const { childId, error } of result.failed) {
+    console.error(`Subagents: could not ${action} child ${childId}: ${error}`);
+  }
+}
 
 export default function (pi: ExtensionAPI): void {
   pi.registerFlag(CHILD_FLAG, {
@@ -34,6 +45,8 @@ export default function (pi: ExtensionAPI): void {
 
   // Flags are applied after extension factories run, so mode is decided here.
   pi.on("session_start", (event, ctx) => {
+    runtime?.dispose();
+    runtime = undefined;
     const childDir = pi.getFlag(CHILD_FLAG);
     if (typeof childDir === "string" && childDir) {
       // Left in the environment so /reload, in the same process, reads the same nonce.
@@ -48,15 +61,15 @@ export default function (pi: ExtensionAPI): void {
     }
 
     const parentCwd = ctx.cwd;
+    const parentSessionId = ctx.sessionManager.getSessionId();
     const includeProjectAgents = ctx.isProjectTrusted();
     const agents = mergeAgentLists(
       discoverUserAgents(),
       includeProjectAgents ? discoverProjectAgents(parentCwd) : [],
       discoverWorkspaceAgents(),
     );
-    runtime?.dispose();
     runtime = createParentRuntime({
-      parentSessionId: ctx.sessionManager.getSessionId(),
+      parentSessionId,
       parentSessionName: ctx.sessionManager.getSessionName(),
       parentCwd,
       isProjectTrusted: () => ctx.isProjectTrusted(),
@@ -73,6 +86,8 @@ export default function (pi: ExtensionAPI): void {
         ),
       isIdle: () => ctx.isIdle() && !ctx.hasPendingMessages(),
     });
+    // A returning parent cancels its earlier departure.
+    logFailures("clear drain for", clearDrain({ parentSessionId }));
     pi.registerTool(
       createSubagentTool({
         agents,
@@ -87,8 +102,12 @@ export default function (pi: ExtensionAPI): void {
     runtime?.observeMessage(event.message);
   });
 
-  pi.on("session_shutdown", () => {
-    runtime?.dispose();
+  // Reload is never a departure. Every other reason leaves this conversation.
+  pi.on("session_shutdown", (event) => {
+    const departing = runtime;
     runtime = undefined;
+    departing?.dispose();
+    if (!departing || event.reason === "reload") return;
+    logFailures("drain", departing.drain());
   });
 }

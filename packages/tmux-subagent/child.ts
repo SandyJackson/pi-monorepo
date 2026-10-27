@@ -7,6 +7,7 @@
 import * as path from "node:path";
 import type {
   AgentActivityOutcome,
+  AgentSettledEvent,
   ExtensionAPI,
   ExtensionContext,
   SessionStartEvent,
@@ -14,6 +15,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { HERDR_BLOCKED_EVENT, isHerdrBlockedPayload } from "@pi-workspace/herdr-contract";
 import { Type } from "typebox";
+import { isAttached } from "./launch.ts";
 import { findRequestAnswer } from "./pi-session.ts";
 import {
   type ChildId,
@@ -23,11 +25,14 @@ import {
   type RequestResult,
   type Store,
 } from "./store.ts";
+import { createTmuxExec, type TmuxExec } from "./tmux.ts";
 
-/** How often the bridge looks for a request to dispatch. */
+/** How often the bridge looks for a request to dispatch and for `drain`. */
 export const POLL_MS = 250;
 /** How long Pi has to start or queue a dispatched request. */
 export const DISPATCH_MS = 10_000;
+/** How long a child started with `drain` present waits for a viewer before it exits. */
+export const UNVIEWED_EXIT_MS = 60_000;
 
 /** The request submitted to Pi and not yet settled. */
 interface CurrentRequest {
@@ -49,11 +54,13 @@ export function startChildBridge(
     ctx: ExtensionContext;
     reason: SessionStartEvent["reason"];
     store?: Store;
+    tmux?: TmuxExec;
   },
 ): void {
   const { nonce, ctx } = options;
   const childId = path.basename(options.childDir);
   const store = options.store ?? createStore(path.dirname(path.dirname(options.childDir)));
+  const tmux = options.tmux ?? createTmuxExec();
 
   let current: CurrentRequest | undefined;
   let outcome: AgentActivityOutcome | undefined;
@@ -145,6 +152,61 @@ export function startChildBridge(
     if (record) dispatch(record);
   }
 
+  // Drain (§8): exit only on a transition, never at startup.
+  const startedAt = Date.now();
+  const drainAtStart = store.hasDrain(childId);
+  let drainSeen = drainAtStart;
+  let wasAttached: boolean | undefined;
+  let everAttached = false;
+  let unviewedChecked = false;
+  let watching = false;
+  let stopped = false;
+
+  function hasUnsettledRequest(): boolean {
+    return store
+      .listRequestIds(childId)
+      .some((requestId) => store.readResult({ childId, requestId })?.phase !== "settled");
+  }
+
+  function mayExit(): boolean {
+    return (
+      !stopped &&
+      store.hasDrain(childId) &&
+      ctx.isIdle() &&
+      !ctx.hasPendingMessages() &&
+      !uiPrompt &&
+      !current &&
+      !hasUnsettledRequest()
+    );
+  }
+
+  async function exitIfDrained(): Promise<void> {
+    if (!mayExit() || (await isAttached(tmux, childId))) return;
+    // Re-checked: work may have arrived while tmux answered.
+    if (!mayExit()) return;
+    stopped = true;
+    ctx.shutdown();
+  }
+
+  async function watchDrain(): Promise<void> {
+    const present = store.hasDrain(childId);
+    const appeared = present && !drainSeen;
+    drainSeen = present;
+    if (!present) {
+      wasAttached = undefined;
+      return;
+    }
+    const attached = await isAttached(tmux, childId);
+    const detached = wasAttached === true && !attached;
+    wasAttached = attached;
+    everAttached ||= attached;
+    let unviewed = false;
+    if (drainAtStart && !everAttached && !unviewedChecked) {
+      unviewed = unviewedChecked = Date.now() - startedAt >= UNVIEWED_EXIT_MS;
+    }
+    if (appeared || detached || unviewed) await exitIfDrained();
+  }
+
   // Startup: a request still running under another process, or under this
   // one across a reload, lost the binding needed to settle it.
   for (const requestId of store.listRequestIds(childId)) {
@@ -166,6 +228,14 @@ export function startChildBridge(
     } catch {
       // An unreadable record is retried on the next poll; the parent reports it.
     }
+    if (watching) return;
+    watching = true;
+    // A failed check keeps the child; the next poll looks again.
+    watchDrain()
+      .catch(() => {})
+      .finally(() => {
+        watching = false;
+      });
   }, POLL_MS);
 
   pi.on("input", (event) => {
@@ -189,6 +259,11 @@ export function startChildBridge(
   });
 
   pi.on("agent_settled", (event, settledCtx) => {
+    settleCurrent(event, settledCtx);
+    exitIfDrained().catch(() => {});
+  });
+
+  function settleCurrent(event: AgentSettledEvent, settledCtx: ExtensionContext): void {
     const settledOutcome = outcome;
     outcome = undefined;
     if (!current?.confirmed) return;
@@ -229,7 +304,7 @@ export function startChildBridge(
     } else {
       finish({ status: "completed", answer: located.answer, humanIntervened });
     }
-  });
+  }
 
   pi.on("ui_prompt_start", (event) => {
     uiPrompt = { label: event.title ?? "Waiting for input", since: new Date().toISOString() };
@@ -250,6 +325,7 @@ export function startChildBridge(
   });
 
   pi.on("session_shutdown", () => {
+    stopped = true;
     clearInterval(timer);
     if (current) clearTimeout(current.timer);
     unsubscribeBlocked();
