@@ -252,33 +252,27 @@ export function discoverProjectAgents(cwd: string): AgentConfig[] {
   return [];
 }
 
-/**
- * Resolve an agent by name from a previously merged agent list.
- *
- * Returns the matched AgentConfig, or an error object with a formatted
- * message listing all available agents in the requested scope.
- */
+/** Why `resolveAgent` found no agent; `tools.ts` renders the text. */
+export type AgentResolutionProblem =
+  | { problem: "no_agents"; scope: AgentScope; userAgentsDir: string }
+  | { problem: "unknown_agent"; name: string };
+
+/** Resolve an agent by name from a previously merged agent list. */
 export function resolveAgent(
   name: string,
   agents: AgentConfig[],
   scope: AgentScope,
-): AgentConfig | { error: string } {
+): AgentConfig | AgentResolutionProblem {
   const config = agents.find((agent) => agent.name === name);
-
-  if (!config) {
-    if (agents.length === 0) {
-      return {
-        error:
-          `No agents found in scope "${scope}". ` +
-          `Expected agent files in ${scope === "project" ? `the nearest ${CONFIG_DIR_NAME}/agents/ directory` : `${path.join(getAgentDir(), AGENTS_DIR_NAME)}/`}.`,
-      };
-    }
+  if (config) return config;
+  if (agents.length === 0) {
     return {
-      error: `Unknown agent "${name}". Available agents:\n${formatMergedAgentList(agents)}`,
+      problem: "no_agents",
+      scope,
+      userAgentsDir: path.join(getAgentDir(), AGENTS_DIR_NAME),
     };
   }
-
-  return config;
+  return { problem: "unknown_agent", name };
 }
 
 /**
@@ -297,18 +291,4 @@ export function mergeAgentLists(
   return Array.from(map.values()).sort((leftAgent, rightAgent) =>
     leftAgent.name.localeCompare(rightAgent.name),
   );
-}
-
-/**
- * Format a merged agent list without source labels.
- * Suitable for model-facing descriptions and no-task listings.
- */
-export function formatMergedAgentList(agents: AgentConfig[]): string {
-  if (agents.length === 0) return "none";
-  return agents
-    .map((agent) => {
-      const desc = agent.description ? ` — ${agent.description}` : "";
-      return `  ${agent.name}${desc}`;
-    })
-    .join("\n");
 }

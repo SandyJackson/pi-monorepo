@@ -77,7 +77,12 @@ describe("child bridge startup", () => {
     expect(store.readResult(ref("r1"))).toMatchObject({
       phase: "settled",
       nonce: "nonce-1",
-      result: { status: "failed", reason: "interrupted", humanIntervened: false },
+      result: {
+        status: "failed",
+        reason: "interrupted",
+        cause: "stopped_while_running",
+        humanIntervened: false,
+      },
     });
     expect(fake.sent).toEqual([]);
   });
@@ -105,7 +110,7 @@ describe("child bridge startup", () => {
     expect(store.readStatus(child.childId)).toMatchObject({ nonce: "nonce-1", state: "idle" });
     expect(store.readResult(ref("r1"))).toMatchObject({
       phase: "settled",
-      result: { status: "failed", reason: "interrupted" },
+      result: { status: "failed", reason: "interrupted", cause: "stopped_while_running" },
     });
   });
 
@@ -209,7 +214,8 @@ describe("child bridge dispatch and settlement", () => {
       result: {
         status: "failed",
         reason: "error",
-        error: expect.stringContaining("request.json"),
+        cause: "unreadable_request",
+        detail: expect.stringContaining("request.json"),
         humanIntervened: false,
       },
     });
@@ -297,7 +303,7 @@ describe("child bridge dispatch and settlement", () => {
 
       expect(store.readResult(ref("r1"))).toMatchObject({
         phase: "settled",
-        result: { status: "failed", reason: "error", error: "Pi did not start the request" },
+        result: { status: "failed", reason: "error", cause: "not_started" },
       });
       expect(fake.sent).toHaveLength(1);
       expect(store.readStatus(child.childId)).toMatchObject({ state: "idle" });
@@ -337,7 +343,7 @@ describe("child bridge dispatch and settlement", () => {
 
     expect(store.readResult(ref("r1"))).toMatchObject({
       phase: "settled",
-      result: { status: "failed", reason: "error", error: "Pi did not start the request" },
+      result: { status: "failed", reason: "error", cause: "not_started" },
     });
   });
 
@@ -369,7 +375,7 @@ describe("child bridge dispatch and settlement", () => {
     await vi.advanceTimersByTimeAsync(DISPATCH_MS);
     expect(store.readResult(ref("r1"))).toMatchObject({
       phase: "settled",
-      result: { status: "failed", error: "Pi did not start the request" },
+      result: { status: "failed", cause: "not_started" },
     });
   });
 
@@ -401,7 +407,7 @@ describe("child bridge dispatch and settlement", () => {
 
     expect(store.readResult(ref("r1"))).toMatchObject({
       phase: "settled",
-      result: { status: "failed", reason: "superseded" },
+      result: { status: "failed", reason: "superseded", cause: "off_branch" },
     });
   });
 
@@ -415,7 +421,7 @@ describe("child bridge dispatch and settlement", () => {
     await fake.emit("agent_settled", { aborted: true });
 
     expect(store.readResult(ref("r1"))).toMatchObject({
-      result: { status: "failed", reason: "interrupted" },
+      result: { status: "failed", reason: "interrupted", cause: "run_interrupted" },
     });
   });
 
@@ -430,7 +436,7 @@ describe("child bridge dispatch and settlement", () => {
     await fake.emit("agent_settled", { aborted: false });
 
     expect(store.readResult(ref("r1"))).toMatchObject({
-      result: { status: "failed", reason: "interrupted" },
+      result: { status: "failed", reason: "interrupted", cause: "run_interrupted" },
     });
   });
 
@@ -445,7 +451,7 @@ describe("child bridge dispatch and settlement", () => {
     await fake.emit("agent_settled", { aborted: false });
 
     expect(store.readResult(ref("r1"))).toMatchObject({
-      result: { status: "failed", reason: "error" },
+      result: { status: "failed", reason: "error", cause: "run_error" },
     });
   });
 
@@ -462,7 +468,7 @@ describe("child bridge dispatch and settlement", () => {
     await fake.emit("agent_settled", { aborted: false });
 
     expect(store.readResult(ref("r1"))).toMatchObject({
-      result: { status: "failed", reason: "error", error: "Pi settled without an outcome" },
+      result: { status: "failed", reason: "error", cause: "no_outcome" },
     });
   });
 

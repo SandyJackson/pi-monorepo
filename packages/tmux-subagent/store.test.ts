@@ -195,9 +195,44 @@ describe("requests and results", () => {
       nonce: "n",
       phase: "settled",
       settledAt: "2026-01-01T00:00:00.000Z",
-      result: { status: "failed", reason: "bored", error: "x", humanIntervened: false },
+      result: { status: "failed", reason: "bored", cause: "run_error", humanIntervened: false },
     });
     expect(() => store.readResult(ref)).toThrow(/result\.json/);
+    for (const failure of [
+      { reason: "error", cause: "bored" },
+      { reason: "error", cause: "unreadable_request", detail: 7 },
+    ]) {
+      overwrite(file, {
+        version: 1,
+        request: ref,
+        nonce: "n",
+        phase: "settled",
+        settledAt: "2026-01-01T00:00:00.000Z",
+        result: { status: "failed", ...failure, humanIntervened: false },
+      });
+      expect(() => store.readResult(ref)).toThrow(/result\.json/);
+    }
+  });
+
+  it("round-trips a failed result with its cause and detail", () => {
+    store.createRequest(child.childId, "Review");
+    const ref = { childId: child.childId, requestId: "r1" };
+    const settled = {
+      version: 1 as const,
+      request: ref,
+      nonce: "n1",
+      phase: "settled" as const,
+      settledAt: new Date().toISOString(),
+      result: {
+        status: "failed" as const,
+        reason: "error" as const,
+        cause: "unreadable_request" as const,
+        detail: "not JSON",
+        humanIntervened: false,
+      },
+    };
+    store.writeResult(settled);
+    expect(store.readResult(ref)).toEqual(settled);
   });
 });
 

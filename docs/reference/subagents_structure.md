@@ -11,7 +11,7 @@ packages/tmux-subagent/
 ├── index.ts          Pi adapter: parent or child mode, lifecycle hooks, tool registration
 ├── agents.ts         Agent discovery and merge (catalog source)
 ├── pi-session.ts     Session JSONL reading and branch-based answer selection
-├── tools.ts          Everything model-facing: the four tools, result text, report envelope
+├── tools.ts          Everything model-facing: the four tools, result, error and progress text, report envelope
 ├── store.ts          State paths, ID allocation, atomic JSON writes, record validation
 ├── tmux.ts           TmuxExec (execFile) and argv builders
 ├── launch.ts         ensureLive: start or find a child and wait for readiness
@@ -23,9 +23,9 @@ packages/tmux-subagent/
 | Module | Owns | Depends on |
 |---|---|---|
 | `index.ts` | Deciding mode and depth in `session_start` from `--subagent-child` and `child.json`; building the catalog; registering tools; binding drain to `session_shutdown` | everything below except `cli.ts` |
-| `agents.ts` | Discovering workspace, user, and trusted project agents; project > user > workspace precedence; resolution | Pi's `parseFrontmatter`/`getAgentDir` |
+| `agents.ts` | Discovering workspace, user, and trusted project agents; project > user > workspace precedence; resolution, returning a code for a missing agent | Pi's `parseFrontmatter`/`getAgentDir` |
 | `pi-session.ts` | Exact answer references `{path, entryId}` and selecting the answer to a request on the active branch | nothing (fs only) |
-| `tools.ts` | Everything the model sees: the four tools' names, descriptions and strict schemas, per-task validation, minute-to-millisecond conversion, result text with `truncateHead`, and the report envelope | `parent.ts`, `pi-session.ts` |
+| `tools.ts` | Everything the model sees: the four tools' names, descriptions and strict schemas, per-task validation, minute-to-millisecond conversion, the agent list, result text with `truncateHead`, the text for every runtime code (failure causes, launch, target and thrown problems), progress lines, and the report envelope. Only `index.ts` imports it | `agents.ts`, `parent.ts`, `pi-session.ts` |
 | `store.ts` | The state layout and its single-writer records; owning-worktree resolution | nothing (fs only) |
 | `tmux.ts` | Every tmux and Pi argv; the private server's `tmux.conf`; the launch environment | nothing (child_process only) |
 | `launch.ts` | `ensureLive`: one Pi process per child, readiness by launch nonce | `store.ts`, `tmux.ts` |

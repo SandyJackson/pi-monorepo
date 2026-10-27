@@ -20,10 +20,18 @@ import {
   updateEnvironmentNames,
 } from "./tmux.ts";
 
+/** Why `ensureLive` did not reach readiness. Callers render their own text. */
+export type LaunchProblem =
+  | { kind: "cwd_missing"; cwd: string }
+  | { kind: "tmux_failed"; detail: string }
+  | { kind: "exited_early" }
+  | { kind: "no_nonce" }
+  | { kind: "not_ready"; seconds: number; detail?: string };
+
 export type EnsureLiveResult =
   | { status: "live"; nonce: string }
-  | { status: "failed"; error: string }
-  | { status: "indeterminate"; error: string };
+  | { status: "failed"; problem: LaunchProblem }
+  | { status: "indeterminate"; problem: LaunchProblem };
 
 /** How long a launched child has to write `status.json` with its nonce. */
 export const READY_MS = 30_000;
@@ -100,10 +108,7 @@ export async function ensureLive(
   } else {
     // From another cwd, Pi would silently start a new empty session with this ID.
     if (!isDirectory(child.cwd)) {
-      return {
-        status: "failed",
-        error: `The child's cwd ${child.cwd} is not an existing directory.`,
-      };
+      return { status: "failed", problem: { kind: "cwd_missing", cwd: child.cwd } };
     }
     const launchNonce = randomBytes(16).toString("hex");
     const confPath = store.writeTmuxConf(TMUX_CONF);
@@ -130,14 +135,11 @@ export async function ensureLive(
       nonce = await readNonce(tmux, childId);
     } else {
       const detail = started.stderr.trim() || `exit ${started.code}`;
-      return { status: "failed", error: `tmux could not start the child: ${detail}` };
+      return { status: "failed", problem: { kind: "tmux_failed", detail } };
     }
   }
   if (nonce === undefined) {
-    return {
-      status: "indeterminate",
-      error: `Child ${childId} has a live session without a launch nonce.`,
-    };
+    return { status: "indeterminate", problem: { kind: "no_nonce" } };
   }
 
   const deadline = Date.now() + READY_MS;
@@ -149,14 +151,17 @@ export async function ensureLive(
       statusError = error instanceof Error ? error.message : String(error);
     }
     if (!(await isLive(tmux, childId))) {
-      return { status: "failed", error: `Child ${childId} exited before it was ready.` };
+      return { status: "failed", problem: { kind: "exited_early" } };
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
-      const suffix = statusError ? ` Last status error: ${statusError}` : "";
       return {
         status: "indeterminate",
-        error: `Child ${childId} is running but did not report readiness within ${READY_MS / 1000} s.${suffix}`,
+        problem: {
+          kind: "not_ready",
+          seconds: READY_MS / 1000,
+          ...(statusError ? { detail: statusError } : {}),
+        },
       };
     }
     await sleep(Math.min(READY_POLL_MS, remaining));

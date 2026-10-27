@@ -57,13 +57,28 @@ export interface RequestRecord {
   submittedAt: string;
 }
 
+/** Why the child bridge failed a request; `tools.ts` renders the text. */
+export const FAILURE_CAUSES = [
+  "unreadable_request",
+  "not_started",
+  "stopped_while_running",
+  "off_branch",
+  "run_interrupted",
+  "run_error",
+  "no_outcome",
+] as const;
+
+export type FailureCause = (typeof FAILURE_CAUSES)[number];
+
 /** The child-recorded terminal result of one request. Final once written. */
 export type RequestResult =
   | { status: "completed"; answer: SessionAnswerRef | null; humanIntervened: boolean }
   | {
       status: "failed";
       reason: "error" | "interrupted" | "superseded";
-      error: string;
+      cause: FailureCause;
+      /** A raw system message, such as why `request.json` could not be read. */
+      detail?: string;
       humanIntervened: boolean;
     };
 
@@ -323,7 +338,8 @@ function checkRequestResult(value: unknown): string | undefined {
   }
   if (value.status === "failed") {
     return ["error", "interrupted", "superseded"].includes(value.reason as string) &&
-      isString(value.error)
+      FAILURE_CAUSES.includes(value.cause as FailureCause) &&
+      isOptionalString(value.detail)
       ? undefined
       : "invalid failure";
   }

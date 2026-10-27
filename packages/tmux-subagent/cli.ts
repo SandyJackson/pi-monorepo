@@ -12,7 +12,7 @@
 
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { ensureLive, isDirectory, isLive, readNonce } from "./launch.ts";
+import { ensureLive, isDirectory, isLive, type LaunchProblem, readNonce } from "./launch.ts";
 import {
   type ChildId,
   type ChildRecord,
@@ -251,6 +251,22 @@ async function pick(pane: string, deps: CliDeps): Promise<void> {
   if (shown.code !== 0) throw new Error(`tmux could not show the menu: ${shown.stderr.trim()}`);
 }
 
+/** Operator text for a launch problem; the model's text lives in `tools.ts`. */
+function launchProblemText(childId: ChildId, problem: LaunchProblem): string {
+  switch (problem.kind) {
+    case "cwd_missing":
+      return `The child's cwd ${problem.cwd} is not an existing directory.`;
+    case "tmux_failed":
+      return `tmux could not start the child: ${problem.detail}`;
+    case "exited_early":
+      return `Child ${childId} exited before it was ready.`;
+    case "no_nonce":
+      return `Child ${childId} has a live session without a launch nonce.`;
+    case "not_ready":
+      return `Child ${childId} did not report readiness within ${problem.seconds} s.`;
+  }
+}
+
 /**
  * Resume the child if needed, then float an attach client over the pane.
  * An indeterminate launch still has a live session, so it is shown: the
@@ -259,7 +275,7 @@ async function pick(pane: string, deps: CliDeps): Promise<void> {
 async function open(childId: ChildId, pane: string, deps: CliDeps): Promise<void> {
   deps.store.readChild(childId);
   const live = await ensureLive(childId, { store: deps.store, tmux: deps.tmux, env: deps.env });
-  if (live.status === "failed") throw new Error(live.error);
+  if (live.status === "failed") throw new Error(launchProblemText(childId, live.problem));
   const opened = await deps.outer([
     "new-pane",
     "-O",

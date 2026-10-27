@@ -130,7 +130,8 @@ export function startChildBridge(
         settle(request, {
           status: "failed",
           reason: "error",
-          error: `The child could not read the request: ${error instanceof Error ? error.message : String(error)}`,
+          cause: "unreadable_request",
+          detail: error instanceof Error ? error.message : String(error),
           humanIntervened: false,
         });
       }
@@ -154,7 +155,7 @@ export function startChildBridge(
       finish({
         status: "failed",
         reason: "error",
-        error: "Pi did not start the request",
+        cause: "not_started",
         humanIntervened: current.humanIntervened,
       });
       exitIfDrained().catch(() => {});
@@ -248,7 +249,7 @@ export function startChildBridge(
       {
         status: "failed",
         reason: "interrupted",
-        error: "The child stopped while this request was running.",
+        cause: "stopped_while_running",
         humanIntervened: false,
       },
       result.startedAt,
@@ -324,28 +325,28 @@ export function startChildBridge(
       finish({
         status: "failed",
         reason: "superseded",
-        error: "The request's message is no longer on the child's active branch.",
+        cause: "off_branch",
         humanIntervened,
       });
     } else if (event.aborted || settledOutcome === "aborted") {
       finish({
         status: "failed",
         reason: "interrupted",
-        error: "The run was interrupted inside the child.",
+        cause: "run_interrupted",
         humanIntervened,
       });
     } else if (settledOutcome === "error") {
       finish({
         status: "failed",
         reason: "error",
-        error: "The child's run ended with an error.",
+        cause: "run_error",
         humanIntervened,
       });
     } else if (settledOutcome === undefined) {
       finish({
         status: "failed",
         reason: "error",
-        error: "Pi settled without an outcome",
+        cause: "no_outcome",
         humanIntervened,
       });
     } else {

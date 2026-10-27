@@ -100,7 +100,7 @@ describe("ensureLive", () => {
 
     expect(result).toEqual({
       status: "indeterminate",
-      error: `Child ${child.childId} has a live session without a launch nonce.`,
+      problem: { kind: "no_nonce" },
     });
     expect(tmux.launches).toBe(0);
   });
@@ -138,7 +138,7 @@ describe("ensureLive", () => {
 
     await expect(result).resolves.toEqual({
       status: "indeterminate",
-      error: expect.stringContaining("did not report readiness"),
+      problem: { kind: "not_ready", seconds: READY_MS / 1000 },
     });
   });
 
@@ -150,7 +150,7 @@ describe("ensureLive", () => {
 
     expect(result).toEqual({
       status: "failed",
-      error: expect.stringContaining("exited before it was ready"),
+      problem: { kind: "exited_early" },
     });
   });
 
@@ -159,7 +159,7 @@ describe("ensureLive", () => {
 
     await expect(ensureLive(child.childId, { store, tmux: tmux.exec })).resolves.toEqual({
       status: "failed",
-      error: expect.stringContaining("server exited unexpectedly"),
+      problem: { kind: "tmux_failed", detail: "server exited unexpectedly" },
     });
   });
 
@@ -174,7 +174,10 @@ describe("ensureLive", () => {
 
     const result = await ensureLive(child.childId, { store, tmux: tmux.exec });
 
-    expect(result).toEqual({ status: "failed", error: expect.stringContaining("gone") });
+    expect(result).toEqual({
+      status: "failed",
+      problem: { kind: "cwd_missing", cwd: path.join(root, "gone") },
+    });
     expect(tmux.launches).toBe(0);
   });
 });

@@ -4,13 +4,15 @@ import * as path from "node:path";
 import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import { type AgentConfig, discoverProjectAgents } from "./agents.ts";
-import type {
-  AskOutcome,
-  DelegatedTaskOutcome,
-  ExecuteDelegation,
-  ParentRuntime,
-  RetrievalOutcome,
+import {
+  type AskOutcome,
+  type DelegatedTaskOutcome,
+  type ExecuteDelegation,
+  type ParentRuntime,
+  type RetrievalOutcome,
+  SubagentError,
 } from "./parent.ts";
+import type { RequestResult } from "./store.ts";
 import { createFollowUpTools, createSubagentTool } from "./tools.ts";
 
 const alphaAgent: AgentConfig = {
@@ -199,48 +201,154 @@ const statusCases: Array<{
   },
   {
     name: "failure",
-    outcome: {
-      status: "failed",
-      request,
-      reason: "error",
-      error: "The child's run ended with an error.",
-    },
+    outcome: { status: "failed", request, reason: "error", cause: "run_error" },
     headingStatus: "failed",
     text: `${header}Request failed (error): The child's run ended with an error.`,
   },
   {
     name: "interruption",
-    outcome: { status: "failed", request, reason: "interrupted", error: "Escape" },
+    outcome: { status: "failed", request, reason: "interrupted", cause: "run_interrupted" },
     headingStatus: "failed",
-    text: `${header}Request failed (interrupted): Escape\nNo result was recorded. The child may have made changes. The request will not be retried automatically.`,
+    text: `${header}Request failed (interrupted): The run was interrupted inside the child.\nNo result was recorded. The child may have made changes. The request will not be retried automatically.`,
   },
   {
     name: "confirmed launch failure",
-    outcome: { status: "launch_failed", childId: "alpha-7k2q", error: "launch denied" },
+    outcome: {
+      status: "launch_failed",
+      childId: "alpha-7k2q",
+      problem: { kind: "launch_error", detail: "launch denied" },
+    },
     headingStatus: "launch failed",
     text: "Child alpha-7k2q could not be launched: launch denied",
   },
   {
     name: "launch failure before a child exists",
-    outcome: { status: "launch_failed", error: "disk full" },
+    outcome: { status: "launch_failed", problem: { kind: "record_failed", detail: "disk full" } },
     headingStatus: "launch failed",
     text: "The subagent could not be launched: disk full",
   },
   {
     name: "indeterminate launch",
-    outcome: { status: "launch_indeterminate", request, error: "No readiness within 30 s." },
+    outcome: {
+      status: "launch_indeterminate",
+      request,
+      problem: { kind: "not_ready", seconds: 30 },
+    },
     headingStatus: "launch indeterminate",
-    text: `${header}The child did not confirm it started: No readiness within 30 s. The request is on disk and may still run.`,
+    text: `${header}The child did not confirm it started: Child alpha-7k2q is running but did not report readiness within 30 s. The request is on disk and may still run.`,
   },
   {
     name: "observation failure",
-    outcome: { status: "observation_failed", request, error: "invalid result.json" },
+    outcome: { status: "observation_failed", request, detail: "invalid result.json" },
     headingStatus: "observation failed",
     text: `${header}Observation failed: invalid result.json. The child may still be running the request.`,
   },
 ];
 
+const launchCases: Array<{ name: string; outcome: DelegatedTaskOutcome; text: string }> = [
+  {
+    name: "a missing cwd",
+    outcome: {
+      status: "launch_failed",
+      childId: "alpha-7k2q",
+      problem: { kind: "cwd_missing", cwd: "/gone" },
+    },
+    text: "Child alpha-7k2q could not be launched: The child's cwd /gone is not an existing directory.",
+  },
+  {
+    name: "a tmux failure",
+    outcome: {
+      status: "launch_failed",
+      childId: "alpha-7k2q",
+      problem: { kind: "tmux_failed", detail: "no server" },
+    },
+    text: "Child alpha-7k2q could not be launched: tmux could not start the child: no server",
+  },
+  {
+    name: "an early exit",
+    outcome: { status: "launch_failed", childId: "alpha-7k2q", problem: { kind: "exited_early" } },
+    text: "Child alpha-7k2q could not be launched: Child alpha-7k2q exited before it was ready.",
+  },
+  {
+    name: "a record failure after the child exists",
+    outcome: {
+      status: "launch_failed",
+      childId: "alpha-7k2q",
+      problem: { kind: "record_failed", detail: "ENOSPC" },
+    },
+    text: "Child alpha-7k2q could not be launched: ENOSPC",
+  },
+  {
+    name: "a live session without a nonce",
+    outcome: { status: "launch_indeterminate", request, problem: { kind: "no_nonce" } },
+    text: `${header}The child did not confirm it started: Child alpha-7k2q has a live session without a launch nonce. The request is on disk and may still run.`,
+  },
+  {
+    name: "no readiness with a status error",
+    outcome: {
+      status: "launch_indeterminate",
+      request,
+      problem: { kind: "not_ready", seconds: 30, detail: "bad status.json" },
+    },
+    text: `${header}The child did not confirm it started: Child alpha-7k2q is running but did not report readiness within 30 s. Last status error: bad status.json The request is on disk and may still run.`,
+  },
+];
+
 describe("subagent result presentation", () => {
+  it.each(launchCases)("presents a launch problem: $name", async ({ outcome, text }) => {
+    const { tool, executeDelegation } = createTool();
+    executeDelegation.mockImplementation(async (tasks) => [{ task: tasks[0], outcome }]);
+
+    const result = await executeTool(tool, { tasks: [{ agent: "alpha", instruction: "Review" }] });
+
+    expect(result.content).toEqual([{ type: "text", text }]);
+  });
+
+  it("presents delegation progress as the task, request, and state", async () => {
+    const { tool, executeDelegation } = createTool();
+    executeDelegation.mockImplementation(async (tasks, { onProgress }) => {
+      onProgress?.({ taskNumber: 1, request, state: "running" });
+      return [{ task: tasks[0], outcome: { status: "timed_out", request } }];
+    });
+    const onUpdate = vi.fn();
+
+    await tool.execute(
+      "tool-call",
+      { tasks: [{ agent: "alpha", instruction: "Review" }] },
+      undefined,
+      onUpdate,
+      {} as never,
+    );
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      content: [{ type: "text", text: "Task 1: Child alpha-7k2q, request r1: running" }],
+      details: { tasks: [] },
+    });
+  });
+
+  it.each([
+    {
+      problem: new SubagentError({ code: "too_many_tasks", count: 9 }),
+      text: "Too many delegated tasks (9). Max is 8.",
+    },
+    {
+      problem: new SubagentError({ code: "tmux_missing", detail: "ENOENT" }),
+      text: "tmux is required for subagents and could not be run: ENOENT",
+    },
+    {
+      problem: new SubagentError({ code: "state_dir_unwritable", detail: "EACCES" }),
+      text: "The subagent state directory is not writable: EACCES",
+    },
+    { problem: new Error("unexpected"), text: "unexpected" },
+  ])("throws $text when delegation cannot start", async ({ problem, text }) => {
+    const { tool, executeDelegation } = createTool();
+    executeDelegation.mockRejectedValue(problem);
+
+    await expect(
+      executeTool(tool, { tasks: [{ agent: "alpha", instruction: "Review" }] }),
+    ).rejects.toThrow(new Error(text));
+  });
+
   it.each(statusCases)(
     "presents $name with precise text and normalized details",
     async ({ outcome, timeout, text }) => {
@@ -553,6 +661,26 @@ describe("subagent task validation", () => {
     expect(executeDelegation).not.toHaveBeenCalled();
   });
 
+  it("names the user agents directory when no agents exist", async () => {
+    vi.stubEnv("PI_CODING_AGENT_DIR", "/pi-agent");
+    try {
+      const { tool } = createTool([]);
+
+      const result = await executeTool(tool, {
+        tasks: [{ agent: "alpha", instruction: "Review" }],
+      });
+
+      expect(result.content).toEqual([
+        {
+          type: "text",
+          text: 'No agents found in scope "user". Expected agent files in /pi-agent/agents/.',
+        },
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("forwards the trimmed delegation label, or none, to the delegation call", async () => {
     const { tool, executeDelegation } = createTool();
     executeDelegation.mockImplementation(async (tasks) => [
@@ -677,9 +805,9 @@ describe("subagent_ask and subagent_retrieve", () => {
       outcome: {
         status: "settled",
         request,
-        result: { status: "failed", reason: "error", error: "boom", humanIntervened: false },
+        result: { status: "failed", reason: "error", cause: "run_error", humanIntervened: false },
       },
-      text: `${header}Request failed (error): boom`,
+      text: `${header}Request failed (error): The child's run ended with an error.`,
     },
     {
       name: "interrupted",
@@ -689,11 +817,11 @@ describe("subagent_ask and subagent_retrieve", () => {
         result: {
           status: "failed",
           reason: "interrupted",
-          error: "stopped",
+          cause: "stopped_while_running",
           humanIntervened: false,
         },
       },
-      text: `${header}Request failed (interrupted): stopped\nNo result was recorded. The child may have made changes. The request will not be retried automatically.`,
+      text: `${header}Request failed (interrupted): The child stopped while this request was running.\nNo result was recorded. The child may have made changes. The request will not be retried automatically.`,
     },
     {
       name: "pending",
@@ -713,6 +841,93 @@ describe("subagent_ask and subagent_retrieve", () => {
   ];
 
   describe("subagent_retrieve", () => {
+    it.each<{ result: RequestResult; text: string }>([
+      {
+        result: {
+          status: "failed",
+          reason: "error",
+          cause: "unreadable_request",
+          detail: "not JSON",
+          humanIntervened: false,
+        },
+        text: "Request failed (error): The child could not read the request: not JSON",
+      },
+      {
+        result: { status: "failed", reason: "error", cause: "not_started", humanIntervened: false },
+        text: "Request failed (error): Pi did not start the request",
+      },
+      {
+        result: {
+          status: "failed",
+          reason: "superseded",
+          cause: "off_branch",
+          humanIntervened: false,
+        },
+        text: "Request failed (superseded): The request's message is no longer on the child's active branch.",
+      },
+      {
+        result: {
+          status: "failed",
+          reason: "interrupted",
+          cause: "run_interrupted",
+          humanIntervened: false,
+        },
+        text: "Request failed (interrupted): The run was interrupted inside the child.\nNo result was recorded. The child may have made changes. The request will not be retried automatically.",
+      },
+      {
+        result: { status: "failed", reason: "error", cause: "no_outcome", humanIntervened: false },
+        text: "Request failed (error): Pi settled without an outcome",
+      },
+    ])("presents the failure cause $result.cause", async ({ result, text: expected }) => {
+      const { retrieveResult, retrieveTool } = harness();
+      retrieveResult.mockResolvedValue({ status: "settled", request, result });
+
+      expect(await text(retrieveTool, { childId: "scout-7k2q", requestId: "r2" })).toBe(
+        `${header}${expected}`,
+      );
+    });
+
+    it.each([
+      {
+        problem: new SubagentError({ code: "not_owned", childId: "scout-7k2q" }),
+        text: "Child scout-7k2q belongs to another parent session.",
+      },
+      {
+        problem: new SubagentError({ code: "unknown_request", request }),
+        text: "Child scout-7k2q has no request r2.",
+      },
+      { problem: new Error("child.json is not JSON"), text: "child.json is not JSON" },
+    ])("throws $text when the request cannot be retrieved", async ({ problem, text: message }) => {
+      const { retrieveResult, retrieveTool } = harness();
+      retrieveResult.mockRejectedValue(problem);
+
+      await expect(text(retrieveTool, { childId: "scout-7k2q", requestId: "r2" })).rejects.toThrow(
+        new Error(message),
+      );
+    });
+
+    it("presents wait progress as the request and its state", async () => {
+      const { retrieveResult, retrieveTool } = harness();
+      retrieveResult.mockImplementation(async (_request, options) => {
+        options.onProgress?.({ request, state: "blocked" });
+        return { status: "lost", request, started: false };
+      });
+      const onUpdate = vi.fn();
+
+      await retrieveTool.execute(
+        "call",
+        { childId: "scout-7k2q", requestId: "r2" },
+        undefined,
+        onUpdate,
+        {} as never,
+      );
+
+      expect(onUpdate).toHaveBeenCalledWith({
+        content: [{ type: "text", text: "Child scout-7k2q, request r2: blocked" }],
+        details: undefined,
+      });
+    });
+
     it.each(retrievalCases)(
       "presents $name with the specified text",
       async ({ outcome, text: expected }) => {
@@ -793,26 +1008,87 @@ describe("subagent_ask and subagent_retrieve", () => {
 
     it.each<{ outcome: AskOutcome; text: string }>([
       {
-        outcome: {
-          status: "rejected",
-          childId: "scout-7k2q",
-          reason: "busy",
-          error:
-            "Child scout-7k2q already has a request running and one queued. Nothing was submitted.",
-        },
+        outcome: { status: "rejected", childId: "scout-7k2q", reason: "busy" },
         text: "Child scout-7k2q already has a request running and one queued. Nothing was submitted.",
+      },
+      {
+        outcome: { status: "rejected", childId: "scout-7k2q", reason: "aborted" },
+        text: "The request was aborted before it was submitted.",
       },
       {
         outcome: {
           status: "rejected",
           childId: "scout-7k2q",
           reason: "invalid_target",
-          error: "Child scout-7k2q belongs to another parent session.",
+          problem: { kind: "not_owned" },
         },
         text: "Child scout-7k2q belongs to another parent session.",
       },
+      {
+        outcome: {
+          status: "rejected",
+          childId: "scout-7k2q",
+          reason: "invalid_target",
+          problem: { kind: "unreadable", detail: "child.json is not JSON" },
+        },
+        text: "child.json is not JSON",
+      },
+      {
+        outcome: {
+          status: "rejected",
+          childId: "scout-7k2q",
+          reason: "invalid_target",
+          problem: { kind: "cwd_missing", cwd: "/gone" },
+        },
+        text: "Child scout-7k2q cannot be resumed: its cwd /gone no longer exists. Delegate a new task instead.",
+      },
+      {
+        outcome: {
+          status: "rejected",
+          childId: "scout-7k2q",
+          reason: "invalid_target",
+          problem: { kind: "session_missing" },
+        },
+        text: "Child scout-7k2q cannot be resumed: its Pi session file is missing. Delegate a new task instead.",
+      },
+      {
+        outcome: {
+          status: "rejected",
+          childId: "scout-7k2q",
+          reason: "invalid_target",
+          problem: { kind: "untrusted" },
+        },
+        text: "Child scout-7k2q needs project trust, and the parent project is no longer trusted. Use /trust to trust this project, or delegate a new task.",
+      },
+      {
+        outcome: {
+          status: "rejected",
+          childId: "scout-7k2q",
+          reason: "resume_failed",
+          problem: { kind: "tmux_failed", detail: "no server" },
+        },
+        text: "Child scout-7k2q could not be resumed: tmux could not start the child: no server",
+      },
+      {
+        outcome: {
+          status: "rejected",
+          childId: "scout-7k2q",
+          reason: "resume_failed",
+          problem: { kind: "not_ready", seconds: 30 },
+        },
+        text: "Child scout-7k2q could not be resumed: Child scout-7k2q is running but did not report readiness within 30 s.",
+      },
+      {
+        outcome: {
+          status: "rejected",
+          childId: "scout-7k2q",
+          reason: "resume_failed",
+          problem: { kind: "launch_error", detail: "boom" },
+        },
+        text: "Child scout-7k2q could not be resumed: boom",
+      },
     ])(
-      "presents a $outcome.reason rejection as its error text",
+      "presents a $outcome.reason rejection with its text",
       async ({ outcome, text: expected }) => {
         const { ask, askTool } = harness();
         ask.mockResolvedValue(outcome);
@@ -820,6 +1096,19 @@ describe("subagent_ask and subagent_retrieve", () => {
         expect(await text(askTool, { childId: "scout-7k2q", instruction: "More" })).toBe(expected);
       },
     );
+
+    it("throws when observing a submitted request failed", async () => {
+      const { ask, askTool } = harness();
+      ask.mockRejectedValue(
+        new SubagentError({ code: "observation_failed", request, detail: "bad result.json" }),
+      );
+
+      await expect(text(askTool, { childId: "scout-7k2q", instruction: "More" })).rejects.toThrow(
+        new Error(
+          "Child scout-7k2q, request r2 was submitted, but observing it failed: bad result.json",
+        ),
+      );
+    });
 
     it("refuses an empty instruction without asking", async () => {
       const { ask, askTool } = harness();

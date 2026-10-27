@@ -327,9 +327,9 @@ describe("delegate", () => {
 
   it("reports progress as the request moves through queued, running and blocked", async () => {
     const tmux = createFakeTmux({ onNewSession: ready });
-    const lines: string[] = [];
+    const updates: unknown[] = [];
     const result = runtime(tmux).delegate([task(1, { timeoutMs: POLL_MS * 4 })], {
-      onProgress: (update) => lines.push(`${update.taskNumber}: ${update.line}`),
+      onProgress: (update) => updates.push(update),
     });
     await vi.advanceTimersByTimeAsync(0);
     const [childId] = children();
@@ -352,10 +352,11 @@ describe("delegate", () => {
     await vi.advanceTimersByTimeAsync(POLL_MS * 4);
     const [execution] = await result;
 
-    expect(lines).toEqual([
-      `1: Child ${childId}, request r1: queued`,
-      `1: Child ${childId}, request r1: running`,
-      `1: Child ${childId}, request r1: blocked`,
+    const request = { childId, requestId: "r1" };
+    expect(updates).toEqual([
+      { taskNumber: 1, request, state: "queued" },
+      { taskNumber: 1, request, state: "running" },
+      { taskNumber: 1, request, state: "blocked" },
     ]);
     expect(execution.outcome).toEqual({
       status: "timed_out",
@@ -390,7 +391,7 @@ describe("delegate", () => {
 
     settle(
       { childId, requestId: "r1" },
-      { status: "failed", reason: "error", error: "boom", humanIntervened: false },
+      { status: "failed", reason: "error", cause: "run_error", humanIntervened: false },
     );
     tmux.kill(childId);
     await vi.advanceTimersByTimeAsync(POLL_MS * 3);
@@ -400,7 +401,7 @@ describe("delegate", () => {
       status: "failed",
       request: { childId, requestId: "r1" },
       reason: "error",
-      error: "boom",
+      cause: "run_error",
     });
   });
 
@@ -410,7 +411,7 @@ describe("delegate", () => {
     expect(failed.outcome).toEqual({
       status: "launch_failed",
       childId: expect.stringMatching(/^scout-/),
-      error: expect.stringContaining("no server"),
+      problem: { kind: "tmux_failed", detail: "no server" },
     });
 
     const silent = createFakeTmux();
@@ -420,7 +421,7 @@ describe("delegate", () => {
     expect(indeterminate.outcome).toMatchObject({
       status: "launch_indeterminate",
       request: { requestId: "r1" },
-      error: expect.stringContaining("did not report readiness"),
+      problem: { kind: "not_ready", seconds: 30 },
     });
   });
 
@@ -436,7 +437,7 @@ describe("delegate", () => {
     expect(execution.outcome).toMatchObject({
       status: "observation_failed",
       request: { childId, requestId: "r1" },
-      error: expect.stringContaining("result.json"),
+      detail: expect.stringContaining("result.json"),
     });
   });
 
@@ -452,7 +453,9 @@ describe("delegate", () => {
       },
     });
 
-    await expect(missing.delegate([task(1)], {})).rejects.toThrow(/tmux/);
+    await expect(missing.delegate([task(1)], {})).rejects.toMatchObject({
+      problem: { code: "tmux_missing", detail: "spawn tmux ENOENT" },
+    });
     expect(children()).toEqual([]);
   });
 });
@@ -894,12 +897,13 @@ describe("retrieveResult", () => {
     settle(foreign, { status: "completed", answer: null, humanIntervened: false });
     const own = existingChild();
 
-    await expect(runtime(tmux).retrieveResult(foreign, { timeoutMs: 1 })).rejects.toThrow(
-      /another parent/,
-    );
-    await expect(
-      runtime(tmux).retrieveResult({ ...own, requestId: "r9" }, { timeoutMs: 1 }),
-    ).rejects.toThrow(/no request r9/);
+    await expect(runtime(tmux).retrieveResult(foreign, { timeoutMs: 1 })).rejects.toMatchObject({
+      problem: { code: "not_owned", childId: foreign.childId },
+    });
+    const unknown = { ...own, requestId: "r9" };
+    await expect(runtime(tmux).retrieveResult(unknown, { timeoutMs: 1 })).rejects.toMatchObject({
+      problem: { code: "unknown_request", request: unknown },
+    });
   });
 });
 
@@ -967,7 +971,6 @@ describe("ask", () => {
       status: "rejected",
       childId: first.childId,
       reason: "busy",
-      error: `Child ${first.childId} already has a request running and one queued. Nothing was submitted.`,
     });
     expect(store.listRequestIds(first.childId)).toEqual(["r1", "r2"]);
     expect(store.readResult({ childId: first.childId, requestId: "r2" })).toBeUndefined();
@@ -1011,7 +1014,7 @@ describe("ask", () => {
         settle(first, {
           status: "failed",
           reason: "interrupted",
-          error: "stopped",
+          cause: "stopped_while_running",
           humanIntervened: false,
         });
         ready(session);
@@ -1039,7 +1042,7 @@ describe("ask", () => {
       status: "rejected",
       childId: first.childId,
       reason: "resume_failed",
-      error: expect.stringContaining("no server"),
+      problem: { kind: "tmux_failed", detail: "no server" },
     });
     expect(store.listRequestIds(first.childId)).toEqual(["r1"]);
   });
@@ -1067,10 +1070,11 @@ describe("ask", () => {
 
     const outcome = await runtime(tmux).ask(foreign.childId, "Mine now", { timeoutMs: 60_000 });
 
-    expect(outcome).toMatchObject({
+    expect(outcome).toEqual({
       status: "rejected",
+      childId: foreign.childId,
       reason: "invalid_target",
-      error: expect.stringContaining("another parent"),
+      problem: { kind: "not_owned" },
     });
     expect(store.listRequestIds(foreign.childId)).toEqual(["r1"]);
     expect(tmux.launches).toBe(0);
@@ -1085,7 +1089,7 @@ describe("ask", () => {
       {
         status: "failed",
         reason: "error",
-        error: "Pi did not start the request",
+        cause: "not_started",
         humanIntervened: false,
       },
       false,
@@ -1121,15 +1125,12 @@ describe("ask", () => {
     ];
 
     expect(outcomes).toEqual([
-      expect.objectContaining({ reason: "invalid_target", error: expect.stringContaining("cwd") }),
       expect.objectContaining({
         reason: "invalid_target",
-        error: expect.stringContaining("session file is missing"),
+        problem: { kind: "cwd_missing", cwd: path.join(root, "gone") },
       }),
-      expect.objectContaining({
-        reason: "invalid_target",
-        error: expect.stringContaining("/trust"),
-      }),
+      expect.objectContaining({ reason: "invalid_target", problem: { kind: "session_missing" } }),
+      expect.objectContaining({ reason: "invalid_target", problem: { kind: "untrusted" } }),
     ]);
     expect(tmux.launches).toBe(0);
   });
@@ -1144,7 +1145,7 @@ describe("ask", () => {
     expect(outcome).toMatchObject({
       status: "rejected",
       reason: "invalid_target",
-      error: expect.stringContaining("/trust"),
+      problem: { kind: "untrusted" },
     });
     expect(store.listRequestIds(project.childId)).toEqual(["r1"]);
   });

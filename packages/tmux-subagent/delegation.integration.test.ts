@@ -288,7 +288,7 @@ it.skipIf(!hasTmux)(
       runtime.dispose();
     }
     const followUp = { childId: alphaId, requestId: "r2" };
-    if (asked.status === "rejected") throw new Error(`ask rejected: ${asked.error}`);
+    if (asked.status === "rejected") throw new Error(`ask rejected: ${JSON.stringify(asked)}`);
     expect(asked).toMatchObject({
       status: "submitted",
       request: followUp,

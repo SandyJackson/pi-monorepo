@@ -164,14 +164,27 @@ interface ReportRecord {
 
 ### Results and outcomes
 
+The runtime records and returns codes with data, never model-facing text; `tools.ts` renders every string the model sees (§11).
+
 ```ts
+/** Why the child bridge failed a request. */
+type FailureCause =
+  | "unreadable_request" // request.json could not be read; `detail` holds the raw error
+  | "not_started" // Pi did not start the run within the dispatch deadline
+  | "stopped_while_running" // found `running` under an older nonce, or across a reload
+  | "off_branch" // superseded: the request's entry left the active branch
+  | "run_interrupted" // the run was aborted inside the child
+  | "run_error" // the run ended with outcome "error"
+  | "no_outcome"; // Pi settled without an outcome
+
 /** The child-recorded terminal result of one request. Final once written. */
 type RequestResult =
   | { status: "completed"; answer: SessionAnswerRef | null; humanIntervened: boolean }
   | {
       status: "failed";
       reason: "error" | "interrupted" | "superseded";
-      error: string;
+      cause: FailureCause;
+      detail?: string; // a raw system message
       humanIntervened: boolean;
     };
 
@@ -186,15 +199,35 @@ type RetrievalOutcome =
     }
   | { status: "lost"; request: RequestRef; started: boolean };
 
+/** Why `ask` cannot use a child. */
+type TargetProblem =
+  | { kind: "not_owned" }
+  | { kind: "unreadable"; detail: string }
+  | { kind: "cwd_missing"; cwd: string }
+  | { kind: "session_missing" }
+  | { kind: "untrusted" };
+
+/** Why a child could not be started or resumed: `ensureLive`'s problem (§7), or what it threw. */
+type StartProblem = LaunchProblem | { kind: "launch_error"; detail: string };
+
 /** Outcome of subagent_ask. */
 type AskOutcome =
-  | {
-      status: "rejected";
-      childId: ChildId;
-      reason: "invalid_target" | "busy" | "resume_failed" | "aborted";
-      error: string;
-    }
+  | { status: "rejected"; childId: ChildId; reason: "invalid_target"; problem: TargetProblem }
+  | { status: "rejected"; childId: ChildId; reason: "resume_failed"; problem: StartProblem }
+  | { status: "rejected"; childId: ChildId; reason: "busy" | "aborted" }
   | { status: "submitted"; request: RequestRef; retrieval: RetrievalOutcome };
+```
+
+Failures that are not outcomes are thrown as a `SubagentError` carrying a `ParentProblem`: too many tasks, tmux missing, state directory not writable (before delegation), a child owned by another parent or an unknown request (retrieve), and a submitted request whose observation failed (ask). The tools catch it and throw an `Error` with the rendered text.
+
+```ts
+type ParentProblem =
+  | { code: "too_many_tasks"; count: number }
+  | { code: "tmux_missing"; detail: string }
+  | { code: "state_dir_unwritable"; detail: string }
+  | { code: "not_owned"; childId: ChildId }
+  | { code: "unknown_request"; request: RequestRef }
+  | { code: "observation_failed"; request: RequestRef; detail: string };
 ```
 
 `SessionAnswerRef` is the existing `{ path, entryId }` from `pi-session.ts`.
@@ -228,18 +261,24 @@ type DelegatedTaskOutcome =
       status: "failed";
       request: RequestRef;
       reason: "error" | "interrupted" | "superseded";
-      error: string;
+      cause: FailureCause;
+      detail?: string;
     }
   | { status: "timed_out"; request: RequestRef }
   | { status: "aborted"; stage: "before_launch" }
   | { status: "aborted"; stage: "observing"; request: RequestRef }
   | { status: "session_closed"; request: RequestRef }
-  | { status: "launch_failed"; childId?: ChildId; error: string }
-  | { status: "launch_indeterminate"; request: RequestRef; error: string }
-  | { status: "observation_failed"; request: RequestRef; error: string };
+  | {
+      status: "launch_failed";
+      childId?: ChildId;
+      // record_failed: writing the child or request record threw
+      problem: StartProblem | { kind: "record_failed"; detail: string };
+    }
+  | { status: "launch_indeterminate"; request: RequestRef; problem: StartProblem }
+  | { status: "observation_failed"; request: RequestRef; detail: string };
 ```
 
-`DelegatedTaskRecord`, `DelegatedTaskExecution`, `MAX_DELEGATED_TASKS`, and `ExecuteDelegation` keep their current shapes. `ExecuteDelegation` remains the tool seam.
+`DelegatedTaskRecord`, `DelegatedTaskExecution` and `MAX_DELEGATED_TASKS` keep their current shapes. `ExecuteDelegation` remains the tool seam; its `onProgress` receives `{ taskNumber, request, state }`, and `tools.ts` formats the progress line.
 
 | Retrieval or launch result | Delegated task outcome |
 |---|---|
@@ -392,8 +431,15 @@ type TmuxExec = (
 
 type EnsureLiveResult =
   | { status: "live"; nonce: string }
-  | { status: "failed"; error: string } // confirmed: session absent after attempt
-  | { status: "indeterminate"; error: string }; // session live, no matching status
+  | { status: "failed"; problem: LaunchProblem } // confirmed: session absent after attempt
+  | { status: "indeterminate"; problem: LaunchProblem }; // session live, no matching status
+
+type LaunchProblem =
+  | { kind: "cwd_missing"; cwd: string }
+  | { kind: "tmux_failed"; detail: string }
+  | { kind: "exited_early" }
+  | { kind: "no_nonce" }
+  | { kind: "not_ready"; seconds: number; detail?: string }; // detail: last status.json error
 
 function ensureLive(childId: ChildId, deps: { store: Store; tmux: TmuxExec }): Promise<EnsureLiveResult>;
 ```
@@ -551,12 +597,14 @@ Presentation keeps the existing rules: answers resolved from references at prese
 | Outcome | Text the model sees |
 |---|---|
 | completed | The answer. If `humanIntervened`: a leading line `The operator also interacted with this child during the request; the answer may address their input.` |
-| failed | `Request failed (<reason>): <error>`. For `interrupted`: `No result was recorded. The child may have made changes. The request will not be retried automatically.` |
+| failed | `Request failed (<reason>): <cause text>`. For `interrupted`: `No result was recorded. The child may have made changes. The request will not be retried automatically.` |
 | pending | `Still <state>. Use subagent_retrieve with childId <id> and requestId <id> to keep waiting.` |
 | lost, `started: true` | `The child stopped while working on this request and recorded no result. It may have made changes. It will be marked interrupted, not re-run, when the child next starts.` |
 | lost, `started: false` | `The child stopped before starting this request. The request is still queued and runs when the child next starts. subagent_ask starts the child but also submits its new instruction.` |
 | busy | `Child <id> already has a request running and one queued. Nothing was submitted.` |
-| other rejections | The error text, which names the corrective action. |
+| other rejections | The text for the rejection's problem, which names the corrective action. |
+
+`tools.ts` renders each `FailureCause`, `LaunchProblem`, `TargetProblem` and `ParentProblem` (§5, §7); a raw `detail` is included as it is.
 
 ## 10. Picker, inspection, and stop
 
@@ -591,9 +639,9 @@ Verified (ticket 03): `display-menu -t <pane>` from `run-shell -b` shows on the 
 ```text
 packages/tmux-subagent/
   index.ts            Pi adapter: parent or child mode, lifecycle hooks, tool registration
-  agents.ts           moved from herdr-subagent unchanged
+  agents.ts           moved from herdr-subagent; resolveAgent returns a code, not text
   pi-session.ts       moved; adds branch-based answer selection
-  tools.ts            everything model-facing: the four tools, result text, report envelope
+  tools.ts            everything model-facing: the four tools, result, error and progress text, report envelope
   store.ts            paths, ID allocation, atomic JSON write, record validation
   tmux.ts             TmuxExec (execFile) and argv builders
   launch.ts           ensureLive
