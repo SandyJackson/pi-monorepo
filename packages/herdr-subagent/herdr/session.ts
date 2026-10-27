@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { PiSessionInspector, type SessionAnswerRef } from "../pi-session.ts";
+import { PiSessionInspector, type SessionAnswerRef } from "@pi-workspace/tmux-subagent/pi-session";
 import { type HerdrRpcCall, HerdrRpcResponseError } from "./rpc.ts";
 
 // ---------------------------------------------------------------------------

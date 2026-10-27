@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadSkills, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { parseAgentFileContent } from "./packages/herdr-subagent/agents.ts";
+import { parseAgentFileContent } from "./packages/tmux-subagent/agents.ts";
 
 const ROOT = import.meta.dirname;
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
