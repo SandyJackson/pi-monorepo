@@ -417,7 +417,7 @@ Pi arguments are identical for first launch and resume:
 ```
 
 - **Tools:** when the agent has a tool allowlist, append `subagent_report` to it. For a depth-1 child whose allowlist contains `subagent`, also append `subagent_ask` and `subagent_retrieve`. Pi filters extension tools against the allowlist, and every shipped agent has one. Nothing else is added. With no allowlist, Pi's default toolset already includes registered extension tools.
-- **Trust:** always pass one of the two flags, from `child.json` `projectTrust`, so a hidden child never stops at Pi's project-trust prompt before readiness. See §6 `delegate` for how the value is decided.
+- **Trust:** always pass one of the two flags, from `child.json` `projectTrust`, so a hidden child never stops at Pi's project-trust prompt before readiness. See §6 `delegate` for how the value is decided. A child shares its parent's trust: `--approve` applies even where Pi has an explicit "Do not trust" saved for a subdirectory of the parent's cwd. Operator decision after the code review.
 - **`piCommand`:** `[process.execPath, process.argv[1]]` of the parent Pi that created the child, so the CLI resumes the child with the same Pi build, never whatever `pi` is on `PATH`.
 - **cwd:** the tmux `-c` directory is always `child.json` `cwd`. With `--session-dir`, Pi matches `--session-id` only against sessions whose recorded cwd is the launch cwd. From another directory, or when tmux falls back to `$HOME` because the directory is gone, Pi silently starts a new empty session with the same ID. `ensureLive` returns `failed` without launching when `cwd` is not an existing directory (ticket 02, probe 1).
 
