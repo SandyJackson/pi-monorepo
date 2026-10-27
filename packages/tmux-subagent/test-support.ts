@@ -22,10 +22,14 @@ export function createFakePi() {
     sessionId: "parent-session",
     trusted: true,
     cwd: "/repo",
+    shutdowns: 0,
   };
   const ctx = {
     get cwd() {
       return state.cwd;
+    },
+    shutdown: () => {
+      state.shutdowns++;
     },
     isIdle: () => state.idle,
     hasPendingMessages: () => state.pendingMessages,
@@ -116,6 +120,8 @@ export function createFakeTmux(
   options: { onNewSession?: (session: FakeSession) => void; newSessionError?: string } = {},
 ) {
   const sessions = new Map<string, FakeSession>();
+  /** Raw `#{session_attached}` output per session name; "0" when unset. */
+  const attached = new Map<string, string>();
   const calls: string[][] = [];
   let launches = 0;
 
@@ -143,6 +149,12 @@ export function createFakeTmux(
         return name in session.env
           ? ok(`${name}=${session.env[name]}\n`)
           : fail(`unknown variable: ${name}`);
+      }
+      case "display-message": {
+        // tmux prints an empty line for a missing session, with exit 0.
+        if (rest.at(-1) !== "#{session_attached}") return fail("unscripted format");
+        const name = targetName(rest);
+        return ok(`${sessions.has(name) ? (attached.get(name) ?? "0") : ""}\n`);
       }
       case "new-session": {
         if (options.newSessionError) return fail(options.newSessionError);
@@ -187,6 +199,10 @@ export function createFakeTmux(
     },
     kill(childId: string) {
       sessions.delete(`sa-${childId}`);
+    },
+    /** Set what `#{session_attached}` prints for a child's session. */
+    setAttached(childId: string, output: string) {
+      attached.set(`sa-${childId}`, output);
     },
   };
 }

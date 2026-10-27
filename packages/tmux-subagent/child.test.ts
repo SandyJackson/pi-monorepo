@@ -3,14 +3,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { HERDR_BLOCKED_EVENT } from "@pi-workspace/herdr-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DISPATCH_MS, POLL_MS, startChildBridge } from "./child.ts";
+import { DISPATCH_MS, POLL_MS, startChildBridge, UNVIEWED_EXIT_MS } from "./child.ts";
 import { type ChildRecord, createStore, type RequestRef, type Store } from "./store.ts";
-import { assistantEntry, createFakePi, userEntry } from "./test-support.ts";
+import { assistantEntry, createFakePi, createFakeTmux, userEntry } from "./test-support.ts";
 
 let root: string;
 let store: Store;
 let child: ChildRecord;
 let fake: ReturnType<typeof createFakePi>;
+let tmux: ReturnType<typeof createFakeTmux>;
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -29,6 +30,9 @@ beforeEach(() => {
     "",
   );
   fake = createFakePi();
+  tmux = createFakeTmux();
+  const session = `sa-${child.childId}`;
+  tmux.sessions.set(session, { name: session, cwd: root, env: {}, command: [] });
 });
 
 afterEach(async () => {
@@ -57,6 +61,7 @@ async function start(reason = "startup", nonce = "nonce-1"): Promise<void> {
     nonce,
     ctx: fake.ctx,
     reason: reason as "startup",
+    tmux: tmux.exec,
   });
 }
 
@@ -345,5 +350,149 @@ describe("child bridge dispatch and settlement", () => {
     expect(store.readStatus(child.childId)?.blocked?.label).toBe("Bash permission: waiting");
     fake.pi.events.emit(HERDR_BLOCKED_EVENT, { active: false });
     expect(store.readStatus(child.childId)?.blocked).toBeUndefined();
+  });
+});
+
+describe("child bridge drain", () => {
+  function drain(): void {
+    store.writeDrain(child.childId);
+  }
+
+  it("exits promptly when drain appears while idle and unattached", async () => {
+    await start();
+    await nextPoll();
+    expect(fake.state.shutdowns).toBe(0);
+
+    drain();
+    await nextPoll();
+
+    expect(fake.state.shutdowns).toBe(1);
+    expect(tmux.calls).toContainEqual([
+      "display-message",
+      "-p",
+      "-t",
+      `=sa-${child.childId}:`,
+      "#{session_attached}",
+    ]);
+  });
+
+  it("never exits at startup, even with drain present and no client attached", async () => {
+    drain();
+    await start();
+
+    await vi.advanceTimersByTimeAsync(UNVIEWED_EXIT_MS - POLL_MS);
+
+    expect(fake.state.shutdowns).toBe(0);
+  });
+
+  it("finishes the running request and the queued follow-up before exiting", async () => {
+    fake.append(assistantEntry("a0", "Before"));
+    store.createRequest(child.childId, "First");
+    store.createRequest(child.childId, "Second");
+    await start();
+    await nextPoll();
+    await piStartsRun("First");
+
+    drain();
+    await nextPoll();
+    expect(fake.state.shutdowns).toBe(0);
+
+    await piCompletesRun("First", "One");
+    await nextPoll();
+    expect(fake.state.shutdowns).toBe(0);
+    expect(fake.sent.map((sent) => sent.text)).toEqual(["First", "Second"]);
+
+    await piStartsRun("Second");
+    await piCompletesRun("Second", "Two", "2");
+    await nextPoll();
+
+    expect(store.readResult(ref("r2"))).toMatchObject({ phase: "settled" });
+    expect(fake.state.shutdowns).toBe(1);
+  });
+
+  it("stays while Pi has pending messages after a run settles", async () => {
+    await start();
+    drain();
+    fake.state.idle = false;
+    await nextPoll();
+
+    fake.state.idle = true;
+    fake.state.pendingMessages = true;
+    await fake.emit("agent_settled", { aborted: false });
+    await nextPoll();
+
+    expect(fake.state.shutdowns).toBe(0);
+  });
+
+  it("stays while blocked on a UI prompt", async () => {
+    await start();
+    await fake.emit("ui_prompt_start", { reason: "ui_prompt", kind: "confirm" });
+
+    drain();
+    await vi.advanceTimersByTimeAsync(POLL_MS * 8);
+
+    expect(fake.state.shutdowns).toBe(0);
+  });
+
+  it("stays while viewed and exits after the last viewer detaches", async () => {
+    tmux.setAttached(child.childId, "2");
+    await start();
+    drain();
+    await nextPoll();
+
+    tmux.setAttached(child.childId, "1");
+    await nextPoll();
+    expect(fake.state.shutdowns).toBe(0);
+
+    tmux.setAttached(child.childId, "0");
+    await nextPoll();
+    expect(fake.state.shutdowns).toBe(1);
+  });
+
+  it.each([
+    { name: "empty output", output: "" },
+    { name: "non-integer output", output: "zero" },
+  ])("treats $name from tmux as attached", async ({ output }) => {
+    tmux.setAttached(child.childId, output);
+    await start();
+
+    drain();
+    await vi.advanceTimersByTimeAsync(POLL_MS * 4);
+
+    expect(fake.state.shutdowns).toBe(0);
+  });
+
+  it("exits an inspection-only resume that nobody attaches to within 60 s", async () => {
+    drain();
+    await start();
+
+    await vi.advanceTimersByTimeAsync(UNVIEWED_EXIT_MS - POLL_MS);
+    expect(fake.state.shutdowns).toBe(0);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+
+    expect(fake.state.shutdowns).toBe(1);
+  });
+
+  it("keeps an inspection-only resume while viewed past 60 s, then exits on detach", async () => {
+    drain();
+    tmux.setAttached(child.childId, "1");
+    await start();
+
+    await vi.advanceTimersByTimeAsync(UNVIEWED_EXIT_MS * 2);
+    expect(fake.state.shutdowns).toBe(0);
+
+    tmux.setAttached(child.childId, "0");
+    await nextPoll();
+    expect(fake.state.shutdowns).toBe(1);
+  });
+
+  it("stays when the parent returns and deletes drain", async () => {
+    drain();
+    await start();
+    store.removeDrain(child.childId);
+
+    await vi.advanceTimersByTimeAsync(UNVIEWED_EXIT_MS * 2);
+
+    expect(fake.state.shutdowns).toBe(0);
   });
 });

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import extension from "./index.ts";
 import { createStore } from "./store.ts";
 import { createFakePi } from "./test-support.ts";
@@ -116,6 +116,115 @@ describe("parent mode", () => {
     expect(tool.description).toContain("user — global definition");
     expect(tool.description).not.toContain("project — local definition");
     expect(await listing(tool)).not.toContain("project — local definition");
+  });
+});
+
+describe("parent departure", () => {
+  function stateStore() {
+    return createStore(path.join(path.dirname(userAgentsDir), "subagents"));
+  }
+
+  function createChild(store: ReturnType<typeof stateStore>, parentSessionId: string): string {
+    return store.createChild(
+      {
+        parent: { sessionId: parentSessionId },
+        worktree: projectDir,
+        cwd: projectDir,
+        agent: { name: "scout", source: "user" },
+        projectTrust: false,
+        depth: 1,
+        piCommand: ["/node", "/pi/cli.js"],
+      },
+      "",
+    ).childId;
+  }
+
+  it.each(["quit", "new", "resume", "fork"])(
+    "drains this session's children on %s",
+    async (reason) => {
+      const store = stateStore();
+      const mine = createChild(store, "parent-session");
+      const other = createChild(store, "other-session");
+      const fake = harness(true);
+      await fake.emit("session_start", { reason: "startup" });
+
+      await fake.emit("session_shutdown", { reason });
+
+      expect(store.hasDrain(mine)).toBe(true);
+      expect(store.hasDrain(other)).toBe(false);
+    },
+  );
+
+  it("never drains on reload", async () => {
+    const store = stateStore();
+    const mine = createChild(store, "parent-session");
+    const fake = harness(true);
+    await fake.emit("session_start", { reason: "startup" });
+
+    await fake.emit("session_shutdown", { reason: "reload" });
+    await fake.emit("session_start", { reason: "reload" });
+
+    expect(store.hasDrain(mine)).toBe(false);
+  });
+
+  it("drains the departing session's children, not those of the session started next", async () => {
+    const store = stateStore();
+    const first = createChild(store, "first-session");
+    const second = createChild(store, "second-session");
+    const fake = harness(true);
+    fake.state.sessionId = "first-session";
+    await fake.emit("session_start", { reason: "startup" });
+
+    await fake.emit("session_shutdown", { reason: "new" });
+    fake.state.sessionId = "second-session";
+    await fake.emit("session_start", { reason: "new" });
+
+    expect(store.hasDrain(first)).toBe(true);
+    expect(store.hasDrain(second)).toBe(false);
+  });
+
+  it("cancels an earlier drain when the parent conversation is resumed", async () => {
+    const store = stateStore();
+    const mine = createChild(store, "parent-session");
+    const other = createChild(store, "other-session");
+    store.writeDrain(mine);
+    store.writeDrain(other);
+    const fake = harness(true);
+
+    await fake.emit("session_start", { reason: "resume" });
+
+    expect(store.hasDrain(mine)).toBe(false);
+    expect(store.hasDrain(other)).toBe(true);
+  });
+
+  it("logs a drain that failed instead of throwing or reporting success", async () => {
+    const store = stateStore();
+    fs.mkdirSync(store.root, { recursive: true });
+    fs.writeFileSync(path.join(store.root, "children"), "not a directory");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fake = harness(true);
+    await fake.emit("session_start", { reason: "startup" });
+    logged.mockClear();
+
+    await expect(fake.emit("session_shutdown", { reason: "quit" })).resolves.toBeDefined();
+
+    expect(logged).toHaveBeenCalledWith(expect.stringMatching(/could not drain/i));
+    logged.mockRestore();
+  });
+
+  it("logs each child it could not drain", async () => {
+    const store = stateStore();
+    const corrupt = createChild(store, "parent-session");
+    fs.writeFileSync(path.join(store.childDir(corrupt), "child.json"), "{}");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fake = harness(true);
+    await fake.emit("session_start", { reason: "startup" });
+    logged.mockClear();
+
+    await fake.emit("session_shutdown", { reason: "quit" });
+
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining(corrupt));
+    logged.mockRestore();
   });
 });
 
