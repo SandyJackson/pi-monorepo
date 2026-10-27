@@ -85,7 +85,7 @@ export function createFakePi() {
     state.leafId = entry.id as string;
   }
 
-  return { pi, ctx, state, sent, tools, flags, emit, append, handlers };
+  return { pi, ctx, state, sent, tools, flags, emit, append };
 }
 
 export function userEntry(id: string, text: string): Record<string, unknown> {
