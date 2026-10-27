@@ -216,8 +216,8 @@ export function createSubagentTool(
       : "";
   const description =
     [
-      "Delegate work to a sub-agent for tasks matching one of the specialised agents below.",
-      "Each sub-agent runs as an interactive Pi child session that keeps its conversation after the task.",
+      "Delegate work to a sub-agent. Available agent types are below.",
+      "Agents remain available after completion for follow up queries or actions",
       "",
       "Call with no arguments to list available agents.",
       "",
@@ -444,8 +444,7 @@ export function createFollowUpTools(options: {
     label: "Subagent ask",
     description: [
       "Send a follow-up instruction to one of your existing subagent children and wait for its answer.",
-      "A stopped child is resumed first. A child accepts one running and one queued request.",
-      "If the wait ends early, the child keeps working; use subagent_retrieve to keep waiting.",
+      "A child accepts one running and one queued request.",
     ].join("\n"),
     parameters: AskParams,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -465,7 +464,7 @@ export function createFollowUpTools(options: {
     label: "Subagent retrieve",
     description: [
       "Get the result of an earlier subagent request, waiting for it if it has not settled.",
-      "Never starts a child or submits work.",
+      "Use if the wait ended early. Never starts a child or submits work.",
     ].join("\n"),
     parameters: RetrieveParams,
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -502,7 +501,7 @@ export function createReportTool(options: {
     label: "Subagent report",
     description: [
       "Send findings to the parent agent that owns this subagent. The report is queued and reaches the parent as a follow-up message.",
-      "For an initial delegated task, finish the assigned work before sending a report. Your normal final answer already returns through delegation; do not duplicate it with this tool. During follow-up work or direct interaction with the operator, use reports when communicating additional findings to the parent is useful.",
+      "For an initial delegated task your final answer already returns to the parent, finish the assigned work and do not use this tool. During follow-up work or direct interaction with the operator, use reports when communicating additional findings to the parent is useful.",
     ].join("\n\n"),
     parameters: ReportParams,
     async execute(_toolCallId, params) {
