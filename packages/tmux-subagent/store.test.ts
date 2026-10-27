@@ -198,6 +198,57 @@ describe("status", () => {
   });
 });
 
+describe("reports", () => {
+  let child: ChildRecord;
+  const report = (content: string) => ({
+    childId: child.childId,
+    parentSessionId: "parent-session",
+    agent: "Code Scout",
+    content,
+  });
+  beforeEach(() => {
+    child = store.createChild(childInput, "");
+  });
+
+  it("allocates m1, m2, … write-once and lists them in numeric order", () => {
+    expect(store.listReportIds(child.childId)).toEqual([]);
+    const ids = Array.from(
+      { length: 11 },
+      (_, index) => store.createReport(report(`finding ${index}`)).reportId,
+    );
+    expect(ids[0]).toBe("m1");
+    expect(ids[10]).toBe("m11");
+    expect(store.listReportIds(child.childId)).toEqual(ids);
+
+    const first = store.readReport(child.childId, "m1");
+    expect(first).toMatchObject({ version: 1, reportId: "m1", ...report("finding 0") });
+    expect(Number.isNaN(Date.parse(first?.createdAt ?? ""))).toBe(false);
+    const file = path.join(store.childDir(child.childId), "reports", "m1.json");
+    expect(mode(file)).toBe(0o600);
+    expect(mode(path.dirname(file))).toBe(0o700);
+  });
+
+  it("returns undefined for an absent report and rejects one whose identity does not match", () => {
+    expect(store.readReport(child.childId, "m1")).toBeUndefined();
+    const record = store.createReport(report("x"));
+    const file = path.join(store.childDir(child.childId), "reports", "m1.json");
+
+    overwrite(file, { ...record, reportId: "m2" });
+    expect(() => store.readReport(child.childId, "m1")).toThrow(/m1\.json/);
+    overwrite(file, { ...record, childId: "other-aaaa" });
+    expect(() => store.readReport(child.childId, "m1")).toThrow(/m1\.json/);
+    overwrite(file, { ...record, content: 3 });
+    expect(() => store.readReport(child.childId, "m1")).toThrow(/m1\.json/);
+    expect(() => store.readReport(child.childId, "../m1")).toThrow(/report ID/);
+  });
+
+  it("lists child IDs, empty before any child exists", () => {
+    expect(createStore(path.join(root, "empty")).listChildIds()).toEqual([]);
+    const other = store.createChild(childInput, "");
+    expect(store.listChildIds().sort()).toEqual([child.childId, other.childId].sort());
+  });
+});
+
 describe("tmux.conf", () => {
   it("writes the private server configuration under the root", () => {
     const file = store.writeTmuxConf("set -g status off\n");

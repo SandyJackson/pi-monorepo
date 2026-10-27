@@ -10,10 +10,13 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   SessionStartEvent,
+  ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { HERDR_BLOCKED_EVENT, isHerdrBlockedPayload } from "@pi-workspace/herdr-contract";
+import { Type } from "typebox";
 import { findRequestAnswer } from "./pi-session.ts";
 import {
+  type ChildId,
   createStore,
   type RequestRecord,
   type RequestRef,
@@ -251,4 +254,44 @@ export function startChildBridge(
     if (current) clearTimeout(current.timer);
     unsubscribeBlocked();
   });
+}
+
+const ReportParams = Type.Object(
+  {
+    content: Type.String({ minLength: 1, description: "The findings to send to the parent" }),
+  },
+  { additionalProperties: false },
+);
+
+/**
+ * `subagent_report` (§8): queue a report for the parent named in this
+ * child's `child.json`. The model supplies only the content.
+ */
+export function createReportTool(options: {
+  store: Store;
+  childId: ChildId;
+}): ToolDefinition<typeof ReportParams> {
+  return {
+    name: "subagent_report",
+    label: "Subagent report",
+    description: [
+      "Send findings to the parent agent that owns this subagent. The report is queued and reaches the parent as a follow-up message.",
+      "For an initial delegated task, finish the assigned work before sending a report. Your normal final answer already returns through delegation; do not duplicate it with this tool. During follow-up work or direct interaction with the operator, use reports when communicating additional findings to the parent is useful.",
+    ].join("\n\n"),
+    parameters: ReportParams,
+    async execute(_toolCallId, params) {
+      if (!params.content.trim()) throw new Error("Report content must not be empty.");
+      const child = options.store.readChild(options.childId);
+      const { reportId } = options.store.createReport({
+        childId: child.childId,
+        parentSessionId: child.parent.sessionId,
+        agent: child.agent.name,
+        content: params.content,
+      });
+      return {
+        content: [{ type: "text", text: `Report ${reportId} queued for the parent` }],
+        details: undefined,
+      };
+    },
+  };
 }

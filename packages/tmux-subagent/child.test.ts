@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { HERDR_BLOCKED_EVENT } from "@pi-workspace/herdr-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DISPATCH_MS, POLL_MS, startChildBridge } from "./child.ts";
+import { createReportTool, DISPATCH_MS, POLL_MS, startChildBridge } from "./child.ts";
 import { type ChildRecord, createStore, type RequestRef, type Store } from "./store.ts";
 import { assistantEntry, createFakePi, userEntry } from "./test-support.ts";
 
@@ -345,5 +345,56 @@ describe("child bridge dispatch and settlement", () => {
     expect(store.readStatus(child.childId)?.blocked?.label).toBe("Bash permission: waiting");
     fake.pi.events.emit(HERDR_BLOCKED_EVENT, { active: false });
     expect(store.readStatus(child.childId)?.blocked).toBeUndefined();
+  });
+});
+
+describe("subagent_report", () => {
+  async function report(params: Record<string, unknown>): Promise<string> {
+    const tool = createReportTool({ store, childId: child.childId });
+    const result = await tool.execute(
+      "call",
+      params as { content: string },
+      undefined,
+      undefined,
+      fake.ctx,
+    );
+    return (result.content[0] as { text: string }).text;
+  }
+
+  it("queues a report for the parent named in child.json, taking identity only from the record", async () => {
+    // Fields the model might add do not reach the record.
+    const text = await report({
+      content: "Found a second bug",
+      childId: "other-aaaa",
+      parentSessionId: "someone-else",
+      reportId: "m9",
+      agent: "admin",
+    });
+
+    expect(text).toBe("Report m1 queued for the parent");
+    expect(store.readReport(child.childId, "m1")).toMatchObject({
+      childId: child.childId,
+      reportId: "m1",
+      parentSessionId: "parent",
+      agent: "scout",
+      content: "Found a second bug",
+    });
+    expect(await report({ content: "And a third" })).toBe("Report m2 queued for the parent");
+  });
+
+  it("has a strict schema and refuses empty content", async () => {
+    const tool = createReportTool({ store, childId: child.childId });
+    expect(tool.name).toBe("subagent_report");
+    expect(tool.parameters).toMatchObject({
+      additionalProperties: false,
+      required: ["content"],
+      properties: { content: { type: "string", minLength: 1 } },
+    });
+    expect(tool.description).toContain(
+      "For an initial delegated task, finish the assigned work before sending a report.",
+    );
+
+    await expect(report({ content: "  \n " })).rejects.toThrow(/empty/);
+    expect(store.listReportIds(child.childId)).toEqual([]);
   });
 });
