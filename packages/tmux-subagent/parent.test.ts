@@ -716,14 +716,16 @@ describe("drain", () => {
 });
 
 /** A child of this parent with one request, as an earlier delegation leaves it. */
-function existingChild(overrides: { parentSessionId?: string } = {}): RequestRef {
+function existingChild(
+  overrides: { parentSessionId?: string; source?: "user" | "project"; projectTrust?: boolean } = {},
+): RequestRef {
   const child = store.createChild(
     {
       parent: { sessionId: overrides.parentSessionId ?? "parent-session" },
       worktree: parentCwd,
       cwd: parentCwd,
-      agent: { name: "scout", source: "user", timeoutMinutes: 5 },
-      projectTrust: true,
+      agent: { name: "scout", source: overrides.source ?? "user", timeoutMinutes: 5 },
+      projectTrust: overrides.projectTrust ?? true,
       depth: 1,
       piCommand: ["node", "pi"],
     },
@@ -862,6 +864,28 @@ describe("retrieveResult", () => {
     },
   );
 
+  it("reports lost only after two consecutive polls without the child", async () => {
+    const tmux = createFakeTmux();
+    const request = existingChild();
+    let outcome: unknown;
+    void runtime(tmux)
+      .retrieveResult(request, { timeoutMs: POLL_MS * 3 })
+      .then((value) => {
+        outcome = value;
+      });
+
+    await vi.advanceTimersByTimeAsync(0); // absent
+    liveChild(tmux, request.childId);
+    await vi.advanceTimersByTimeAsync(POLL_MS); // live
+    tmux.kill(request.childId);
+    await vi.advanceTimersByTimeAsync(POLL_MS); // absent
+    expect(outcome).toBeUndefined();
+    liveChild(tmux, request.childId);
+    await vi.advanceTimersByTimeAsync(POLL_MS); // live, timed out
+
+    expect(outcome).toMatchObject({ status: "pending", stopped: "timed_out" });
+  });
+
   it("rejects another parent's child and an unknown request", async () => {
     const tmux = createFakeTmux();
     const foreign = existingChild({ parentSessionId: "other-session" });
@@ -945,6 +969,27 @@ describe("ask", () => {
     });
     expect(store.listRequestIds(first.childId)).toEqual(["r1", "r2"]);
     expect(store.readResult({ childId: first.childId, requestId: "r2" })).toBeUndefined();
+  });
+
+  it("admits only one of two concurrent asks when one slot is left", async () => {
+    const tmux = createFakeTmux();
+    const first = existingChild();
+    writeSessionFile(first.childId);
+    liveChild(tmux, first.childId);
+    const parent = runtime(tmux);
+    const controller = new AbortController();
+
+    const asks = [
+      parent.ask(first.childId, "Second", { timeoutMs: 60_000, signal: controller.signal }),
+      parent.ask(first.childId, "Third", { timeoutMs: 60_000, signal: controller.signal }),
+    ];
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    const outcomes = await Promise.all(asks);
+
+    expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(["rejected", "submitted"]);
+    expect(outcomes).toContainEqual(expect.objectContaining({ reason: "busy" }));
+    expect(store.listRequestIds(first.childId)).toEqual(["r1", "r2"]);
   });
 
   it("resumes a stopped child, whose bridge interrupts the stale request, then admits the ask", async () => {
@@ -1060,5 +1105,20 @@ describe("ask", () => {
       }),
     ]);
     expect(tmux.launches).toBe(0);
+  });
+
+  it("rejects a project agent's child as invalid_target once the parent project is untrusted, even without inherited trust", async () => {
+    const tmux = createFakeTmux();
+    const project = existingChild({ source: "project", projectTrust: false });
+    liveChild(tmux, project.childId);
+
+    const outcome = await runtime(tmux, false).ask(project.childId, "Again", { timeoutMs: 1 });
+
+    expect(outcome).toMatchObject({
+      status: "rejected",
+      reason: "invalid_target",
+      error: expect.stringContaining("/trust"),
+    });
+    expect(store.listRequestIds(project.childId)).toEqual(["r1"]);
   });
 });

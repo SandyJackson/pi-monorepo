@@ -10,7 +10,7 @@ type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 export function createFakePi() {
   const handlers = new Map<string, Handler[]>();
   const busHandlers = new Map<string, Array<(data: unknown) => void>>();
-  const sent: Array<{ text: string; deliverAs?: string }> = [];
+  const sent: Array<{ text: string; deliverAs?: string; expandPromptTemplates?: boolean }> = [];
   const customMessages: Array<{ message: Record<string, unknown>; options?: unknown }> = [];
   const tools: Array<{ name: string }> = [];
   const flags: Record<string, string | boolean | undefined> = {};
@@ -56,8 +56,11 @@ export function createFakePi() {
           (handlers.get(event) ?? []).filter((h) => h !== handler),
         );
     },
-    sendUserMessage(text: string, options?: { deliverAs?: string }) {
-      sent.push({ text, deliverAs: options?.deliverAs });
+    sendUserMessage(
+      text: string,
+      options?: { deliverAs?: string; expandPromptTemplates?: boolean },
+    ) {
+      sent.push({ text, ...options });
     },
     sendMessage(message: Record<string, unknown>, options?: unknown) {
       customMessages.push({ message, options });
@@ -130,6 +133,11 @@ export function createFakeTmux(
   /** Raw `#{session_attached}` output per session name; "0" when unset. */
   const attached = new Map<string, string>();
   const calls: string[][] = [];
+  /** The process environment each call ran with, by call index. */
+  const callEnvs: Array<NodeJS.ProcessEnv | undefined> = [];
+  /** The server's global environment: the starting client's; `undefined` while no server runs. */
+  let globalEnv: Record<string, string> | undefined;
+  let updateEnvironment: string[] = [];
   let launches = 0;
 
   const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
@@ -140,8 +148,27 @@ export function createFakeTmux(
     return target.replace(/^=/, "").replace(/:$/, "");
   }
 
-  function run(args: readonly string[]) {
+  function definedEnv(env: NodeJS.ProcessEnv = {}): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (const [name, value] of Object.entries(env)) if (value !== undefined) result[name] = value;
+    return result;
+  }
+
+  /** A command list: commands separated by a `;` argument, stopping at the first failure. */
+  function run(args: readonly string[], env?: NodeJS.ProcessEnv) {
     const rest = args[0] === "-f" ? args.slice(2) : args;
+    let result = ok();
+    let start = 0;
+    for (let index = 0; index <= rest.length; index++) {
+      if (index < rest.length && rest[index] !== ";") continue;
+      result = runOne(rest.slice(start, index), env);
+      if (result.code !== 0) return result;
+      start = index + 1;
+    }
+    return result;
+  }
+
+  function runOne(rest: readonly string[], env?: NodeJS.ProcessEnv) {
     switch (rest[0]) {
       case "-V":
         return ok("tmux 3.8\n");
@@ -153,7 +180,18 @@ export function createFakeTmux(
         return sessions.delete(targetName(rest))
           ? ok()
           : fail(`can't find session: ${targetName(rest)}`);
+      case "set-option": {
+        if (rest[1] !== "-g" || rest[2] !== "update-environment") return fail("unscripted option");
+        updateEnvironment = (rest[3] ?? "").split(" ").filter(Boolean);
+        globalEnv ??= definedEnv(env);
+        return ok();
+      }
       case "show-environment": {
+        if (rest[1] === "-g") {
+          if (!globalEnv) return fail("no server running on /tmp/tmux-1/fake");
+          const lines = Object.entries(globalEnv).map(([name, value]) => `${name}=${value}\n`);
+          return ok(lines.join(""));
+        }
         const session = sessions.get(targetName(rest));
         if (!session) return fail(`no such session: =${targetName(rest)}`);
         const name = rest.at(-1) ?? "";
@@ -171,17 +209,25 @@ export function createFakeTmux(
         if (options.newSessionError) return fail(options.newSessionError);
         const name = rest[rest.indexOf("-s") + 1];
         if (sessions.has(name)) return fail(`duplicate session: ${name}`);
-        const env: Record<string, string> = {};
+        // The child's environment: the global environment, then each
+        // update-environment name copied from the client or removed, then `-e`.
+        globalEnv ??= definedEnv(env);
+        const client = definedEnv(env);
+        const childEnv: Record<string, string> = { ...globalEnv };
+        for (const variable of updateEnvironment) {
+          if (variable in client) childEnv[variable] = client[variable];
+          else delete childEnv[variable];
+        }
         const separator = rest.indexOf("--");
         rest.slice(0, separator).forEach((arg, index, all) => {
           if (arg !== "-e") return;
           const pair = all[index + 1];
-          env[pair.slice(0, pair.indexOf("="))] = pair.slice(pair.indexOf("=") + 1);
+          childEnv[pair.slice(0, pair.indexOf("="))] = pair.slice(pair.indexOf("=") + 1);
         });
         const session = {
           name,
           cwd: rest[rest.indexOf("-c") + 1],
-          env,
+          env: childEnv,
           command: rest.slice(separator + 1),
         };
         sessions.set(name, session);
@@ -194,17 +240,23 @@ export function createFakeTmux(
     }
   }
 
-  const exec: TmuxExec = async (args) => {
+  const exec: TmuxExec = async (args, options) => {
     calls.push([...args]);
+    callEnvs.push(options?.env);
     // Resolve on a later tick so concurrent callers interleave as with a real process.
     await Promise.resolve();
-    return run(args);
+    return run(args, options?.env);
   };
 
   return {
     exec,
     calls,
+    callEnvs,
     sessions,
+    /** Start the server as another launcher with `env` would have. */
+    startServer(env: Record<string, string>) {
+      globalEnv = { ...env };
+    },
     get launches() {
       return launches;
     },

@@ -38,6 +38,8 @@ export const UNVIEWED_EXIT_MS = 60_000;
 interface CurrentRequest {
   request: RequestRef;
   instruction: string;
+  /** The text Pi started the run with: the instruction after skill and template expansion. */
+  requestText: string;
   dispatchLeaf: string | null;
   inputSeen: boolean;
   confirmed: boolean;
@@ -119,7 +121,7 @@ export function startChildBridge(
       const request = { childId, requestId };
       if (store.readResult(request)) continue;
       try {
-        // Absent means the parent has not renamed it into place yet: keep the order.
+        // createRequest renames the directory into place with request.json inside.
         return store.readRequest(request);
       } catch (error) {
         // An unreadable request can never run; settle it so the parent sees why
@@ -135,27 +137,42 @@ export function startChildBridge(
     return undefined;
   }
 
+  /**
+   * The dispatch deadline. Never resend: a late start after a resend would run
+   * the instruction twice. While Pi is busy after the input, it is still
+   * preparing the run (pre-run compaction, `before_agent_start` handlers), so
+   * the deadline is re-armed instead.
+   */
+  function dispatchTimer(): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      if (current?.confirmed !== false) return;
+      if (current.inputSeen && !ctx.isIdle()) {
+        current.timer = dispatchTimer();
+        return;
+      }
+      finish({
+        status: "failed",
+        reason: "error",
+        error: "Pi did not start the request",
+        humanIntervened: current.humanIntervened,
+      });
+      exitIfDrained().catch(() => {});
+    }, DISPATCH_MS);
+  }
+
   function dispatch(record: RequestRecord): void {
     current = {
       request: record.request,
       instruction: record.instruction,
+      requestText: record.instruction,
       dispatchLeaf: ctx.sessionManager.getLeafId(),
       inputSeen: false,
       confirmed: false,
       humanIntervened: false,
-      // Never resend: a late start after a resend would run the instruction twice.
-      timer: setTimeout(() => {
-        if (current?.confirmed === false) {
-          finish({
-            status: "failed",
-            reason: "error",
-            error: "Pi did not start the request",
-            humanIntervened: current.humanIntervened,
-          });
-        }
-      }, DISPATCH_MS),
+      timer: dispatchTimer(),
     };
-    pi.sendUserMessage(record.instruction, { deliverAs: "followUp" });
+    // Expanded as typed input is: `/skill:` and prompt templates (§8 Dispatch).
+    pi.sendUserMessage(record.instruction, { deliverAs: "followUp", expandPromptTemplates: true });
   }
 
   function poll(): void {
@@ -254,11 +271,22 @@ export function startChildBridge(
     if (!current) return { action: "continue" };
     if (event.source === "interactive") current.humanIntervened = true;
     if (!current.confirmed && event.source === "extension" && event.text === current.instruction) {
+      if (event.streamingBehavior) {
+        // A run started since the idle check. Taken back here, the request
+        // never runs, so it stays queued and is dispatched again when idle.
+        clearTimeout(current.timer);
+        current = undefined;
+        return { action: "handled" };
+      }
       current.inputSeen = true;
-      // Pi was streaming and queued the request as a follow-up.
-      if (event.streamingBehavior) confirm();
     }
     return { action: "continue" };
+  });
+
+  pi.on("before_agent_start", (event) => {
+    if (current?.inputSeen && !current.confirmed && event.messageType === "user") {
+      current.requestText = event.prompt;
+    }
   });
 
   pi.on("agent_start", () => {
@@ -282,7 +310,7 @@ export function startChildBridge(
     const { humanIntervened } = current;
     const located = findRequestAnswer(settledCtx.sessionManager.getBranch(), {
       dispatchLeaf: current.dispatchLeaf,
-      instruction: current.instruction,
+      requestText: current.requestText,
       sessionPath: settledCtx.sessionManager.getSessionFile(),
     });
     if (located.status === "superseded") {

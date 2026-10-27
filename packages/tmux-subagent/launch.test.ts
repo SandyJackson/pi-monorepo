@@ -56,6 +56,55 @@ describe("ensureLive", () => {
     );
   });
 
+  it("passes the launcher's variables to the child through tmux's environment, never in argv", async () => {
+    const tmux = createFakeTmux({ onNewSession: (session) => becomeReady(session) });
+
+    const result = await ensureLive(child.childId, {
+      store,
+      tmux: tmux.exec,
+      env: { PATH: "/bin", SEARCH_API_KEY: "hunter2", TMUX: "/tmp/tmux-1/default,1,0" },
+    });
+
+    expect(result.status).toBe("live");
+    for (const call of tmux.calls) {
+      expect(call.join(" ")).not.toContain("hunter2");
+      const values = call.filter((_, index) => call[index - 1] === "-e");
+      expect(values.every((value) => value.startsWith("PI_SUBAGENT_NONCE="))).toBe(true);
+    }
+    const session = tmux.sessions.get(`sa-${child.childId}`);
+    expect(session?.env).toMatchObject({ PATH: "/bin", SEARCH_API_KEY: "hunter2" });
+    expect(session?.env).not.toHaveProperty("TMUX");
+  });
+
+  it("removes a variable the running server inherited from another launcher when this one lacks it", async () => {
+    const tmux = createFakeTmux({ onNewSession: (session) => becomeReady(session) });
+    tmux.startServer({ PATH: "/bin", OTHER_KEY: "theirs" });
+
+    await ensureLive(child.childId, {
+      store,
+      tmux: tmux.exec,
+      env: { PATH: "/usr/bin", OWN_KEY: "mine" },
+    });
+
+    const session = tmux.sessions.get(`sa-${child.childId}`);
+    expect(session?.env).toMatchObject({ PATH: "/usr/bin", OWN_KEY: "mine" });
+    expect(session?.env).not.toHaveProperty("OTHER_KEY");
+  });
+
+  it("is indeterminate for a live session without a launch nonce, and does not launch", async () => {
+    const tmux = createFakeTmux();
+    const name = `sa-${child.childId}`;
+    tmux.sessions.set(name, { name, cwd: root, env: {}, command: [] });
+
+    const result = await ensureLive(child.childId, { store, tmux: tmux.exec });
+
+    expect(result).toEqual({
+      status: "indeterminate",
+      error: `Child ${child.childId} has a live session without a launch nonce.`,
+    });
+    expect(tmux.launches).toBe(0);
+  });
+
   it("creates one session and one Pi process for concurrent callers, who share its nonce", async () => {
     const tmux = createFakeTmux({ onNewSession: (session) => becomeReady(session) });
 

@@ -1,30 +1,10 @@
 import * as fs from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 
-/** Pi session identity parsed from the JSONL header. */
-interface PiSessionInfo {
-  id: string;
-  path: string;
-  cwd: string;
-}
-
 /** Exact reference to a persisted terminal assistant entry. */
 export interface SessionAnswerRef {
   path: string;
   entryId: string;
-}
-
-/** Snapshot returned by inspection of a Pi session file. */
-interface PiSessionSnapshot {
-  pi: PiSessionInfo | null;
-  answer: SessionAnswerRef | null;
-}
-
-/** Minimal shape of a session header entry. */
-interface SessionHeaderEntry {
-  type?: string;
-  id?: unknown;
-  cwd?: unknown;
 }
 
 /** Minimal shape of a persisted entry with message. */
@@ -141,56 +121,6 @@ function forEachNonBlankLineSync(
   }
 }
 
-/**
- * Read the Pi session header — the first non-blank JSONL line.
- * Keeps Pi's official 1 MiB bound for header discovery.
- */
-function readHeader(sessionPath: string): PiSessionInfo | null {
-  let headerResult: PiSessionInfo | null = null;
-  let decided = false;
-
-  forEachNonBlankLineSync(sessionPath, (line) => {
-    // Header bound: Pi caps header scan at 1 MiB
-    if (Buffer.byteLength(line, "utf8") > 1024 * 1024) {
-      headerResult = null;
-      decided = true;
-      return true;
-    }
-    const record = tryParseRecord(line);
-    if (!record) {
-      headerResult = null;
-      decided = true;
-      return true;
-    }
-    const header = record as SessionHeaderEntry;
-    if (header.type === "session" && isNonBlankString(header.id) && isNonBlankString(header.cwd)) {
-      headerResult = { id: header.id.trim(), path: sessionPath, cwd: header.cwd.trim() };
-    } else {
-      headerResult = null;
-    }
-    decided = true;
-    return true;
-  });
-
-  if (!decided) return null;
-  return headerResult;
-}
-
-/**
- * Find the latest substantive terminal assistant entry, falling back to the
- * first whitespace-only entry.
- */
-function findAnswer(sessionPath: string): SessionAnswerRef | null {
-  let bestEntryId: string | null = null;
-
-  forEachNonBlankLineSync(sessionPath, (line) => {
-    const record = tryParseRecord(line);
-    if (record) bestEntryId = considerAnswer(bestEntryId, record);
-  });
-
-  return bestEntryId ? { path: sessionPath, entryId: bestEntryId } : null;
-}
-
 /** The answer selection rule, applied to entries in order: returns the new best entry ID. */
 function considerAnswer(bestEntryId: string | null, entry: unknown): string | null {
   if (!isAnswerBearingEntry(entry)) return bestEntryId;
@@ -215,13 +145,14 @@ export type RequestAnswer =
  * Locate a request on the active branch (root first) and select its answer.
  *
  * The request entry is the first user message after `dispatchLeaf` (the
- * branch root when the session was empty) whose text equals the instruction.
- * The answer is chosen from the entries after it by the same rule as
- * `inspectSession`. A missing dispatch point or request entry is `superseded`.
+ * branch root when the session was empty) whose text equals `requestText`,
+ * the text Pi started the request's run with.
+ * The answer is the latest substantive terminal assistant entry after it,
+ * or the first whitespace-only one when there is none. A missing dispatch point or request entry is `superseded`.
  */
 export function findRequestAnswer(
   branch: readonly unknown[],
-  options: { dispatchLeaf: string | null; instruction: string; sessionPath: string | undefined },
+  options: { dispatchLeaf: string | null; requestText: string; sessionPath: string | undefined },
 ): RequestAnswer {
   let start = 0;
   if (options.dispatchLeaf !== null) {
@@ -232,7 +163,7 @@ export function findRequestAnswer(
     start = leafIndex + 1;
   }
   const requestIndex = branch.findIndex(
-    (entry, index) => index >= start && isUserEntryWithText(entry, options.instruction),
+    (entry, index) => index >= start && isUserEntryWithText(entry, options.requestText),
   );
   if (requestIndex === -1) return { status: "superseded" };
 
@@ -242,48 +173,6 @@ export function findRequestAnswer(
   const answer =
     bestEntryId && options.sessionPath ? { path: options.sessionPath, entryId: bestEntryId } : null;
   return { status: "found", answer };
-}
-
-/**
- * Incremental inspector for one observed Pi session file.
- *
- * Header metadata is cached once discovered (the header is written once,
- * before any answer entries) and retried on every call while still
- * incomplete. Answer discovery performs a full file scan, so it belongs on
- * settled polls — when the session is no longer appending entries — not on
- * every working poll.
- */
-export class PiSessionInspector {
-  private cachedPi: PiSessionInfo | null = null;
-  private headerResolved = false;
-
-  /** Header metadata, cached after the first successful discovery. */
-  inspectHeader(sessionPath: string): PiSessionInfo | null {
-    if (!this.headerResolved) {
-      this.cachedPi = readHeader(sessionPath);
-      this.headerResolved = this.cachedPi !== null;
-    }
-    return this.cachedPi;
-  }
-
-  /** Latest terminal assistant answer via a full scan of the file. */
-  inspectAnswer(sessionPath: string): SessionAnswerRef | null {
-    return findAnswer(sessionPath);
-  }
-}
-
-/**
- * Inspect a Pi session JSONL file for durable identity and exact terminal
- * assistant entry reference.
- *
- * Two focused passes — `readHeader` for the first non-blank line and
- * `findAnswer` for the latest substantive answer — each streaming with
- * constant buffer, matching `pi-coding-agent`.
- */
-export function inspectSession(sessionPath: string): PiSessionSnapshot {
-  const pi = readHeader(sessionPath);
-  const answer = findAnswer(sessionPath);
-  return { pi, answer };
 }
 
 /**

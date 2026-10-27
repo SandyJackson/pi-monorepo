@@ -124,10 +124,14 @@ describe("child bridge startup", () => {
   });
 });
 
-/** Pi receiving the dispatched instruction while idle: `input`, then a run starts. */
-async function piStartsRun(text: string): Promise<void> {
+/**
+ * Pi receiving the dispatched instruction while idle: `input`, then a run
+ * starts with `prompt`, the text after skill and template expansion.
+ */
+async function piStartsRun(text: string, prompt = text): Promise<void> {
   await fake.emit("input", { text, source: "extension" });
   fake.state.idle = false;
+  await fake.emit("before_agent_start", { messageType: "user", prompt });
   await fake.emit("agent_start");
 }
 
@@ -154,7 +158,9 @@ describe("child bridge dispatch and settlement", () => {
     await start();
 
     await nextPoll();
-    expect(fake.sent).toEqual([{ text: "Review the diff", deliverAs: "followUp" }]);
+    expect(fake.sent).toEqual([
+      { text: "Review the diff", deliverAs: "followUp", expandPromptTemplates: true },
+    ]);
     expect(store.readResult(ref("r1"))).toBeUndefined();
 
     await piStartsRun("Review the diff");
@@ -235,17 +241,48 @@ describe("child bridge dispatch and settlement", () => {
     expect(fake.sent).toHaveLength(1);
   });
 
-  it("confirms a request queued behind a run through the input's streaming behaviour", async () => {
-    store.createRequest(child.childId, "Queued");
+  it("expands a delegated skill instruction and binds the expanded request entry", async () => {
+    const instruction = "/skill:review mode=quick";
+    const expanded =
+      '<skill name="review" location="/skills/review/SKILL.md">\nReview.\n</skill>\n\nmode=quick';
+    store.createRequest(child.childId, instruction);
+    await start();
+    await nextPoll();
+    expect(fake.sent).toEqual([
+      { text: instruction, deliverAs: "followUp", expandPromptTemplates: true },
+    ]);
+
+    await piStartsRun(instruction, expanded);
+    await piCompletesRun(expanded, "Reviewed");
+
+    expect(store.readResult(ref("r1"))).toMatchObject({
+      phase: "settled",
+      result: { status: "completed", answer: { entryId: "a1" } },
+    });
+  });
+
+  it("takes back a request that reaches Pi while a run is streaming and dispatches it again when idle", async () => {
+    store.createRequest(child.childId, "Raced");
     await start();
     await nextPoll();
 
-    await fake.emit("input", {
-      text: "Queued",
+    // The operator started a run between the idle check and the input.
+    fake.state.idle = false;
+    const results = await fake.emit("input", {
+      text: "Raced",
       source: "extension",
       streamingBehavior: "followUp",
     });
 
+    expect(results).toContainEqual({ action: "handled" });
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS * 2);
+    expect(store.readResult(ref("r1"))).toBeUndefined();
+    expect(fake.sent).toHaveLength(1);
+
+    fake.state.idle = true;
+    await nextPoll();
+    expect(fake.sent.map((sent) => sent.text)).toEqual(["Raced", "Raced"]);
+    await piStartsRun("Raced");
     expect(store.readResult(ref("r1"))).toMatchObject({ phase: "running" });
   });
 
@@ -271,6 +308,43 @@ describe("child bridge dispatch and settlement", () => {
       expect(store.readStatus(child.childId)).toMatchObject({ state: "idle" });
     },
   );
+
+  it("keeps waiting past the dispatch deadline while Pi is still preparing the run", async () => {
+    store.createRequest(child.childId, "Slow start");
+    await start();
+    await nextPoll();
+    await fake.emit("input", { text: "Slow start", source: "extension" });
+    // Pre-run compaction or before_agent_start handlers: busy, no agent_start yet.
+    fake.state.idle = false;
+
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS * 3);
+    expect(store.readResult(ref("r1"))).toBeUndefined();
+
+    await fake.emit("before_agent_start", { messageType: "user", prompt: "Slow start" });
+    await fake.emit("agent_start");
+    await piCompletesRun("Slow start", "Done");
+    expect(store.readResult(ref("r1"))).toMatchObject({
+      phase: "settled",
+      result: { status: "completed", answer: { entryId: "a1" } },
+    });
+  });
+
+  it("fails at a later deadline once Pi is idle without having started the run", async () => {
+    store.createRequest(child.childId, "Never runs");
+    await start();
+    await nextPoll();
+    await fake.emit("input", { text: "Never runs", source: "extension" });
+    fake.state.idle = false;
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS);
+
+    fake.state.idle = true;
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS);
+
+    expect(store.readResult(ref("r1"))).toMatchObject({
+      phase: "settled",
+      result: { status: "failed", reason: "error", error: "Pi did not start the request" },
+    });
+  });
 
   it("does not confirm on another input or on a run that started without the request's input", async () => {
     store.createRequest(child.childId, "Mine");
@@ -306,6 +380,21 @@ describe("child bridge dispatch and settlement", () => {
     fake.append(userEntry("u1", "Escape me"));
 
     await fake.emit("agent_settled", { aborted: true });
+
+    expect(store.readResult(ref("r1"))).toMatchObject({
+      result: { status: "failed", reason: "interrupted" },
+    });
+  });
+
+  it("records interrupted for an aborted outcome that settles with aborted false", async () => {
+    store.createRequest(child.childId, "Stop me");
+    await start();
+    await nextPoll();
+    await piStartsRun("Stop me");
+    fake.append(userEntry("u1", "Stop me"));
+
+    await fake.emit("agent_before_settle", { outcome: "aborted" });
+    await fake.emit("agent_settled", { aborted: false });
 
     expect(store.readResult(ref("r1"))).toMatchObject({
       result: { status: "failed", reason: "interrupted" },
@@ -487,6 +576,20 @@ describe("child bridge drain", () => {
     await nextPoll();
 
     expect(store.readResult(ref("r2"))).toMatchObject({ phase: "settled" });
+    expect(fake.state.shutdowns).toBe(1);
+  });
+
+  it("exits once its last request settles through the dispatch deadline", async () => {
+    store.createRequest(child.childId, "Never starts");
+    await start();
+    await nextPoll();
+    drain();
+    await nextPoll();
+    expect(fake.state.shutdowns).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS);
+
+    expect(store.readResult(ref("r1"))).toMatchObject({ phase: "settled" });
     expect(fake.state.shutdowns).toBe(1);
   });
 

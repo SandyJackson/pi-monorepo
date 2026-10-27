@@ -12,7 +12,7 @@
 
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { ensureLive, isLive, readNonce } from "./launch.ts";
+import { ensureLive, isDirectory, isLive, readNonce } from "./launch.ts";
 import {
   type ChildId,
   type ChildRecord,
@@ -69,11 +69,7 @@ const EMPTY_SCOPE = "No subagents for this worktree";
 
 /** The §3 owning worktree of `dir`. Errors rather than guessing when `dir` is unusable. */
 function resolveWorktree(dir: string): string {
-  let isDirectory = false;
-  try {
-    isDirectory = fs.statSync(dir).isDirectory();
-  } catch {}
-  if (!dir || !isDirectory) throw new Error(`Cannot resolve the worktree of "${dir}".`);
+  if (!dir || !isDirectory(dir)) throw new Error(`Cannot resolve the worktree of "${dir}".`);
   return owningWorktree(dir);
 }
 
@@ -100,17 +96,28 @@ function formatListing(listing: Listing): string {
   return lines.map((line) => `${line}\n`).join("");
 }
 
-/** The children owned by `worktree`, oldest first. */
-function worktreeChildren(worktree: string, store: Store): ChildRecord[] {
-  return store
-    .listChildIds()
-    .map((childId) => store.readChild(childId))
+/**
+ * The children owned by `worktree`, oldest first. A child whose record cannot
+ * be read is named on stderr and skipped, so it cannot hide every other child.
+ */
+function worktreeChildren(worktree: string, deps: CliDeps): ChildRecord[] {
+  const children: ChildRecord[] = [];
+  for (const childId of deps.store.listChildIds()) {
+    try {
+      children.push(deps.store.readChild(childId));
+    } catch (error) {
+      deps.stderr(
+        `Skipped child ${childId}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  }
+  return children
     .filter((child) => child.worktree === worktree)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
 async function list(worktree: string, deps: CliDeps): Promise<Listing> {
-  const children = worktreeChildren(worktree, deps.store);
+  const children = worktreeChildren(worktree, deps);
 
   // Keyed by parent session ID. A grandchild's parent session ID is its creating child's ID.
   const parents = new Map<string, ListedGroup>();
@@ -331,7 +338,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           throw new UsageError("Usage: stop <childId> | --worktree <path>");
         }
         if (typeof dir === "string") {
-          for (const child of worktreeChildren(resolveWorktree(dir), deps.store)) {
+          for (const child of worktreeChildren(resolveWorktree(dir), deps)) {
             await stop(child.childId, deps, true);
           }
         } else {

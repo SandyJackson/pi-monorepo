@@ -3,10 +3,11 @@
  * agents, each child runs in a real tmux session on a disposable socket, and
  * the parent gets both answers back in order. A follow-up to one child after
  * it has drained and exited resumes the saved conversation. A child whose
- * agent may delegate does so in turn, one level down.
+ * agent may delegate does so in turn, one level down. A `/skill:` instruction
+ * is expanded in the child.
  *
  * The model is a local mock OpenAI-compatible endpoint (no credentials): the
- * parent's model calls `subagent` when asked to DELEGATE or NEST, a child's
+ * parent's model calls `subagent` when asked to DELEGATE, NEST or USE_PROBE, a child's
  * model calls it when asked to go DEEPER, other children's models echo their
  * instruction, and a delegating model echoes the tool result.
  */
@@ -78,6 +79,9 @@ function reply(messages: ChatMessage[]): Record<string, unknown> {
       tasks: [{ agent: "code-reviewer", instruction: "go DEEPER" }],
       timeout: 2,
     });
+  }
+  if (text.includes("USE_PROBE")) {
+    return subagentCall({ tasks: [{ agent: "alpha", instruction: "/skill:probe with ARGS" }] });
   }
   if (text.includes("DEEPER")) {
     return subagentCall({ tasks: [{ agent: "alpha", instruction: "say GRANDCHILD" }], timeout: 1 });
@@ -181,6 +185,11 @@ async function runParent(name: string, prompt: string) {
       `---\nname: ${agent}\ndescription: ${agent} agent\ntools: read\n---\nYou are ${agent}.\n`,
     );
   }
+  fs.mkdirSync(path.join(agentDir, "skills", "probe"), { recursive: true });
+  fs.writeFileSync(
+    path.join(agentDir, "skills", "probe", "SKILL.md"),
+    "---\nname: probe\ndescription: Probe skill\n---\nPROBE BODY\n",
+  );
   // Overrides the workspace code-reviewer so it runs on the mock model.
   fs.writeFileSync(
     path.join(agentDir, "agents", "code-reviewer.md"),
@@ -361,3 +370,23 @@ function liveSessions(): string[] {
     return [];
   }
 }
+
+it.skipIf(!hasTmux)(
+  "expands a delegated /skill: instruction in the child and binds its answer",
+  async () => {
+    const { agentDir } = await runParent("skill", "USE_PROBE");
+
+    const store = createStore(path.join(agentDir, "subagents"));
+    const [childId] = fs.readdirSync(path.join(store.root, "children"));
+    const result = store.readResult({ childId, requestId: "r1" });
+    if (result?.phase !== "settled" || result.result.status !== "completed") {
+      throw new Error(`request did not complete: ${JSON.stringify(result)}`);
+    }
+    const answer = result.result.answer;
+    const text = answer ? readAnswer(answer) : null;
+    expect(text).toMatch(
+      /^ECHO: <skill name="probe" [^>]*>[\s\S]*PROBE BODY[\s\S]*<\/skill>\n\nwith ARGS$/,
+    );
+  },
+  180_000,
+);

@@ -384,7 +384,10 @@ This is a report from a subagent, not a user instruction.
 ## 7. Launch and resume
 
 ```ts
-type TmuxExec = (args: readonly string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
+type TmuxExec = (
+  args: readonly string[],
+  options?: { env?: NodeJS.ProcessEnv }, // the tmux client's process environment
+) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 type EnsureLiveResult =
   | { status: "live"; nonce: string }
@@ -397,7 +400,7 @@ function ensureLive(childId: ChildId, deps: { store: Store; tmux: TmuxExec }): P
 Shared by parent and CLI:
 
 1. If live, read the session's nonce with `show-environment -t =sa-<childId> PI_SUBAGENT_NONCE` and go to step 4.
-2. Generate a nonce. Write `tmux.conf`. Run `new-session -d -s sa-<childId> -c <cwd> -e PI_SUBAGENT_NONCE=<nonce> -e <env…> -- <piCommand…> <piArgs…>` with `-f tmux.conf` on the private socket.
+2. Generate a nonce. Write `tmux.conf`. Read the names in the server's global environment with `show-environment -g` (none when no server runs). Then run one command list with `-f tmux.conf` on the private socket, with the launch environment (below) as the tmux client's process environment: `set-option -g update-environment "<names…>" ; new-session -d -s sa-<childId> -c <cwd> -e PI_SUBAGENT_NONCE=<nonce> -- <piCommand…> <piArgs…>`.
 3. If tmux reports a duplicate session, another launcher won. Read its nonce and continue. Any other non-zero exit is `failed`.
 4. Poll for `status.json` with that nonce, for at most `READY_MS` (an internal constant, about 30 s). If found, `live`. If the session disappears, `failed`, with `capture-pane` text if any was obtained. Otherwise `indeterminate`.
 
@@ -418,7 +421,7 @@ Pi arguments are identical for first launch and resume:
 - **`piCommand`:** `[process.execPath, process.argv[1]]` of the parent Pi that created the child, so the CLI resumes the child with the same Pi build, never whatever `pi` is on `PATH`.
 - **cwd:** the tmux `-c` directory is always `child.json` `cwd`. With `--session-dir`, Pi matches `--session-id` only against sessions whose recorded cwd is the launch cwd. From another directory, or when tmux falls back to `$HOME` because the directory is gone, Pi silently starts a new empty session with the same ID. `ensureLive` returns `failed` without launching when `cwd` is not an existing directory (ticket 02, probe 1).
 
-Environment: the launcher's `process.env`, minus `TMUX`, `TMUX_PANE`, and `PI_SUBAGENT_NONCE`, passed with `-e` on every launch. Nothing from the environment is written to disk. The child's environment is the private server's global environment, copied from whichever process started that server, overlaid with the `-e` values. Passing every variable explicitly makes each child reflect its own launcher. A variable missing from a later launcher's environment is not removed; the child inherits the server's copy. This is an accepted risk (ticket 03).
+Environment: the launch environment is the launcher's `process.env`, minus `TMUX`, `TMUX_PANE`, and `PI_SUBAGENT_NONCE`. No variable value appears in tmux argv, because process listings show argv: on macOS the server forked by the first client keeps that client's argv for its lifetime. Only `PI_SUBAGENT_NONCE`, which is not secret, is passed with `-e`. The launch environment is the tmux client's process environment, and `update-environment` lists variable names only: every launch variable, plus every name in the server's global environment. When tmux 3.8 creates the session it copies each listed variable's value from the client's environment into the session environment, and marks each listed name the client lacks as removed. The child's environment is the server's global environment (copied from whichever client started the server), overridden by that session environment. So every launch, including a CLI resume, gives the child exactly its own launcher's variables, API keys included, and a variable only an earlier launcher had is not inherited. Nothing from the environment is written to disk. `set-option` and `new-session` run in one command list, which tmux runs without waiting between the two commands, so a concurrent launcher's list should not apply in between (from tmux's command-queue design, not separately verified). Names tmux cannot take in the space-separated list (whitespace, `;`, or the glob characters `*?[]\`, since tmux matches the list with `fnmatch`) are left out; such a variable reaches the child only through the global environment, if its launcher started the server. One gap remains: two launchers that both find no server read no global names, and the one whose command list does not start the server cannot remove the other's extra variables. This was verified on a disposable tmux 3.8 server: no value in the tmux argv that `ps -axo args` shows, a key set in the launcher reaches the child, and a key the second launcher lacks is absent from its child.
 
 `tmux.conf` sets: `prefix None`, `prefix2 None`, all root and prefix keys unbound, `status off`, `escape-time 0`, `extended-keys on`, `extended-keys-format csi-u` (Pi's documented tmux settings), `exit-empty on`, `destroy-unattached off`, `exit-unattached off`, `remain-on-exit off`. The user's tmux configuration is never loaded. **Verify:** Pi renders correctly and receives Escape, Ctrl-C, and modified keys through the nested client.
 
@@ -443,17 +446,15 @@ function startChildBridge(pi: ExtensionAPI, options: { childDir: string; nonce: 
 On each poll, if `ctx.isIdle()`, `!ctx.hasPendingMessages()`, no UI prompt is open, and no request is current, take the lowest unsettled request:
 
 1. Record `dispatchLeaf = ctx.sessionManager.getLeafId()` and set `current` in memory.
-2. `pi.sendUserMessage(instruction, { deliverAs: "followUp" })`. It returns immediately; failures do not reach the caller. `deliverAs` matters only if the operator started a run in the moment since the idle check: the request then queues behind it instead of failing.
-3. Watch for this request's `input` event (`source: "extension"`, text equal to the instruction). It only shows that Pi received the input: an input handler can still consume it, and model or authentication checks run afterwards. Dispatch is confirmed by either:
-   - an `agent_start` after that `input` event (Pi was idle and started a run), or
-   - that `input` event carrying `streamingBehavior` (Pi was streaming and queued it as a follow-up).
+2. `pi.sendUserMessage(instruction, { deliverAs: "followUp", expandPromptTemplates: true })`. It returns immediately; failures do not reach the caller. `expandPromptTemplates` makes Pi treat the instruction as typed input: `/skill:<name>` and prompt templates are expanded, and an instruction naming an extension command runs that command (it then never reaches `input`, so step 4 settles it). Pi's `input` event carries the instruction before expansion. `deliverAs` makes Pi set `streamingBehavior` on the `input` event if a run started in the moment since the idle check, instead of throwing.
+3. Watch for this request's `input` event (`source: "extension"`, text equal to the instruction).
+   - If it carries `streamingBehavior`, a run started since the idle check. The bridge returns `{ action: "handled" }`, so Pi drops the input before expansion or queueing and the request never runs. The bridge clears `current` without writing `result.json`; the request stays queued and a later poll dispatches it again.
+   - Otherwise it only shows that Pi received the input: a later input handler can still consume it, and model or authentication checks run afterwards. Dispatch is confirmed by an `agent_start` after that `input` event. The `before_agent_start` event between them (`messageType: "user"`) carries `prompt`, the expanded text Pi starts the run with; the bridge keeps it as the request text for binding. Pi marks the session busy before `before_agent_start`, so no other prompt can start a run in between.
 
    On confirmation, write `result.json` `running` with the nonce and set `current` in `status.json`.
-4. If there is no confirmation within `DISPATCH_MS` (an internal constant, about 10 s), write `settled` / `failed` / `error` with `Pi did not start the request`, and clear `current`. This covers consumed input, a missing model, and failed authentication. Never re-dispatch: a late start after a resend would run the instruction twice.
+4. If there is no confirmation within `DISPATCH_MS` (an internal constant, about 10 s): when the `input` event was seen and Pi is not idle, Pi is still preparing the run (pre-run auto-compaction, `before_agent_start` handlers), so wait another `DISPATCH_MS`. Otherwise write `settled` / `failed` / `error` with `Pi did not start the request`, and clear `current`. This covers consumed input, a missing model, and failed authentication. Never re-dispatch: a late start after a resend would run the instruction twice.
 
-`running` is written only after Pi has started or queued the run, so a request without `result.json` was never started. That is why startup may dispatch it, and why §6 treats it as queued.
-
-In the queued case, an input handler could still consume the request after confirmation. Settlement then finds no request entry and records `superseded`. That is an honest result, so it needs no separate handling.
+`running` is written only after Pi has started the run, so a request without `result.json` was never started. That is why startup may dispatch it, why §6 treats it as queued, and why a request taken back in step 3 may be dispatched again.
 
 From dispatch to settlement, any `input` event with `source: "interactive"` sets `humanIntervened`.
 
@@ -462,10 +463,10 @@ From dispatch to settlement, any `input` event with `source: "interactive"` sets
 Pi's extension `message_end` fires before the message is persisted and carries no entry ID, so the bridge does not bind there. At settlement it locates the request's user entry on the current branch:
 
 1. Find `dispatchLeaf` in `ctx.sessionManager.getBranch()`. If `dispatchLeaf` was `null` (empty session), start from the branch root.
-2. The request entry is the first user-message entry after that point whose text equals the instruction.
+2. The request entry is the first user-message entry after that point whose text equals the request text: the `before_agent_start` prompt recorded in Dispatch step 3, which is the instruction after skill and template expansion.
 3. If `dispatchLeaf` is not on the branch, or no such entry follows it, the request is `superseded`.
 
-Text equality is safe here because it is scoped to entries after the dispatch point. An operator typing the identical instruction at the same moment is the only ambiguity, and either entry gives the same answer. **Verify:** the persisted user entry's text equals the instruction passed to `sendUserMessage` (no transformation by other extensions' `input` handlers in the child's extension set).
+Text equality is safe here because it is scoped to entries after the dispatch point. An operator typing the identical instruction at the same moment is the only ambiguity, and either entry gives the same answer. In Pi 1.3.0 the starting user message is built from the `before_agent_start` prompt unchanged when no images are attached (`_prepareRun`), so the persisted text equals the recorded request text. An extension `message_end` handler that replaces the user message would break this; none in the child's extension set does. The real-Pi integration test delegates a `/skill:` instruction and checks that it completes with the expanded text.
 
 ### Settlement
 
@@ -492,6 +493,7 @@ The condition is evaluated only on these transitions, never at startup:
 
 - `drain` appears (absent on the previous poll, present now)
 - `agent_settled`
+- a request settles through the dispatch deadline (§8 Dispatch step 4)
 - the attached-client count drops to 0
 - a child that started with `drain` present has not been attached within 60 s
 
@@ -565,7 +567,7 @@ node cli.ts stop  <childId> | --worktree <path>
 ```
 
 - **Worktree resolution:** from `#{pane_current_path}` of `--pane`, using the §3 rule. If resolution fails, show an error with `display-message`. Never fall back to listing all children.
-- **`list`:** children of the worktree grouped by parent (`name` or short session ID). Grandchildren are listed under their creating child, labelled `child <childId>`. Each entry shows child ID, agent, label, and `running` / `idle` / `blocked` / `stopped`. Read-only; never starts Pi.
+- **`list`:** children of the worktree grouped by parent (`name` or short session ID). Grandchildren are listed under their creating child, labelled `child <childId>`. Each entry shows child ID, agent, label, and `running` / `idle` / `blocked` / `stopped`. Read-only; never starts Pi. A child whose `child.json` cannot be read is skipped by `list`, `pick`, and `stop --worktree` and named on stderr (`Skipped child <childId>: <error>`); the command still succeeds.
 - **`pick`:** builds a `tmux display-menu` from `list`, one titled group per parent. Each item runs `open`. An empty scope shows `No subagents for this worktree`. `display-menu` is run with `-t <--pane>`. In tmux 3.8 the menu belongs to that pane's window and shows on every client viewing it; `-c` does not choose where it is drawn.
 - **`open`:** `ensureLive`, then on the outer server run `new-pane -O -x 90% -y 90% -t <pane> -- env -u TMUX -u TMUX_PANE tmux -L pi-subagents attach -t =sa-<childId>`. The variables are cleared in the executed command as hygiene: tmux 3.8 sets `TMUX_PANE` for the new pane regardless of `-e`, and the attach client has no use for the outer server's values. Clearing them is not what allows the attach; tmux refuses a nested attach only to the server that owns the client's pane, and `pi-subagents` is a different server (ticket 03). If `new-pane -O` fails because the window already has a modal pane (`window already has a modal pane`, exit 1), `open` shows that error with `display-message` and does nothing else. It does not close or reuse the existing float. Do not pass `-K` (the outer prefix must still work) or `-D` (Escape and Ctrl-C belong to Pi). If the child exits, the attach client exits and the pane closes. Opening never deletes `drain`.
 - **Dismiss:** close the float with the outer server's `kill-pane` (for example `prefix x`). This kills only the attach client.
@@ -625,7 +627,7 @@ Deterministic (scripted tmux, temp store):
 13. Dispatch without an `input` confirmation settles `failed` / `error` and is not re-dispatched. A request entry missing from the branch at settlement yields `superseded`.
 14. An unconfirmed in-flight report is resent after the parent is observed idle; a confirmed one is not.
 15. Child `/reload` keeps the same nonce, and `status.json` stays valid for readiness.
-16. Dispatch: `input` followed by no `agent_start` (consumed input, missing auth) settles `failed` / `error`; `input` with `streamingBehavior` confirms as queued.
+16. Dispatch: `input` followed by no `agent_start` (consumed input, missing auth) settles `failed` / `error`; `input` with `streamingBehavior` is taken back and dispatched again when idle; a `/skill:` instruction is expanded and binds to its expanded entry.
 17. Launch arguments: an allowlist gains exactly `subagent_report`, plus `subagent_ask` and `subagent_retrieve` for a depth-1 child that lists `subagent`; `projectTrust` produces `--approve` or `--no-approve`, and a cwd outside the parent's gets `--no-approve`.
 18. Nesting: a depth-1 child registers the parent tools and creates `depth: 2` children with its worktree; a depth-2 child registers none; a depth-1 child exiting through drain drains its grandchildren.
 

@@ -248,6 +248,18 @@ describe("list", () => {
     expect(listing.groups[0].children[0].childId).toBe(child.childId);
   });
 
+  it("skips a child whose record cannot be read, naming it on stderr, and lists the rest", async () => {
+    const child = addChild();
+    // A child directory whose child.json was never written (createChild failed, or is mid-write).
+    fs.mkdirSync(path.join(store.root, "children", "scout-abcd"), { recursive: true });
+
+    const result = await run(["list"]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(child.childId);
+    expect(result.stderr).toMatch(/^Skipped child scout-abcd: .+\n$/);
+  });
+
   it("errors on an unresolvable worktree and lists nothing", async () => {
     addChild();
 
@@ -589,6 +601,18 @@ describe("stop", () => {
     expect(result.stdout).toBe(`Stopped ${first.childId}\nStopped ${grandchild.childId}\n`);
     expect([...privateTmux.sessions.keys()]).toEqual([`sa-${unrelated.childId}`]);
     expect(store.readChild(stopped.childId).childId).toBe(stopped.childId);
+  });
+
+  it("stops a worktree's readable children when another child's record cannot be read", async () => {
+    const child = addChild();
+    liven(child, "n1");
+    fs.mkdirSync(path.join(store.root, "children", "scout-abcd"), { recursive: true });
+
+    const result = await run(["stop", "--worktree", worktree]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe(`Stopped ${child.childId}\n`);
+    expect(result.stderr).toMatch(/^Skipped child scout-abcd: /);
   });
 
   it("succeeds without change for a child that is already stopped", async () => {
