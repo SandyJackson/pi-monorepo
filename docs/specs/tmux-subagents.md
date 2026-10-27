@@ -449,7 +449,7 @@ On each poll, if `ctx.isIdle()`, `!ctx.hasPendingMessages()`, no UI prompt is op
    - Otherwise it only shows that Pi received the input: a later input handler can still consume it, and model or authentication checks run afterwards. Dispatch is confirmed by an `agent_start` after that `input` event. The `before_agent_start` event between them (`messageType: "user"`) carries `prompt`, the expanded text Pi starts the run with; the bridge keeps it as the request text for binding. Pi marks the session busy before `before_agent_start`, so no other prompt can start a run in between.
 
    On confirmation, write `result.json` `running` with the nonce and set `current` in `status.json`.
-4. If there is no confirmation within `DISPATCH_MS` (an internal constant, about 10 s), write `settled` / `failed` / `error` with `Pi did not start the request`, and clear `current`. This covers consumed input, a missing model, and failed authentication. Never re-dispatch: a late start after a resend would run the instruction twice.
+4. If there is no confirmation within `DISPATCH_MS` (an internal constant, about 10 s): when the `input` event was seen and Pi is not idle, Pi is still preparing the run (pre-run auto-compaction, `before_agent_start` handlers), so wait another `DISPATCH_MS`. Otherwise write `settled` / `failed` / `error` with `Pi did not start the request`, and clear `current`. This covers consumed input, a missing model, and failed authentication. Never re-dispatch: a late start after a resend would run the instruction twice.
 
 `running` is written only after Pi has started the run, so a request without `result.json` was never started. That is why startup may dispatch it, why §6 treats it as queued, and why a request taken back in step 3 may be dispatched again.
 
@@ -490,6 +490,7 @@ The condition is evaluated only on these transitions, never at startup:
 
 - `drain` appears (absent on the previous poll, present now)
 - `agent_settled`
+- a request settles through the dispatch deadline (§8 Dispatch step 4)
 - the attached-client count drops to 0
 - a child that started with `drain` present has not been attached within 60 s
 

@@ -309,6 +309,43 @@ describe("child bridge dispatch and settlement", () => {
     },
   );
 
+  it("keeps waiting past the dispatch deadline while Pi is still preparing the run", async () => {
+    store.createRequest(child.childId, "Slow start");
+    await start();
+    await nextPoll();
+    await fake.emit("input", { text: "Slow start", source: "extension" });
+    // Pre-run compaction or before_agent_start handlers: busy, no agent_start yet.
+    fake.state.idle = false;
+
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS * 3);
+    expect(store.readResult(ref("r1"))).toBeUndefined();
+
+    await fake.emit("before_agent_start", { messageType: "user", prompt: "Slow start" });
+    await fake.emit("agent_start");
+    await piCompletesRun("Slow start", "Done");
+    expect(store.readResult(ref("r1"))).toMatchObject({
+      phase: "settled",
+      result: { status: "completed", answer: { entryId: "a1" } },
+    });
+  });
+
+  it("fails at a later deadline once Pi is idle without having started the run", async () => {
+    store.createRequest(child.childId, "Never runs");
+    await start();
+    await nextPoll();
+    await fake.emit("input", { text: "Never runs", source: "extension" });
+    fake.state.idle = false;
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS);
+
+    fake.state.idle = true;
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS);
+
+    expect(store.readResult(ref("r1"))).toMatchObject({
+      phase: "settled",
+      result: { status: "failed", reason: "error", error: "Pi did not start the request" },
+    });
+  });
+
   it("does not confirm on another input or on a run that started without the request's input", async () => {
     store.createRequest(child.childId, "Mine");
     await start();
@@ -524,6 +561,20 @@ describe("child bridge drain", () => {
     await nextPoll();
 
     expect(store.readResult(ref("r2"))).toMatchObject({ phase: "settled" });
+    expect(fake.state.shutdowns).toBe(1);
+  });
+
+  it("exits once its last request settles through the dispatch deadline", async () => {
+    store.createRequest(child.childId, "Never starts");
+    await start();
+    await nextPoll();
+    drain();
+    await nextPoll();
+    expect(fake.state.shutdowns).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS);
+
+    expect(store.readResult(ref("r1"))).toMatchObject({ phase: "settled" });
     expect(fake.state.shutdowns).toBe(1);
   });
 

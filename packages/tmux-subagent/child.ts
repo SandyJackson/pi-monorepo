@@ -137,6 +137,29 @@ export function startChildBridge(
     return undefined;
   }
 
+  /**
+   * The dispatch deadline. Never resend: a late start after a resend would run
+   * the instruction twice. While Pi is busy after the input, it is still
+   * preparing the run (pre-run compaction, `before_agent_start` handlers), so
+   * the deadline is re-armed instead.
+   */
+  function dispatchTimer(): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      if (current?.confirmed !== false) return;
+      if (current.inputSeen && !ctx.isIdle()) {
+        current.timer = dispatchTimer();
+        return;
+      }
+      finish({
+        status: "failed",
+        reason: "error",
+        error: "Pi did not start the request",
+        humanIntervened: current.humanIntervened,
+      });
+      exitIfDrained().catch(() => {});
+    }, DISPATCH_MS);
+  }
+
   function dispatch(record: RequestRecord): void {
     current = {
       request: record.request,
@@ -146,17 +169,7 @@ export function startChildBridge(
       inputSeen: false,
       confirmed: false,
       humanIntervened: false,
-      // Never resend: a late start after a resend would run the instruction twice.
-      timer: setTimeout(() => {
-        if (current?.confirmed === false) {
-          finish({
-            status: "failed",
-            reason: "error",
-            error: "Pi did not start the request",
-            humanIntervened: current.humanIntervened,
-          });
-        }
-      }, DISPATCH_MS),
+      timer: dispatchTimer(),
     };
     // Expanded as typed input is: `/skill:` and prompt templates (§8 Dispatch).
     pi.sendUserMessage(record.instruction, { deliverAs: "followUp", expandPromptTemplates: true });
