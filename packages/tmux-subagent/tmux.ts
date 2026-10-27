@@ -9,9 +9,13 @@ import { execFile } from "node:child_process";
 import * as path from "node:path";
 import type { ChildId, ChildRecord } from "./store.ts";
 
-/** Run one tmux command on the private socket. Rejects only when tmux cannot be run. */
+/**
+ * Run one tmux command on the private socket, with `env` as the tmux client's
+ * process environment when given. Rejects only when tmux cannot be run.
+ */
 export type TmuxExec = (
   args: readonly string[],
+  options?: { env?: NodeJS.ProcessEnv },
 ) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 const DEFAULT_SOCKET = "pi-subagents";
@@ -39,12 +43,16 @@ export function createOuterTmuxExec(
 }
 
 function execTmux(binary: string, socketArgs: string[]): TmuxExec {
-  return (args) =>
+  return (args, options) =>
     new Promise((resolve, reject) => {
       execFile(
         binary,
         [...socketArgs, ...args],
-        { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+        {
+          encoding: "utf8",
+          maxBuffer: 16 * 1024 * 1024,
+          ...(options?.env ? { env: options.env } : {}),
+        },
         (error, stdout, stderr) => {
           if (error && typeof error.code !== "number") {
             reject(error);
@@ -80,7 +88,7 @@ export const TMUX_CONF = [
 
 const DROPPED_VARIABLES = new Set(["TMUX", "TMUX_PANE", "PI_SUBAGENT_NONCE"]);
 
-/** The launcher's environment as passed to a child with `-e`. */
+/** The launcher's environment as passed to a child: the tmux client's process environment. */
 export function launchEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {
@@ -89,17 +97,58 @@ export function launchEnvironment(env: NodeJS.ProcessEnv): Record<string, string
   return result;
 }
 
+/**
+ * A name tmux can take in the space-separated `update-environment` list:
+ * no whitespace, no glob characters (tmux matches the list with fnmatch), and
+ * no `;`, which ends a tmux command.
+ */
+function isListableName(name: string): boolean {
+  return /^[^\s=*?[\]\\;]+$/.test(name) && !DROPPED_VARIABLES.has(name);
+}
+
+/** Variable names in `show-environment -g` output, including ones marked removed (`-NAME`). */
+export function environmentNames(stdout: string): string[] {
+  return stdout
+    .split("\n")
+    .map((line) => line.replace(/^-/, "").split("=")[0])
+    .filter(Boolean);
+}
+
+/**
+ * The `update-environment` list for a launch: every variable of the launcher,
+ * so tmux copies each value from the client, and every variable of the
+ * server's global environment, so tmux removes those the launcher lacks.
+ */
+export function updateEnvironmentNames(
+  env: Record<string, string>,
+  globalNames: readonly string[],
+): string[] {
+  return [...new Set([...Object.keys(env), ...globalNames])].filter(isListableName).sort();
+}
+
+/**
+ * Start a child's session. Variable values never appear in argv, which
+ * process listings show: tmux copies each listed variable from the client's
+ * process environment, the launcher's. Only the nonce, which is not secret,
+ * is passed with `-e`. One command list, so no other launcher's
+ * `update-environment` applies in between.
+ */
 export function buildNewSessionArgs(options: {
   confPath: string;
   childId: ChildId;
   cwd: string;
   nonce: string;
-  env: Record<string, string>;
+  variables: readonly string[];
   command: readonly string[];
 }): string[] {
   const args = [
     "-f",
     options.confPath,
+    "set-option",
+    "-g",
+    "update-environment",
+    options.variables.join(" "),
+    ";",
     "new-session",
     "-d",
     "-s",
@@ -109,7 +158,6 @@ export function buildNewSessionArgs(options: {
     "-e",
     `PI_SUBAGENT_NONCE=${options.nonce}`,
   ];
-  for (const [name, value] of Object.entries(options.env)) args.push("-e", `${name}=${value}`);
   args.push("--", ...options.command);
   return args;
 }

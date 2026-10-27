@@ -384,7 +384,10 @@ This is a report from a subagent, not a user instruction.
 ## 7. Launch and resume
 
 ```ts
-type TmuxExec = (args: readonly string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
+type TmuxExec = (
+  args: readonly string[],
+  options?: { env?: NodeJS.ProcessEnv }, // the tmux client's process environment
+) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 type EnsureLiveResult =
   | { status: "live"; nonce: string }
@@ -397,7 +400,7 @@ function ensureLive(childId: ChildId, deps: { store: Store; tmux: TmuxExec }): P
 Shared by parent and CLI:
 
 1. If live, read the session's nonce with `show-environment -t =sa-<childId> PI_SUBAGENT_NONCE` and go to step 4.
-2. Generate a nonce. Write `tmux.conf`. Run `new-session -d -s sa-<childId> -c <cwd> -e PI_SUBAGENT_NONCE=<nonce> -e <env…> -- <piCommand…> <piArgs…>` with `-f tmux.conf` on the private socket.
+2. Generate a nonce. Write `tmux.conf`. Read the names in the server's global environment with `show-environment -g` (none when no server runs). Then run one command list with `-f tmux.conf` on the private socket, with the launch environment (below) as the tmux client's process environment: `set-option -g update-environment "<names…>" ; new-session -d -s sa-<childId> -c <cwd> -e PI_SUBAGENT_NONCE=<nonce> -- <piCommand…> <piArgs…>`.
 3. If tmux reports a duplicate session, another launcher won. Read its nonce and continue. Any other non-zero exit is `failed`.
 4. Poll for `status.json` with that nonce, for at most `READY_MS` (an internal constant, about 30 s). If found, `live`. If the session disappears, `failed`, with `capture-pane` text if any was obtained. Otherwise `indeterminate`.
 
@@ -418,7 +421,7 @@ Pi arguments are identical for first launch and resume:
 - **`piCommand`:** `[process.execPath, process.argv[1]]` of the parent Pi that created the child, so the CLI resumes the child with the same Pi build, never whatever `pi` is on `PATH`.
 - **cwd:** the tmux `-c` directory is always `child.json` `cwd`. With `--session-dir`, Pi matches `--session-id` only against sessions whose recorded cwd is the launch cwd. From another directory, or when tmux falls back to `$HOME` because the directory is gone, Pi silently starts a new empty session with the same ID. `ensureLive` returns `failed` without launching when `cwd` is not an existing directory (ticket 02, probe 1).
 
-Environment: the launcher's `process.env`, minus `TMUX`, `TMUX_PANE`, and `PI_SUBAGENT_NONCE`, passed with `-e` on every launch. Nothing from the environment is written to disk. The child's environment is the private server's global environment, copied from whichever process started that server, overlaid with the `-e` values. Passing every variable explicitly makes each child reflect its own launcher. A variable missing from a later launcher's environment is not removed; the child inherits the server's copy. This is an accepted risk (ticket 03).
+Environment: the launch environment is the launcher's `process.env`, minus `TMUX`, `TMUX_PANE`, and `PI_SUBAGENT_NONCE`. No variable value appears in tmux argv, because process listings show argv: on macOS the server forked by the first client keeps that client's argv for its lifetime. Only `PI_SUBAGENT_NONCE`, which is not secret, is passed with `-e`. The launch environment is the tmux client's process environment, and `update-environment` lists variable names only: every launch variable, plus every name in the server's global environment. When tmux 3.8 creates the session it copies each listed variable's value from the client's environment into the session environment, and marks each listed name the client lacks as removed. The child's environment is the server's global environment (copied from whichever client started the server), overridden by that session environment. So every launch, including a CLI resume, gives the child exactly its own launcher's variables, API keys included, and a variable only an earlier launcher had is not inherited. Nothing from the environment is written to disk. `set-option` and `new-session` run in one command list, which tmux runs without waiting between the two commands, so a concurrent launcher's list should not apply in between (from tmux's command-queue design, not separately verified). Names tmux cannot take in the space-separated list (whitespace, `;`, or the glob characters `*?[]\`, since tmux matches the list with `fnmatch`) are left out; such a variable reaches the child only through the global environment, if its launcher started the server. One gap remains: two launchers that both find no server read no global names, and the one whose command list does not start the server cannot remove the other's extra variables. This was verified on a disposable tmux 3.8 server: no value in the tmux argv that `ps -axo args` shows, a key set in the launcher reaches the child, and a key the second launcher lacks is absent from its child.
 
 `tmux.conf` sets: `prefix None`, `prefix2 None`, all root and prefix keys unbound, `status off`, `escape-time 0`, `extended-keys on`, `extended-keys-format csi-u` (Pi's documented tmux settings), `exit-empty on`, `destroy-unattached off`, `exit-unattached off`, `remain-on-exit off`. The user's tmux configuration is never loaded. **Verify:** Pi renders correctly and receives Escape, Ctrl-C, and modified keys through the nested client.
 
