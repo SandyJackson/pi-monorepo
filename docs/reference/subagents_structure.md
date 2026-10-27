@@ -61,8 +61,8 @@ Live tmux state is discovered, never stored. A child is live when its tmux sessi
 ## Child bridge
 
 - **Readiness:** at `session_start` the bridge marks any `running` result from an older nonce `interrupted`, then writes `status.json`. It never re-runs interrupted work.
-- **Dispatch:** when Pi is idle with no pending messages or open prompt, the lowest unsettled request is sent with `sendUserMessage`. It counts as started only after Pi confirms it (`agent_start` after the matching `input`, or `input` with `streamingBehavior`). Without confirmation it settles `failed` / `error` and is never resent.
-- **Settlement:** on `agent_settled`, the request's user entry is located on the current branch after the dispatch leaf. The answer is the latest terminal assistant entry after it. Operator input during the request sets `humanIntervened`.
+- **Dispatch:** when Pi is idle with no pending messages or open prompt, the lowest unsettled request is sent with `sendUserMessage` and `expandPromptTemplates`, so `/skill:` and prompt-template instructions expand as typed input does. It counts as started only after `agent_start` follows the matching `input`; the `before_agent_start` prompt between them is the expanded text the request entry is bound by. An `input` that arrives while a run is streaming is taken back (`handled`) and dispatched again when idle. Without confirmation, and once Pi is idle again, it settles `failed` / `error` and is never resent.
+- **Settlement:** on `agent_settled`, the request's user entry (text equal to the expanded request text) is located on the current branch after the dispatch leaf. The answer is the latest terminal assistant entry after it. Operator input during the request sets `humanIntervened`.
 - **Blocked:** `ui_prompt_start`/`ui_prompt_end` and the `herdr:blocked` event from `@pi-workspace/herdr-contract` set and clear `blocked` in `status.json`.
 - **Drain:** the child exits only when `drain` exists, it is idle, has no unsettled request or open prompt, and no client is attached. The check runs on transitions, never at startup. A blocked child stays.
 
