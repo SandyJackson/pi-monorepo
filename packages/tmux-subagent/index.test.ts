@@ -4,7 +4,8 @@ import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import extension from "./index.ts";
-import { createStore } from "./store.ts";
+import { REPORT_POLL_MS, reportEnvelope } from "./parent.ts";
+import { createStore, type ReportRecord } from "./store.ts";
 import { createFakePi } from "./test-support.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -104,6 +105,7 @@ describe("parent mode", () => {
     const nextTool = latestTool(fake);
     expect(nextTool.description).toContain("later — added after snapshot");
     expect(nextTool.description).not.toContain("stable — initial definition");
+    await fake.emit("session_shutdown", { reason: "quit" });
   });
 
   it("never exposes project agents when the project is untrusted", async () => {
@@ -116,6 +118,74 @@ describe("parent mode", () => {
     expect(tool.description).toContain("user — global definition");
     expect(tool.description).not.toContain("project — local definition");
     expect(await listing(tool)).not.toContain("project — local definition");
+    await fake.emit("session_shutdown", { reason: "quit" });
+  });
+
+  it("delivers reports absent from the session's history as follow-ups, once confirmed persisted", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = createStore(path.join(path.dirname(userAgentsDir), "subagents"));
+      const childId = store.createChild(
+        {
+          parent: { sessionId: "parent-session" },
+          worktree: projectDir,
+          cwd: projectDir,
+          agent: { name: "scout", source: "user" },
+          projectTrust: false,
+          depth: 1,
+          piCommand: ["/node", "/pi/cli.js"],
+        },
+        "",
+      ).childId;
+      for (const content of ["Old news", "Fresh finding"]) {
+        store.createReport({ childId, parentSessionId: "parent-session", agent: "scout", content });
+      }
+      const fake = harness(true);
+      // m1 was delivered on a branch other than the active one.
+      fake.state.entries = [
+        {
+          type: "custom_message",
+          id: "e1",
+          customType: "subagent_report",
+          content: "…",
+          display: true,
+          details: { childId, reportId: "m1" },
+        },
+      ];
+      await fake.emit("session_start", { reason: "resume" });
+
+      await vi.advanceTimersByTimeAsync(REPORT_POLL_MS);
+      expect(fake.customMessages).toEqual([
+        {
+          message: {
+            customType: "subagent_report",
+            content: reportEnvelope(store.readReport(childId, "m2") as ReportRecord),
+            display: true,
+            details: { childId, reportId: "m2" },
+          },
+          options: { deliverAs: "followUp", triggerTurn: true },
+        },
+      ]);
+
+      await fake.emit("message_end", {
+        message: { role: "custom", ...fake.customMessages[0].message, timestamp: 0 },
+      });
+      await vi.advanceTimersByTimeAsync(REPORT_POLL_MS * 3);
+      expect(fake.customMessages).toHaveLength(1);
+
+      // Delivery stops on every shutdown, including reload, which is no departure.
+      await fake.emit("session_shutdown", { reason: "reload" });
+      store.createReport({
+        childId,
+        parentSessionId: "parent-session",
+        agent: "scout",
+        content: "x",
+      });
+      await vi.advanceTimersByTimeAsync(REPORT_POLL_MS * 2);
+      expect(fake.customMessages).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -248,13 +318,19 @@ describe("child mode", () => {
     return { fake, store, childId: child.childId };
   }
 
-  it("starts only the bridge, signalling readiness with the launch nonce", async () => {
+  it("starts the bridge and registers only subagent_report, signalling readiness with the launch nonce", async () => {
     process.env.PI_SUBAGENT_NONCE = "launch-nonce";
     const { fake, store, childId } = childHarness();
 
     await fake.emit("session_start", { reason: "startup" });
 
-    expect(fake.tools).toEqual([]);
+    expect(fake.tools.map((tool) => tool.name)).toEqual(["subagent_report"]);
+    const report = latestTool(fake);
+    expect(
+      (await report.execute("call", { content: "Note" }, undefined, undefined, fake.ctx)).content[0]
+        .text,
+    ).toBe("Report m1 queued for the parent");
+    expect(store.readReport(childId, "m1")).toMatchObject({ parentSessionId: "parent" });
     expect(store.readStatus(childId)).toMatchObject({ nonce: "launch-nonce", state: "idle" });
     await fake.emit("session_shutdown", { reason: "quit" });
   });

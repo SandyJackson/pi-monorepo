@@ -4,6 +4,7 @@
  * children when it departs the conversation.
  */
 
+import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   discoverProjectAgents,
@@ -11,8 +12,16 @@ import {
   discoverWorkspaceAgents,
   mergeAgentLists,
 } from "./agents.ts";
-import { startChildBridge } from "./child.ts";
-import { clearDrain, createParentRuntime, type DrainResult, type ParentRuntime } from "./parent.ts";
+import { createReportTool, startChildBridge } from "./child.ts";
+import {
+  clearDrain,
+  createParentRuntime,
+  type DrainResult,
+  deliveredReportKeys,
+  type ParentRuntime,
+  reportEnvelope,
+} from "./parent.ts";
+import { createStore } from "./store.ts";
 import { createSubagentTool } from "./subagent-tool.ts";
 
 const CHILD_FLAG = "subagent-child";
@@ -31,10 +40,12 @@ export default function (pi: ExtensionAPI): void {
     type: "string",
   });
 
+  // The parent runtime of the active session; replaced on each session_start.
   let runtime: ParentRuntime | undefined;
 
   // Flags are applied after extension factories run, so mode is decided here.
   pi.on("session_start", (event, ctx) => {
+    runtime?.dispose();
     runtime = undefined;
     const childDir = pi.getFlag(CHILD_FLAG);
     if (typeof childDir === "string" && childDir) {
@@ -43,7 +54,9 @@ export default function (pi: ExtensionAPI): void {
       if (!nonce) {
         throw new Error(`--${CHILD_FLAG} requires PI_SUBAGENT_NONCE from the subagent launcher.`);
       }
-      startChildBridge(pi, { childDir, nonce, ctx, reason: event.reason });
+      const store = createStore(path.dirname(path.dirname(childDir)));
+      startChildBridge(pi, { childDir, nonce, ctx, reason: event.reason, store });
+      pi.registerTool(createReportTool({ store, childId: path.basename(childDir) }));
       return;
     }
 
@@ -60,6 +73,18 @@ export default function (pi: ExtensionAPI): void {
       parentSessionName: ctx.sessionManager.getSessionName(),
       parentCwd,
       isProjectTrusted: () => ctx.isProjectTrusted(),
+      deliveredReports: deliveredReportKeys(ctx.sessionManager.getEntries()),
+      sendReport: (report) =>
+        pi.sendMessage(
+          {
+            customType: "subagent_report",
+            content: reportEnvelope(report),
+            display: true,
+            details: { childId: report.childId, reportId: report.reportId },
+          },
+          { deliverAs: "followUp", triggerTurn: true },
+        ),
+      isIdle: () => ctx.isIdle() && !ctx.hasPendingMessages(),
     });
     // A returning parent cancels its earlier departure.
     logFailures("clear drain for", clearDrain({ parentSessionId }));
@@ -73,10 +98,15 @@ export default function (pi: ExtensionAPI): void {
     );
   });
 
+  pi.on("message_end", (event) => {
+    runtime?.observeMessage(event.message);
+  });
+
   // Reload is never a departure. Every other reason leaves this conversation.
   pi.on("session_shutdown", (event) => {
     const departing = runtime;
     runtime = undefined;
+    departing?.dispose();
     if (!departing || event.reason === "reload") return;
     logFailures("drain", departing.drain());
   });

@@ -11,6 +11,7 @@ export function createFakePi() {
   const handlers = new Map<string, Handler[]>();
   const busHandlers = new Map<string, Array<(data: unknown) => void>>();
   const sent: Array<{ text: string; deliverAs?: string }> = [];
+  const customMessages: Array<{ message: Record<string, unknown>; options?: unknown }> = [];
   const tools: Array<{ name: string }> = [];
   const flags: Record<string, string | boolean | undefined> = {};
   const state = {
@@ -18,6 +19,8 @@ export function createFakePi() {
     pendingMessages: false,
     leafId: null as string | null,
     branch: [] as Array<Record<string, unknown>>,
+    /** Every entry of the session, across branches. */
+    entries: [] as Array<Record<string, unknown>>,
     sessionFile: "/child/session/scout.jsonl" as string | undefined,
     sessionId: "parent-session",
     trusted: true,
@@ -37,6 +40,7 @@ export function createFakePi() {
     sessionManager: {
       getLeafId: () => state.leafId,
       getBranch: () => state.branch,
+      getEntries: () => state.entries,
       getSessionFile: () => state.sessionFile,
       getSessionId: () => state.sessionId,
       getSessionName: () => undefined,
@@ -54,6 +58,9 @@ export function createFakePi() {
     },
     sendUserMessage(text: string, options?: { deliverAs?: string }) {
       sent.push({ text, deliverAs: options?.deliverAs });
+    },
+    sendMessage(message: Record<string, unknown>, options?: unknown) {
+      customMessages.push({ message, options });
     },
     registerFlag() {},
     getFlag: (name: string) => flags[name],
@@ -89,7 +96,7 @@ export function createFakePi() {
     state.leafId = entry.id as string;
   }
 
-  return { pi, ctx, state, sent, tools, flags, emit, append };
+  return { pi, ctx, state, sent, customMessages, tools, flags, emit, append };
 }
 
 export function userEntry(id: string, text: string): Record<string, unknown> {

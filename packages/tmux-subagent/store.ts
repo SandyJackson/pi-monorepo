@@ -18,6 +18,7 @@ import type { SessionAnswerRef } from "./pi-session.ts";
 
 export type ChildId = string;
 export type RequestId = string;
+export type ReportId = string;
 
 export interface RequestRef {
   childId: ChildId;
@@ -87,6 +88,20 @@ export interface StatusRecord {
   blocked?: { label: string; since: string };
 }
 
+/** reports/<id>.json */
+export interface ReportRecord {
+  version: 1;
+  childId: ChildId;
+  reportId: ReportId;
+  /** Copied from child.json by the bridge, never from the model. */
+  parentSessionId: string;
+  agent: string;
+  createdAt: string;
+  content: string;
+}
+
+export type NewReport = Omit<ReportRecord, "version" | "reportId" | "createdAt">;
+
 export type NewChild = Omit<ChildRecord, "version" | "childId" | "createdAt">;
 
 export interface Store {
@@ -106,6 +121,11 @@ export interface Store {
   writeResult(record: ResultRecord): void;
   readStatus(childId: ChildId): StatusRecord | undefined;
   writeStatus(childId: ChildId, record: StatusRecord): void;
+  /** Allocate the next report ID and write the report, never replacing one. */
+  createReport(report: NewReport): ReportRecord;
+  /** Report IDs of a child in numeric order. */
+  listReportIds(childId: ChildId): ReportId[];
+  readReport(childId: ChildId, reportId: ReportId): ReportRecord | undefined;
   /** Whether the parent's `drain` signal is present. */
   hasDrain(childId: ChildId): boolean;
   writeDrain(childId: ChildId): void;
@@ -150,6 +170,22 @@ function writeAtomic(file: string, content: string): void {
 
 function writeJson(file: string, value: unknown): void {
   writeAtomic(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+/** Write a complete file under a name that must not exist yet; false when it does. */
+function writeJsonOnce(file: string, value: unknown): boolean {
+  const temp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    fs.writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: FILE_MODE, flag: "wx" });
+    // A hard link, unlike rename, refuses to replace an existing file.
+    fs.linkSync(temp, file);
+    return true;
+  } catch (error) {
+    if (isTaken(error)) return false;
+    throw error;
+  } finally {
+    fs.rmSync(temp, { force: true });
+  }
 }
 
 /** Parse and validate a record; `undefined` only when the file is absent. */
@@ -287,6 +323,22 @@ function checkStatus(value: unknown): string | undefined {
   return undefined;
 }
 
+function checkReport(childId: ChildId, reportId: ReportId) {
+  return (value: unknown): string | undefined => {
+    if (!isObject(value) || value.version !== 1) return "expected version 1";
+    if (value.childId !== childId || value.reportId !== reportId) return "report identity mismatch";
+    if (
+      !isString(value.parentSessionId) ||
+      !isString(value.agent) ||
+      !isString(value.createdAt) ||
+      !isString(value.content)
+    ) {
+      return "invalid parentSessionId, agent, createdAt or content";
+    }
+    return undefined;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -310,6 +362,21 @@ function requestNumber(requestId: string): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
+function reportNumber(reportId: string): number | undefined {
+  const match = /^m([1-9][0-9]*)$/.exec(reportId);
+  return match ? Number(match[1]) : undefined;
+}
+
+/** Directory entries, or none when the directory does not exist. */
+function readDir(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir);
+  } catch (error) {
+    if (isMissing(error)) return [];
+    throw error;
+  }
+}
+
 export function createStore(root: string = defaultStoreRoot()): Store {
   const childrenDir = path.join(root, "children");
   // IDs can come from the model in later tools; never let one leave the root.
@@ -326,15 +393,20 @@ export function createStore(root: string = defaultStoreRoot()): Store {
     return path.join(childDir(ref.childId), "requests", ref.requestId);
   };
 
+  const reportFile = (childId: ChildId, reportId: ReportId) => {
+    if (reportNumber(reportId) === undefined) throw new Error(`Invalid report ID: ${reportId}`);
+    return path.join(childDir(childId), "reports", `${reportId}.json`);
+  };
+
+  function listReportIds(childId: ChildId): ReportId[] {
+    return readDir(path.join(childDir(childId), "reports"))
+      .map((name) => name.replace(/\.json$/, ""))
+      .filter((id) => reportNumber(id) !== undefined)
+      .sort((a, b) => (reportNumber(a) ?? 0) - (reportNumber(b) ?? 0));
+  }
+
   function listRequestIds(childId: ChildId): RequestId[] {
-    let names: string[];
-    try {
-      names = fs.readdirSync(path.join(childDir(childId), "requests"));
-    } catch (error) {
-      if (isMissing(error)) return [];
-      throw error;
-    }
-    return names
+    return readDir(path.join(childDir(childId), "requests"))
       .filter((name) => requestNumber(name) !== undefined)
       .sort((a, b) => (requestNumber(a) ?? 0) - (requestNumber(b) ?? 0));
   }
@@ -432,6 +504,28 @@ export function createStore(root: string = defaultStoreRoot()): Store {
     writeStatus(childId, record) {
       writeJson(path.join(childDir(childId), "status.json"), record);
     },
+
+    createReport(report) {
+      fs.mkdirSync(path.join(childDir(report.childId), "reports"), {
+        recursive: true,
+        mode: DIR_MODE,
+      });
+      for (;;) {
+        const highest = listReportIds(report.childId).map(reportNumber).at(-1) ?? 0;
+        const record: ReportRecord = {
+          version: 1,
+          ...report,
+          reportId: `m${highest + 1}`,
+          createdAt: new Date().toISOString(),
+        };
+        if (writeJsonOnce(reportFile(record.childId, record.reportId), record)) return record;
+      }
+    },
+
+    listReportIds,
+
+    readReport: (childId, reportId) =>
+      readJson<ReportRecord>(reportFile(childId, reportId), checkReport(childId, reportId)),
 
     hasDrain: (childId) => fs.existsSync(drainFile(childId)),
 
