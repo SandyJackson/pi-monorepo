@@ -1,96 +1,84 @@
 # Subagent delegation architecture
 
-This document describes the implemented design of `packages/herdr-subagent` — durable module ownership and invariants only. Vocabulary follows `GLOSSARY.md`: **subagent delegation**, **delegated task**, **delegated task number**, **delegated task outcome**, **visible subagent session**, and **callable agent catalog**.
+This document describes the implemented design of `packages/tmux-subagent`: module ownership and invariants only. The full contract, including record shapes and outcome texts, is the spec [Tmux subagents V1](../specs/tmux-subagents.md). Vocabulary follows `GLOSSARY.md`: **subagent delegation**, **delegated task**, **subagent child**, **subagent request**, **subagent request result**, **subagent retrieval outcome**, **subagent report**, and **callable agent catalog**.
 
-The agent-state projection that backs delegated-turn settlement is Herdr-managed (see [ADR-0004](../adr/0004-keep-herdr-agent-state-managed-by-herdr.md)); this module consumes it as an external boundary and observes it through `agent.get`.
+The workspace owns child run state ([ADR-0011](../adr/0011-workspace-owns-subagent-run-state.md)). Each child is an interactive Pi session in its own tmux session (`sa-<childId>`) on one private server (`tmux -L pi-subagents`). The parent and the child exchange files under Pi's agent directory; nothing reads a terminal to learn what a child did.
 
 ## Module ownership
 
 ```text
-packages/herdr-subagent/
-├── index.ts            Pi lifecycle adapter: snapshot + tool registration
-├── agents.ts           Agent discovery and merge (catalog source)
-├── subagent-tool.ts    Tool schema, semantic validation, presentation
-├── pi-session.ts       Pi session identity and exact answer references
-└── herdr/
-    ├── delegation.ts   The ordered delegation operation
-    ├── session.ts      Visible subagent session lifecycle
-    └── rpc.ts          Herdr JSON-RPC socket transport
+packages/tmux-subagent/
+├── index.ts          Pi adapter: parent or child mode, lifecycle hooks, tool registration
+├── agents.ts         Agent discovery and merge (catalog source)
+├── pi-session.ts     Session JSONL reading and branch-based answer selection
+├── tools.ts          Everything model-facing: the four tools, result, error and progress text, report envelope
+├── store.ts          State paths, ID allocation, atomic JSON writes, record validation
+├── tmux.ts           TmuxExec (execFile) and argv builders
+├── launch.ts         ensureLive: start or find a child and wait for readiness
+├── parent.ts         createParentRuntime: delegate, ask, retrieveResult, drain, reports
+├── child.ts          Child bridge
+└── cli.ts            pick, open, list, stop (plain node, no Pi imports)
 ```
 
 | Module | Owns | Depends on |
 |---|---|---|
-| `index.ts` | Building the session-scoped callable agent catalog from Pi context, registering one `subagent` tool, binding the concrete Herdr delegation function and environment, replacing a leased child session's private startup placeholder with its delegated-task file | `agents.ts`, `subagent-tool.ts`, `herdr/delegation.ts`, `herdr/session.ts` |
-| `agents.ts` | Discovering user and trusted project agents, merging with project-overrides-user precedence, formatting and resolution | Pi's `parseFrontmatter`/`getAgentDir` |
-| `subagent-tool.ts` | Strict request schema, per-task validation against the catalog, one injected delegation call, final content/details rendering | `agents.ts`, `pi-session.ts`, `herdr/*` contracts |
-| `pi-session.ts` | Reading Pi session JSONL: header identity, exact answer references, answer resolution | nothing (fs only) |
-| `herdr/delegation.ts` | Herdr environment validation, delegation tab creation, ordered launch/observation, total ordered outcomes | `herdr/session.ts`, `herdr/rpc.ts` |
-| `herdr/session.ts` | Launching one visible subagent session and observing its initial delegated turn (the session itself persists beyond the turn under Herdr's management) | `pi-session.ts`, `herdr/rpc.ts` |
-| `herdr/rpc.ts` | Newline-delimited JSON-RPC over the Herdr Unix socket | nothing (net only) |
+| `index.ts` | Deciding mode and depth in `session_start` from `--subagent-child` and `child.json`; building the catalog; registering tools; binding drain to `session_shutdown` | everything below except `cli.ts` |
+| `agents.ts` | Discovering workspace, user, and trusted project agents; project > user > workspace precedence; resolution, returning a code for a missing agent | Pi's `parseFrontmatter`/`getAgentDir` |
+| `pi-session.ts` | Exact answer references `{path, entryId}` and selecting the answer to a request on the active branch | nothing (fs only) |
+| `tools.ts` | Everything the model sees: the four tools' names, descriptions and strict schemas, per-task validation, minute-to-millisecond conversion, the agent list, result text with `truncateHead`, the text for every runtime code (failure causes, launch, target and thrown problems), progress lines, and the report envelope. Only `index.ts` imports it | `agents.ts`, `parent.ts`, `pi-session.ts` |
+| `store.ts` | The state layout and its single-writer records; owning-worktree resolution | nothing (fs only) |
+| `tmux.ts` | Every tmux and Pi argv; the private server's `tmux.conf`; the launch environment | nothing (child_process only) |
+| `launch.ts` | `ensureLive`: one Pi process per child, readiness by launch nonce | `store.ts`, `tmux.ts` |
+| `parent.ts` | Ordered delegation, follow-ups, retrieval polling, drain, report delivery | `store.ts`, `launch.ts` |
+| `child.ts` | Dispatching requests into the child's Pi, settling results, blocked state, drain exit, reports | `store.ts`, `tmux.ts`, `pi-session.ts` |
+| `cli.ts` | Worktree-scoped picker, inspection float, list, and stop | `store.ts`, `tmux.ts`, `launch.ts` |
 
-Test seams are intentional and few: `subagent-tool.ts` receives one injected delegation function; `herdr/rpc.ts` exposes the transport as a callable boundary that tests replace with a scripted adapter.
+Test seams: `ExecuteDelegation` for the tool, a scripted `TmuxExec`, a `Store` rooted in a temporary directory, and fake timers. Real Pi and real tmux run only in the `*.integration.test.ts` files, on disposable sockets.
+
+## State and writers
+
+State lives in `<agentDir>/subagents/children/<childId>/`. Every file has one writer: the parent writes `child.json`, `system-prompt.md`, `drain`, and `request.json`; the child writes `status.json`, `result.json`, and reports. No lock is needed. Records are written to a temporary file and renamed, so readers never see partial JSON. A record with the wrong version or shape is an error, never absence.
+
+Live tmux state is discovered, never stored. A child is live when its tmux session exists. `status.json` counts as readiness only when its nonce equals the live session's `PI_SUBAGENT_NONCE`.
 
 ## Callable agent catalog
 
-- Snapshotted **once per Pi session** in `index.ts` on `session_start`; refreshed only by Pi's session lifecycle.
-- Combines user agents with project agents when the parent project is trusted; project definitions override user definitions of the same name.
-- Both the tool description and execution-time resolution use the same snapshot, so the model can never resolve a task against agents absent from its description.
+- Snapshotted once per Pi session in `session_start`; refreshed only by Pi's session lifecycle.
+- Project agents are included only when the parent project is trusted.
+- The tool description and execution-time resolution use the same snapshot.
 
-## Pi tool: validation and presentation
+## Delegation and follow-ups
 
-- The TypeBox schema is strict (`additionalProperties: false`, at most 8 tasks); Pi itself rejects malformed or obsolete request shapes — no legacy-key knowledge exists here.
-- Each well-shaped task receives its **delegated task number** (one-based position) exactly once, at parse time; that same task record is carried through validation, execution, details, and presentation. No second identity is generated.
-- Task-level failures (empty agent, empty instruction, unknown agent) become positional `invalid` outcomes; valid siblings still execute. Structurally malformed calls are rejected whole by Pi.
-- A call with no tasks lists the catalog. A delegation whose tasks are all invalid never initializes Herdr.
-- Herdr environment and tab-creation failures **throw before any launch** and surface through Pi's native tool-error channel; once launch processing begins, per-task failures — including pane-split failures — become positional delegated task outcomes instead.
-- Presentation resolves an answer's exact reference **only at presentation time** — answer text never flows through the delegation operation or persists in `details`. Truncation uses Pi's canonical `truncateHead` (head bytes/lines) with the full answer remaining addressable in the referenced session entry.
-- One task renders its direct answer or a status-specific explanation; multiple tasks render `Delegation: X/N tasks completed` plus request-ordered headings. The delegated task number is canonical; agent names are descriptive only. `details.tasks[]` carries `taskNumber`, `agent`, and the outcome's status-specific metadata — never answer text.
+`delegate` handles each valid task in order: check cancellation, allocate the child and write `r1`, `ensureLive`, then start the wait and move on. All waits are awaited together and outcomes return in request order. All-invalid delegations never touch tmux. `projectTrust` is true only when the parent project is trusted and the task cwd is at or beneath the parent's cwd; launches always pass `--approve` or `--no-approve`, so a hidden child never stops at a trust prompt.
 
-## Ordered delegation operation
+`ask` resumes a stopped child before its capacity check (one running and one queued request at most) and before submitting, so a failed resume submits nothing. `retrieveResult` never launches and never writes; each call gets a fresh timeout. Loss requires two consecutive polls with no settled result and no live child.
 
-`herdr/delegation.ts` implements one concrete operation — not a class hierarchy, not a scheduler:
+**Invariant:** cancelling or timing out a wait ends only the wait. Submitted requests stay on disk and the child keeps running.
 
-1. Validate bounds (≤ 8 valid tasks) and the already-aborted case before contacting Herdr.
-2. Serialize tab creation per workspace behind a process-wide lock. The lock covers tab creation and sequential launches only; it never waits for turns to settle. Shared Herdr environment or tab-creation failures throw before any launch.
-3. Give every delegation its own new Herdr tab, created unfocused and labeled by the caller's optional `label` (default: `sub-agents`); the tab's root pane serves the first launch attempt, and subsequent placements split from the tab's most recent pane. Splits go down after a launched or possibly launched child; if earlier launches were confirmed failures and the next task needs a different cwd, the split goes right. Existing tabs are never discovered or reused. A confirmed launch failure frees its pane for reuse by a same-cwd sibling; a pane is never reused after an indeterminate launch or for a task with a different cwd.
-4. Launch every valid task **sequentially** and start each task's observation immediately at its confirmed launch while later launches continue. There are no wave barriers.
-5. Await all observations concurrently, then merge outcomes back into request order.
+**Invariant:** every operation that takes a child ID checks that `child.json` names the caller's Pi session as parent.
 
-**Invariant — total ordered contract:** once launch processing begins, every delegated task produces exactly one delegated task outcome, returned in request order carrying the original task record and delegated task number.
+## Child bridge
 
-## Visible subagent session lifecycle
+- **Readiness:** at `session_start` the bridge marks any `running` result from an older nonce `interrupted`, then writes `status.json`. It never re-runs interrupted work.
+- **Dispatch:** when Pi is idle with no pending messages or open prompt, the lowest unsettled request is sent with `sendUserMessage` and `expandPromptTemplates`, so `/skill:` and prompt-template instructions expand as typed input does. It counts as started only after `agent_start` follows the matching `input`; the `before_agent_start` prompt between them is the expanded text the request entry is bound by. An `input` that arrives while a run is streaming is taken back (`handled`) and dispatched again when idle. Without confirmation, and once Pi is idle again, it settles `failed` / `error` and is never resent.
+- **Settlement:** on `agent_settled`, the request's user entry (text equal to the expanded request text) is located on the current branch after the dispatch leaf. The answer is the latest terminal assistant entry after it. Operator input during the request sets `humanIntervened`.
+- **Blocked:** `ui_prompt_start`/`ui_prompt_end` and the `herdr:blocked` event from `@pi-workspace/herdr-contract` set and clear `blocked` in `status.json`.
+- **Drain:** the child exits only when `drain` exists, it is idle, has no unsettled request or open prompt, and no client is attached. The check runs on transitions, never at startup. A blocked child stays.
 
-`herdr/session.ts` launches one visible subagent session and observes its initial delegated turn. The visible subagent session itself persists independently of that turn under Herdr's management; this module never closes it.
+## Lifecycle
 
-- **Launch-input ownership (private):** the agent's system prompt and sanitized delegated task reach the visible subagent session through temporary files owned entirely by this module. The system prompt path is passed through `--append-system-prompt`. The task path is passed through a private extension flag. The input handler replaces one exact startup placeholder only when the child was started with that flag. It reads the flag and task file when the matching input arrives, after Pi has applied CLI flag values; those values are not available during extension factory evaluation. This preserves the sanitized user-message shape without placing the task text in Fish's input buffer or enabling file substitution in ordinary sessions. Cleanup is best-effort, idempotent, and non-throwing: confirmed launch failures clean up immediately, inputs the delegated turn demonstrably consumed are cleaned up by the end of its observation, and inputs whose consumption was never confirmed are cleaned up after a conservative fallback delay. Launch-input lifecycle details are never part of a public contract.
-- **Launch:** argv is built from the model, tools, optional system-prompt path, private task-file flag, and short startup placeholder. Task control characters are stripped before the task file is written. A pane label is allocated with collision retries, transient pane-busy errors are retried, then `agent.start` runs. Explicit server errors are confirmed failures; only transport ambiguity after `agent.start` may have executed, or a successful response without a usable pane id, is `launch_indeterminate`.
-- **Observation:** polls Herdr's `agent.get` projection. Startup idle is ignored; completion requires observed activity plus two consecutive settled polls. The per-task timeout deadline starts at confirmed launch.
-- **Session reference:** the first observed session path yields the Pi session `{id, path, cwd}` from the JSONL header; the reference persists through completion, timeout, abort, or closure.
-- **Answer capture:** stable settlement records the exact `{path, entryId}` reference of the latest terminal assistant entry — never the text itself.
-**Persistent-pane invariant:** timeout, cancellation, and abort stop only parent-side observation. Nothing in this module ever closes a Herdr pane or a visible subagent session; timed-out and aborted visible subagent sessions remain live for manual inspection or a later turn.
-
-## Delegated task outcomes
-
-Once launch processing begins, every accepted delegated task settles into exactly one outcome; there is no redundant `success` flag and no scheduler-specific `not_started` state:
-
-| Status | Meaning |
+| Pi event | Parent action |
 |---|---|
-| `completed` | Turn settled; exact answer reference (or `null` if none was persisted) |
-| `timed_out` | Deadline passed while observing; session remains live |
-| `aborted` (before_launch / observing) | Cancellation before a session existed, or while observing a live one |
-| `session_closed` | The visible subagent session's pane closed before the delegated turn settled |
-| `launch_failed` | Confirmed launch failure with the server/tooling error |
-| `launch_indeterminate` | `agent.start` may have executed without a trustworthy response — transport ambiguity after the request, or a response without a usable pane id; the possible pane is reported |
-| `observation_failed` | Observation defect; the visible subagent session may still be live |
+| `session_start` | Create the runtime; delete `drain` from this session's children; rebuild delivered-report keys from history; start the report poller |
+| `session_shutdown`, `reload` | Dispose only |
+| `session_shutdown`, `quit` / `new` / `resume` / `fork` | Write `drain` to every owned child, then dispose |
 
-## Herdr RPC transport
+Reports are delivered as `subagent_report` custom messages with `deliverAs: "followUp"`, in an envelope generated from the record. Delivery is confirmed by `message_end`; an unconfirmed report is resent once the parent is observed idle.
 
-`herdr/rpc.ts` is the only external seam: one newline-delimited JSON-RPC call over one Unix-socket connection, with request/response correlation by protocol request ID. Request IDs correlate **protocol responses only** — they are not delegated task identity. Explicit server errors surface as typed response errors; abort and timeout are enforced per call.
+## Nesting
 
-## Pi session identity and exact answer references
+A depth-1 child is also a parent: it registers `subagent`, `subagent_ask`, and `subagent_retrieve` and runs its own runtime. Its children get `depth: 2`, copy its owning worktree, and register no parent tools. Draining a depth-1 child drains its grandchildren through its own `session_shutdown`.
 
-`pi-session.ts` gives delegated task outcomes stable, addressable results instead of transported text:
+## Picker and inspection
 
-- **Identity:** the first non-blank JSONL line must be a `session` header with `id` and `cwd` (Pi's 1 MiB header bound is honored).
-- **Answer reference:** the terminal assistant entry (`stop`/`end_turn`) to address for the answer — the latest one with substantive text, or the first whitespace-only terminal entry when none is substantive — identified by its persisted entry ID. Entry IDs are stable, so later appends or branches cannot make a later turn look like this task's answer.
-- **Resolution:** `readAnswer` streams the file once and exits on the entry-ID match, used only during final presentation.
+`cli.ts` resolves the owning worktree from the outer pane's current path and never falls back to all children. `open` runs `ensureLive` and then opens a modal floating pane (`new-pane -O`) on the operator's server that attaches to the child. Closing the float kills only the attach client. `stop` kills child tmux sessions; transcripts and records remain, and the next request or `open` resumes the child.

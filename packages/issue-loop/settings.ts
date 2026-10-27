@@ -7,7 +7,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { type ParsedAgentFile, parseAgentFileContent } from "@pi-workspace/herdr-subagent/agents";
+import { type ParsedAgentFile, parseAgentFileContent } from "@pi-workspace/tmux-subagent/agents";
 
 /** The workspace's Ketch tools package, which ships beside the issue loop. */
 export const WORKSPACE_KETCH = resolve(import.meta.dirname, "..", "ketch");

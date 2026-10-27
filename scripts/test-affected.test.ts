@@ -35,7 +35,7 @@ function fixture(defaultBranch = true, dependencyField = "dependencies") {
   };
   for (const [directory, name, dependencies] of [
     ["issue-loop", "@test/loop", { "@test/agents": "workspace:*" }],
-    ["herdr-subagent", "@test/agents", {}],
+    ["tmux-subagent", "@test/agents", {}],
     ["session-auto-name", "@test/names", {}],
   ] as const) {
     write(
@@ -46,7 +46,7 @@ function fixture(defaultBranch = true, dependencyField = "dependencies") {
   }
   write("packages/issue-loop/cli-lifecycle.test.ts", "export {};\n");
   write("packages/issue-loop/process.integration.test.ts", "export {};\n");
-  write("packages/herdr-subagent/delegated-task-startup.test.ts", "export {};\n");
+  write("packages/tmux-subagent/delegation.integration.test.ts", "export {};\n");
   git("init", "--initial-branch=main");
   git("add", ".");
   git("commit", "-m", "Initial");
@@ -139,10 +139,10 @@ it("keeps a rename's old package path in the selection", () => {
 
 it("selects consumers from workspace manifests", () => {
   const f = fixture();
-  const path = "packages/herdr-subagent/index.ts";
+  const path = "packages/tmux-subagent/index.ts";
   f.write(path, `${readFileSync(join(f.root, path), "utf8")}export const changed = true;\n`);
   const plan = f.plan();
-  expect(plan.affectedPackages).toEqual(["packages/herdr-subagent", "packages/issue-loop"]);
+  expect(plan.affectedPackages).toEqual(["packages/issue-loop", "packages/tmux-subagent"]);
   expect(plan.integrationTests).toContain("packages/issue-loop/cli-lifecycle.test.ts");
 });
 
@@ -220,8 +220,8 @@ it.each(["peerDependencies", "devDependencies", "optionalDependencies"])(
   "includes consumers declared through %s",
   (field) => {
     const f = fixture(true, field);
-    f.write("packages/herdr-subagent/index.ts", "export const changed = true;\n");
-    expect(f.plan().affectedPackages).toEqual(["packages/herdr-subagent", "packages/issue-loop"]);
+    f.write("packages/tmux-subagent/index.ts", "export const changed = true;\n");
+    expect(f.plan().affectedPackages).toEqual(["packages/issue-loop", "packages/tmux-subagent"]);
   },
 );
 

@@ -23,8 +23,7 @@
   },
   "pi": {
     "extensions": [
-      "./packages/herdr-subagent/index.ts",
-      "./packages/herdr-bridge/index.ts",
+      "./packages/tmux-subagent/index.ts",
       "./packages/session-auto-name/index.ts",
       "./packages/code-actions/index.ts",
       "./packages/worktree-trust/index.ts",
@@ -38,11 +37,10 @@
     ]
   },
   "dependencies": {
-    "@pi-workspace/herdr-bridge": "workspace:*",
     "@pi-workspace/herdr-contract": "workspace:*",
-    "@pi-workspace/herdr-subagent": "workspace:*",
     "@pi-workspace/ketch": "workspace:*",
     "@pi-workspace/session-auto-name": "workspace:*",
+    "@pi-workspace/tmux-subagent": "workspace:*",
     "@pi-workspace/worktree-trust": "workspace:*",
     "@tmustier/pi-code-actions": "workspace:*"
   },
