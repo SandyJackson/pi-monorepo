@@ -342,7 +342,7 @@ describe("parent departure", () => {
 });
 
 describe("child mode", () => {
-  function childHarness() {
+  function childHarness(options: { depth?: 1 | 2 } = {}) {
     const store = createStore(path.join(rootDir, "subagents"));
     const child = store.createChild(
       {
@@ -351,7 +351,7 @@ describe("child mode", () => {
         cwd: projectDir,
         agent: { name: "scout", source: "user" },
         projectTrust: false,
-        depth: 1,
+        depth: options.depth ?? 1,
         piCommand: ["/node", "/pi/cli.js"],
       },
       "",
@@ -361,9 +361,9 @@ describe("child mode", () => {
     return { fake, store, childId: child.childId };
   }
 
-  it("starts the bridge and registers only subagent_report, signalling readiness with the launch nonce", async () => {
+  it("starts the bridge and registers subagent_report, signalling readiness with the launch nonce", async () => {
     process.env.PI_SUBAGENT_NONCE = "launch-nonce";
-    const { fake, store, childId } = childHarness();
+    const { fake, store, childId } = childHarness({ depth: 2 });
 
     await fake.emit("session_start", { reason: "startup" });
 
@@ -390,6 +390,65 @@ describe("child mode", () => {
     expect(process.env.PI_SUBAGENT_NONCE).toBe("launch-nonce");
     expect(store.readStatus(childId)).toMatchObject({ nonce: "launch-nonce" });
     await fake.emit("session_shutdown", { reason: "quit" });
+  });
+
+  it("runs a depth-1 child as a parent too, under its own session ID", async () => {
+    process.env.PI_SUBAGENT_NONCE = "launch-nonce";
+    const { fake, store, childId } = childHarness();
+    fake.state.sessionId = childId;
+    const grandchild = store.createChild(
+      {
+        parent: { sessionId: childId },
+        worktree: projectDir,
+        cwd: projectDir,
+        agent: { name: "scout", source: "user" },
+        projectTrust: false,
+        depth: 2,
+        piCommand: ["/node", "/pi/cli.js"],
+      },
+      "",
+    ).childId;
+    store.writeDrain(grandchild);
+
+    await fake.emit("session_start", { reason: "startup" });
+
+    expect(fake.tools.map((tool) => tool.name).sort()).toEqual([
+      "subagent",
+      "subagent_ask",
+      "subagent_report",
+      "subagent_retrieve",
+    ]);
+    // Resuming the child cancels its earlier departure, as for a top-level parent.
+    expect(store.hasDrain(grandchild)).toBe(false);
+
+    // Exiting through drain is ctx.shutdown(), which Pi follows with session_shutdown "quit".
+    store.writeDrain(childId);
+    await fake.emit("session_shutdown", { reason: "quit" });
+    expect(store.hasDrain(grandchild)).toBe(true);
+  });
+
+  it("gives a depth-2 child no parent tools and drains nothing when it exits", async () => {
+    process.env.PI_SUBAGENT_NONCE = "launch-nonce";
+    const { fake, store, childId } = childHarness({ depth: 2 });
+    fake.state.sessionId = childId;
+    const stray = store.createChild(
+      {
+        parent: { sessionId: childId },
+        worktree: projectDir,
+        cwd: projectDir,
+        agent: { name: "scout", source: "user" },
+        projectTrust: false,
+        depth: 2,
+        piCommand: ["/node", "/pi/cli.js"],
+      },
+      "",
+    ).childId;
+
+    await fake.emit("session_start", { reason: "startup" });
+
+    expect(fake.tools.map((tool) => tool.name)).toEqual(["subagent_report"]);
+    await fake.emit("session_shutdown", { reason: "quit" });
+    expect(store.hasDrain(stray)).toBe(false);
   });
 
   it("refuses to run as a child without a launch nonce", async () => {

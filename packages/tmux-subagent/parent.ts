@@ -306,6 +306,11 @@ export function createParentRuntime(options: {
   parentSessionId: string;
   parentSessionName?: string;
   parentCwd: string;
+  /**
+   * Set when this runtime runs inside a depth-1 child (§8 Nesting): its
+   * children are depth 2 and belong to the creating child's owning worktree.
+   */
+  creator?: { worktree: string };
   /** Whether the parent's project is trusted now (`ctx.isProjectTrusted()`). */
   isProjectTrusted: () => boolean;
   /** Wraps `pi.sendMessage`; returns before Pi has delivered anything. */
@@ -405,7 +410,7 @@ export function createParentRuntime(options: {
     await preflight();
 
     const parentCwd = canonical(options.parentCwd);
-    const worktree = owningWorktree(parentCwd);
+    const worktree = options.creator?.worktree ?? owningWorktree(parentCwd);
     const parentTrusted = options.isProjectTrusted();
     const outcomes: Array<Promise<DelegatedTaskOutcome>> = [];
 
@@ -435,7 +440,7 @@ export function createParentRuntime(options: {
             projectTrust: projectTrustFor({ parentTrusted, parentCwd, cwd }),
             label,
             taskNumber: task.taskNumber,
-            depth: 1,
+            depth: options.creator ? 2 : 1,
             piCommand: [process.execPath, process.argv[1]],
           },
           task.config.systemPromptBody,

@@ -63,6 +63,19 @@ describe("Pi launch arguments", () => {
     ]);
   });
 
+  it("adds the follow-up tools for a depth-1 child that may delegate, never for a depth-2 child", () => {
+    const delegating = { ...child, agent: { ...child.agent, tools: ["read", "subagent"] } };
+    const toolsOf = (record: ChildRecord) => {
+      const args = buildPiArguments(record, dir);
+      return args[args.indexOf("--tools") + 1];
+    };
+
+    expect(toolsOf(delegating)).toBe(
+      "read,subagent,subagent_report,subagent_ask,subagent_retrieve",
+    );
+    expect(toolsOf({ ...delegating, depth: 2 })).toBe("read,subagent,subagent_report");
+  });
+
   it("leaves Pi's default toolset alone when the agent has no allowlist", () => {
     for (const tools of [undefined, []]) {
       const args = buildPiArguments({ ...child, agent: { ...child.agent, tools } }, dir);

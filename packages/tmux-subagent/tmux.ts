@@ -116,6 +116,8 @@ export function buildNewSessionArgs(options: {
 
 /** The child report tool, always allowed alongside an agent's tool allowlist. */
 const CHILD_TOOLS = ["subagent_report"];
+/** Allowed as well for a depth-1 child that may delegate, so it can follow up on its children. */
+const FOLLOW_UP_TOOLS = ["subagent_ask", "subagent_retrieve"];
 
 /** Pi arguments for a child, identical for first launch and resume. */
 export function buildPiArguments(child: ChildRecord, childDir: string): string[] {
@@ -130,7 +132,9 @@ export function buildPiArguments(child: ChildRecord, childDir: string): string[]
   if (child.agent.thinking) args.push("--thinking", child.agent.thinking);
   const tools = child.agent.tools;
   if (tools !== undefined && tools.length > 0) {
-    const extra = CHILD_TOOLS.filter((tool) => !tools.includes(tool));
+    const delegates = child.depth === 1 && tools.includes("subagent");
+    const allowed = delegates ? [...CHILD_TOOLS, ...FOLLOW_UP_TOOLS] : CHILD_TOOLS;
+    const extra = allowed.filter((tool) => !tools.includes(tool));
     args.push("--tools", [...tools, ...extra].join(","));
   }
   args.push(child.projectTrust ? "--approve" : "--no-approve");
