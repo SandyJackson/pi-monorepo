@@ -407,3 +407,79 @@ describe("delegate", () => {
     expect(children()).toEqual([]);
   });
 });
+
+describe("drain", () => {
+  function child(parentSessionId: string): string {
+    return store.createChild(
+      {
+        parent: { sessionId: parentSessionId },
+        worktree: parentCwd,
+        cwd: parentCwd,
+        agent: { name: "scout", source: "user" },
+        projectTrust: false,
+        depth: 1,
+        piCommand: ["/node", "/pi/cli.js"],
+      },
+      "",
+    ).childId;
+  }
+
+  function drained(childId: string): boolean {
+    return fs.existsSync(path.join(store.childDir(childId), "drain"));
+  }
+
+  it("writes drain into every child this parent session owns, live or not, and no others", () => {
+    const tmux = createFakeTmux();
+    const live = child("parent-session");
+    const stopped = child("parent-session");
+    const other = child("other-session");
+    tmux.sessions.set(`sa-${live}`, { name: `sa-${live}`, cwd: parentCwd, env: {}, command: [] });
+
+    const result = runtime(tmux).drain();
+
+    expect(result).toEqual({ recorded: [live, stopped].sort(), failed: [] });
+    expect(drained(live)).toBe(true);
+    expect(drained(stopped)).toBe(true);
+    expect(drained(other)).toBe(false);
+    expect(tmux.calls).toEqual([]);
+  });
+
+  it("reports a child it could not drain as a failure alongside the ones it did", () => {
+    const ok = child("parent-session");
+    const unwritable = child("parent-session");
+    fs.chmodSync(store.childDir(unwritable), 0o500);
+
+    const result = runtime(createFakeTmux()).drain();
+    fs.chmodSync(store.childDir(unwritable), 0o700);
+
+    expect(result.recorded).toEqual([ok]);
+    expect(result.failed).toEqual([{ childId: unwritable, error: expect.any(String) }]);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("reports an unreadable child record as a failure, since its owner is unknown", () => {
+    const corrupt = child("parent-session");
+    fs.writeFileSync(path.join(store.childDir(corrupt), "child.json"), "not json");
+
+    const result = runtime(createFakeTmux()).drain();
+
+    expect(result).toEqual({
+      recorded: [],
+      failed: [{ childId: corrupt, error: expect.stringContaining("not JSON") }],
+    });
+    expect(drained(corrupt)).toBe(false);
+  });
+
+  it("drains nothing, successfully, when no child has been created", () => {
+    expect(runtime(createFakeTmux()).drain()).toEqual({ recorded: [], failed: [] });
+  });
+
+  it("reports an enumeration failure as an error, never as an empty success", () => {
+    fs.mkdirSync(store.root, { recursive: true });
+    fs.writeFileSync(path.join(store.root, "children"), "not a directory");
+
+    const result = runtime(createFakeTmux()).drain();
+
+    expect(result).toEqual({ recorded: [], failed: [], error: expect.any(String) });
+  });
+});

@@ -48,6 +48,22 @@ export async function isLive(tmux: TmuxExec, childId: ChildId): Promise<boolean>
   return (await tmux(["has-session", "-t", sessionTarget(childId)])).code === 0;
 }
 
+/**
+ * Whether any client is attached to a child's session. Output that is not an
+ * integer (a missing session prints an empty line) counts as attached, never as 0.
+ */
+export async function isAttached(tmux: TmuxExec, childId: ChildId): Promise<boolean> {
+  const result = await tmux([
+    "display-message",
+    "-p",
+    "-t",
+    `${sessionTarget(childId)}:`,
+    "#{session_attached}",
+  ]);
+  const count = result.stdout.trim();
+  return !(result.code === 0 && /^[0-9]+$/.test(count) && Number(count) === 0);
+}
+
 async function readNonce(tmux: TmuxExec, childId: ChildId): Promise<string | undefined> {
   const result = await tmux([
     "show-environment",

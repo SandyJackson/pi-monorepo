@@ -152,10 +152,53 @@ async function waitForResult(
 
 export interface ParentRuntime {
   delegate: ExecuteDelegation;
+  /** Signal every child of this parent session to finish and exit. Synchronous, bounded, non-throwing. */
+  drain(): DrainResult;
+}
+
+export interface DrainResult {
+  recorded: ChildId[];
+  failed: Array<{ childId: ChildId; error: string }>;
+  /** Enumeration failure; never reported as an empty success. */
+  error?: string;
 }
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Apply `action` to each child owned by `parentSessionId`, collecting failures. Never throws. */
+function forEachOwnedChild(
+  store: Store,
+  parentSessionId: string,
+  action: (childId: ChildId) => void,
+): DrainResult {
+  const result: DrainResult = { recorded: [], failed: [] };
+  let childIds: ChildId[];
+  try {
+    childIds = store.listChildIds();
+  } catch (error) {
+    return { ...result, error: message(error) };
+  }
+  for (const childId of childIds) {
+    try {
+      if (store.readChild(childId).parent.sessionId !== parentSessionId) continue;
+      action(childId);
+      result.recorded.push(childId);
+    } catch (error) {
+      result.failed.push({ childId, error: message(error) });
+    }
+  }
+  return result;
+}
+
+/**
+ * Delete `drain` from every child of this parent session, so a resumed
+ * parent's children stay. Synchronous and non-throwing, like `drain`.
+ */
+export function clearDrain(options: { parentSessionId: string; store?: Store }): DrainResult {
+  const store = options.store ?? createStore();
+  return forEachOwnedChild(store, options.parentSessionId, (childId) => store.removeDrain(childId));
 }
 
 function canonical(dir: string): string {
@@ -330,5 +373,9 @@ export function createParentRuntime(options: {
     return tasks.map((task, index) => ({ task, outcome: settled[index] }));
   };
 
-  return { delegate };
+  // Live or not: a later inspection-only resume then honours this departure.
+  const drain = () =>
+    forEachOwnedChild(store, options.parentSessionId, (childId) => store.writeDrain(childId));
+
+  return { delegate, drain };
 }

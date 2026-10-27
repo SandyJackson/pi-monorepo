@@ -217,9 +217,25 @@ it.skipIf(!hasTmux)(
       expect(answer && readAnswer(answer)).toBe(`ECHO: say ${index === 0 ? "ALPHA" : "BETA"}`);
       const status = store.readStatus(childId);
       expect(status).toMatchObject({ nonce: result.nonce, state: "idle" });
-      // The child stays live for later inspection.
-      execFileSync("tmux", ["-L", socket, "has-session", "-t", `=sa-${childId}`]);
+      // The parent's exit (session_shutdown reason quit) drained its children.
+      expect(store.hasDrain(childId)).toBe(true);
     }
+
+    // Idle and unattached, each drained child exits; with it the private server goes.
+    await expect.poll(() => liveSessions(), { timeout: 15_000, interval: 250 }).toEqual([]);
   },
   120_000,
 );
+
+function liveSessions(): string[] {
+  try {
+    return execFileSync("tmux", ["-L", socket, "list-sessions", "-F", "#{session_name}"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .split("\n")
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
