@@ -185,14 +185,63 @@ function findAnswer(sessionPath: string): SessionAnswerRef | null {
 
   forEachNonBlankLineSync(sessionPath, (line) => {
     const record = tryParseRecord(line);
-    if (!record) return;
-    if (!isAnswerBearingEntry(record)) return;
-    const text = extractMessageText(record.message);
-    if (text.trim().length > 0) bestEntryId = record.id;
-    else if (bestEntryId === null && text.length > 0) bestEntryId = record.id;
+    if (record) bestEntryId = considerAnswer(bestEntryId, record);
   });
 
   return bestEntryId ? { path: sessionPath, entryId: bestEntryId } : null;
+}
+
+/** The answer selection rule, applied to entries in order: returns the new best entry ID. */
+function considerAnswer(bestEntryId: string | null, entry: unknown): string | null {
+  if (!isAnswerBearingEntry(entry)) return bestEntryId;
+  const text = extractMessageText(entry.message);
+  if (text.trim().length > 0) return entry.id;
+  if (bestEntryId === null && text.length > 0) return entry.id;
+  return bestEntryId;
+}
+
+function isUserEntryWithText(entry: unknown, text: string): boolean {
+  if (!isRecord(entry) || entry.type !== "message") return false;
+  const message = (entry as PersistedMessageEntry).message;
+  return isRecord(message) && message.role === "user" && extractMessageText(message) === text;
+}
+
+/** Where a delegated request's answer is on the child's active branch. */
+export type RequestAnswer =
+  | { status: "found"; answer: SessionAnswerRef | null }
+  | { status: "superseded" };
+
+/**
+ * Locate a request on the active branch (root first) and select its answer.
+ *
+ * The request entry is the first user message after `dispatchLeaf` (the
+ * branch root when the session was empty) whose text equals the instruction.
+ * The answer is chosen from the entries after it by the same rule as
+ * `inspectSession`. A missing dispatch point or request entry is `superseded`.
+ */
+export function findRequestAnswer(
+  branch: readonly unknown[],
+  options: { dispatchLeaf: string | null; instruction: string; sessionPath: string | undefined },
+): RequestAnswer {
+  let start = 0;
+  if (options.dispatchLeaf !== null) {
+    const leafIndex = branch.findIndex(
+      (entry) => isRecord(entry) && entry.id === options.dispatchLeaf,
+    );
+    if (leafIndex === -1) return { status: "superseded" };
+    start = leafIndex + 1;
+  }
+  const requestIndex = branch.findIndex(
+    (entry, index) => index >= start && isUserEntryWithText(entry, options.instruction),
+  );
+  if (requestIndex === -1) return { status: "superseded" };
+
+  let bestEntryId: string | null = null;
+  for (const entry of branch.slice(requestIndex + 1))
+    bestEntryId = considerAnswer(bestEntryId, entry);
+  const answer =
+    bestEntryId && options.sessionPath ? { path: options.sessionPath, entryId: bestEntryId } : null;
+  return { status: "found", answer };
 }
 
 /**

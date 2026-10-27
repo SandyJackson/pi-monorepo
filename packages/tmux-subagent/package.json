@@ -3,14 +3,20 @@
   "private": true,
   "type": "module",
   "exports": {
+    ".": "./index.ts",
     "./agents": "./agents.ts",
     "./pi-session": "./pi-session.ts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "@pi-workspace/herdr-contract": "workspace:*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.3.0",
+    "typebox": "*",
     "@types/node": "^22.0.0"
   }
 }

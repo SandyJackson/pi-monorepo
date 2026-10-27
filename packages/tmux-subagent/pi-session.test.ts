@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { inspectSession, readAnswer } from "./pi-session.ts";
+import { findRequestAnswer, inspectSession, readAnswer } from "./pi-session.ts";
 
 let tempDir: string;
 
@@ -825,5 +825,63 @@ describe("pi-session resolution", () => {
     );
     expect(inspectSession(sessionPath).answer).toEqual({ path: sessionPath, entryId: "message-1" });
     expect(readAnswer({ path: sessionPath, entryId: "message-1" })).toBe("hi");
+  });
+});
+
+describe("pi-session request answer on the active branch", () => {
+  const sessionPath = "/sessions/child.jsonl";
+  const user = (id: string, text: string) => ({
+    type: "message",
+    id,
+    message: { role: "user", content: [{ type: "text", text }] },
+  });
+  const assistant = (id: string, text: string, stopReason = "stop") => ({
+    type: "message",
+    id,
+    message: { role: "assistant", stopReason, content: [{ type: "text", text }] },
+  });
+
+  it("selects the latest substantive terminal answer after the request entry", () => {
+    const branch = [
+      user("u0", "Review"),
+      assistant("a0", "Earlier answer"),
+      { type: "system", id: "s1" },
+      user("u1", "Review"),
+      assistant("a1", "First"),
+      user("u2", "operator follow-up"),
+      assistant("a2", "Latest"),
+      assistant("a3", "  "),
+      assistant("a4", "Aborted", "aborted"),
+    ];
+
+    expect(
+      findRequestAnswer(branch, { dispatchLeaf: "a0", instruction: "Review", sessionPath }),
+    ).toEqual({ status: "found", answer: { path: sessionPath, entryId: "a2" } });
+  });
+
+  it("starts from the branch root when the session was empty at dispatch", () => {
+    expect(
+      findRequestAnswer([user("u1", "Go"), assistant("a1", "Done")], {
+        dispatchLeaf: null,
+        instruction: "Go",
+        sessionPath,
+      }),
+    ).toEqual({ status: "found", answer: { path: sessionPath, entryId: "a1" } });
+  });
+
+  it("reports a request entry with no terminal answer as found without an answer", () => {
+    expect(
+      findRequestAnswer([user("u1", "Go")], { dispatchLeaf: null, instruction: "Go", sessionPath }),
+    ).toEqual({ status: "found", answer: null });
+  });
+
+  it("is superseded when the dispatch point or the request entry is not on the branch", () => {
+    const branch = [user("u0", "Go"), assistant("a0", "Done")];
+    expect(
+      findRequestAnswer(branch, { dispatchLeaf: "elsewhere", instruction: "Go", sessionPath }),
+    ).toEqual({ status: "superseded" });
+    expect(
+      findRequestAnswer(branch, { dispatchLeaf: "a0", instruction: "Go", sessionPath }),
+    ).toEqual({ status: "superseded" });
   });
 });
