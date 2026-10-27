@@ -22,11 +22,28 @@ export function tmuxSocket(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export function createTmuxExec(socket: string = tmuxSocket(), binary = "tmux"): TmuxExec {
+  return execTmux(binary, ["-L", socket]);
+}
+
+/**
+ * The operator's tmux server, for the CLI's menus, messages, and floats.
+ * Without an override, tmux finds it through `TMUX`, which `run-shell` sets.
+ * `PI_SUBAGENT_OUTER_TMUX_SOCKET` names a disposable server for tests.
+ */
+export function createOuterTmuxExec(
+  env: NodeJS.ProcessEnv = process.env,
+  binary = "tmux",
+): TmuxExec {
+  const socket = env.PI_SUBAGENT_OUTER_TMUX_SOCKET;
+  return execTmux(binary, socket ? ["-L", socket] : []);
+}
+
+function execTmux(binary: string, socketArgs: string[]): TmuxExec {
   return (args) =>
     new Promise((resolve, reject) => {
       execFile(
         binary,
-        ["-L", socket, ...args],
+        [...socketArgs, ...args],
         { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
         (error, stdout, stderr) => {
           if (error && typeof error.code !== "number") {

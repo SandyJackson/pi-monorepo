@@ -64,7 +64,8 @@ export async function isAttached(tmux: TmuxExec, childId: ChildId): Promise<bool
   return !(result.code === 0 && /^[0-9]+$/.test(count) && Number(count) === 0);
 }
 
-async function readNonce(tmux: TmuxExec, childId: ChildId): Promise<string | undefined> {
+/** The launch nonce of a child's live session, or `undefined` when it has none. */
+export async function readNonce(tmux: TmuxExec, childId: ChildId): Promise<string | undefined> {
   const result = await tmux([
     "show-environment",
     "-t",

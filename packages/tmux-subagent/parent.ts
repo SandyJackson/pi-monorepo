@@ -3,7 +3,6 @@
  * wait loop that observes one request's result.
  */
 
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentConfig } from "./agents.ts";
@@ -12,6 +11,7 @@ import type { SessionAnswerRef } from "./pi-session.ts";
 import {
   type ChildId,
   createStore,
+  owningWorktree,
   type ReportId,
   type ReportRecord,
   type RequestRef,
@@ -255,20 +255,6 @@ function canonical(dir: string): string {
     return fs.realpathSync(dir);
   } catch {
     return dir;
-  }
-}
-
-/** The owning worktree (§3): the Git top level of `cwd`, or `cwd` outside Git. */
-function owningWorktree(cwd: string): string {
-  try {
-    const topLevel = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return canonical(topLevel.trim());
-  } catch {
-    return canonical(cwd);
   }
 }
 
