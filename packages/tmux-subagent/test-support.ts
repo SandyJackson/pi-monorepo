@@ -1,4 +1,104 @@
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TmuxExec } from "./tmux.ts";
+
+type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+
+/**
+ * A stand-in for Pi's extension API: tests emit extension events in order
+ * and control the state the context reports. No Pi process is started.
+ */
+export function createFakePi() {
+  const handlers = new Map<string, Handler[]>();
+  const busHandlers = new Map<string, Array<(data: unknown) => void>>();
+  const sent: Array<{ text: string; deliverAs?: string }> = [];
+  const tools: Array<{ name: string }> = [];
+  const flags: Record<string, string | boolean | undefined> = {};
+  const state = {
+    idle: true,
+    pendingMessages: false,
+    leafId: null as string | null,
+    branch: [] as Array<Record<string, unknown>>,
+    sessionFile: "/child/session/scout.jsonl" as string | undefined,
+    sessionId: "parent-session",
+    trusted: true,
+    cwd: "/repo",
+  };
+  const ctx = {
+    get cwd() {
+      return state.cwd;
+    },
+    isIdle: () => state.idle,
+    hasPendingMessages: () => state.pendingMessages,
+    isProjectTrusted: () => state.trusted,
+    sessionManager: {
+      getLeafId: () => state.leafId,
+      getBranch: () => state.branch,
+      getSessionFile: () => state.sessionFile,
+      getSessionId: () => state.sessionId,
+      getSessionName: () => undefined,
+    },
+  } as unknown as ExtensionContext;
+
+  const pi = {
+    on(event: string, handler: Handler) {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      return () =>
+        handlers.set(
+          event,
+          (handlers.get(event) ?? []).filter((h) => h !== handler),
+        );
+    },
+    sendUserMessage(text: string, options?: { deliverAs?: string }) {
+      sent.push({ text, deliverAs: options?.deliverAs });
+    },
+    registerFlag() {},
+    getFlag: (name: string) => flags[name],
+    registerTool(tool: { name: string }) {
+      tools.push(tool);
+    },
+    events: {
+      emit(channel: string, data: unknown) {
+        for (const handler of busHandlers.get(channel) ?? []) handler(data);
+      },
+      on(channel: string, handler: (data: unknown) => void) {
+        busHandlers.set(channel, [...(busHandlers.get(channel) ?? []), handler]);
+        return () =>
+          busHandlers.set(
+            channel,
+            (busHandlers.get(channel) ?? []).filter((h) => h !== handler),
+          );
+      },
+    },
+  } as unknown as ExtensionAPI;
+
+  /** Deliver one extension event to every handler, returning their results. */
+  async function emit(type: string, event: Record<string, unknown> = {}): Promise<unknown[]> {
+    const results: unknown[] = [];
+    for (const handler of handlers.get(type) ?? [])
+      results.push(await handler({ type, ...event }, ctx));
+    return results;
+  }
+
+  /** Append an entry to the active branch and move the leaf to it. */
+  function append(entry: Record<string, unknown>): void {
+    state.branch.push(entry);
+    state.leafId = entry.id as string;
+  }
+
+  return { pi, ctx, state, sent, tools, flags, emit, append, handlers };
+}
+
+export function userEntry(id: string, text: string): Record<string, unknown> {
+  return { type: "message", id, message: { role: "user", content: [{ type: "text", text }] } };
+}
+
+export function assistantEntry(id: string, text: string): Record<string, unknown> {
+  return {
+    type: "message",
+    id,
+    message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] },
+  };
+}
 
 export interface FakeSession {
   name: string;
