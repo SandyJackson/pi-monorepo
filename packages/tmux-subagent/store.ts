@@ -352,6 +352,8 @@ export function createStore(root: string = defaultStoreRoot()): Store {
           createdAt: new Date().toISOString(),
           ...child,
         };
+        // Created here so Pi's session directory is private like the rest of the state.
+        fs.mkdirSync(path.join(childDir(childId), "session"), { mode: DIR_MODE });
         writeAtomic(path.join(childDir(childId), "system-prompt.md"), systemPrompt);
         writeJson(path.join(childDir(childId), "child.json"), record);
         return record;

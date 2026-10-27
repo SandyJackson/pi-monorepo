@@ -48,6 +48,8 @@ describe("children", () => {
     expect(Number.isNaN(Date.parse(child.createdAt))).toBe(false);
     expect(fs.readFileSync(path.join(dir, "system-prompt.md"), "utf8")).toBe("Be thorough.");
     expect(mode(dir)).toBe(0o700);
+    // Pi would otherwise create the session directory with its default mode.
+    expect(mode(path.join(dir, "session"))).toBe(0o700);
     expect(mode(path.join(dir, "child.json"))).toBe(0o600);
     expect(mode(path.join(dir, "system-prompt.md"))).toBe(0o600);
   });
