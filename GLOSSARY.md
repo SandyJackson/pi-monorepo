@@ -24,11 +24,13 @@ A child workspace package containing one extension entrypoint, its supporting so
 **Managed extension**:
 An extension whose source and lifecycle are owned by an external integration. The Pi workspace may depend on its events or behavior but does not install, update, or overwrite it.
 
-**Visible subagent**:
-A child Pi agent operating in a Herdr-managed pane, where its work remains observable and can be taken over interactively.
+**Subagent child**:
+A child Pi agent running as an interactive Pi session on the workspace's private tmux server, out of the operator's normal navigation. It is identified by a child ID, owned by the parent Pi session that created it, and grouped under that parent's owning worktree. Its conversation persists while its process stops and resumes.
+_Avoid_: Visible subagent, subagent pane
 
-**Visible subagent session**:
-The persistent Pi session hosting a visible subagent. A session may outlive an individual delegated task and support later turns.
+**Child conversation**:
+The persistent Pi session of a subagent child. It outlives any one request and any one Pi process, and supports later requests and operator interaction.
+_Avoid_: Visible subagent session
 
 **Subagent inspection float**:
 An on-demand, interactive view of a running child Pi session in a tmux floating pane, explicitly not a tmux popup. Dismissing the view leaves the child running; exiting Pi inside the view ends the child process.
@@ -37,16 +39,16 @@ _Avoid_: Subagent popup, inspection popup
 Tmux distinguishes floating panes from popups in its [3.8 release discussion](https://github.com/tmux/tmux/issues/5584).
 
 **Subagent delegation**:
-A request from a parent Pi session to execute one or more delegated tasks as visible subagents. The delegation is distinct from each individual task it contains.
+A request from a parent Pi session to execute one or more delegated tasks, each in a new subagent child. The delegation is distinct from each individual task it contains.
 
 **Delegated task**:
-One turn assigned to a visible subagent, consisting of an agent, instruction, and optional working-directory selection. The task settles independently of the lifetime of its visible subagent session.
+The initial subagent request of a new subagent child, consisting of an agent, instruction, and optional working-directory selection. The task settles independently of the lifetime of its child conversation.
 
 **Delegated task number**:
-The one-based position assigned once to a delegated task within its subagent delegation. It is the task's canonical identity throughout that delegation; the visible subagent session reference identifies the persistent session beyond it.
+The one-based position assigned once to a delegated task within its subagent delegation. It is the task's canonical identity throughout that delegation; the child ID and request ID identify the child and request beyond it.
 
 **Delegated task outcome**:
-The single terminal result of a delegated task, such as completion, timeout, abort, session closure, or an execution failure. Outcomes retain the order and delegated task numbers of their tasks.
+The single terminal result of a delegated task, such as completion, failure, timeout, abort, session closure, or a launch failure. Outcomes retain the order and delegated task numbers of their tasks.
 
 **Subagent request**:
 One instruction assigned to a child conversation, either as its initial delegated task or as a follow-up. Its identity is independent of the child process and of any attempt to retrieve its result.
@@ -65,7 +67,7 @@ A child-authored message to its owning parent, separate from the result of an as
 The versioned set of rules that determines whether a bash command is allowed, requires approval, or is denied for the workspace and its agents.
 
 **Herdr blocked event**:
-The event-bus contract emitted by authored extensions when a user interaction is blocking progress, allowing the managed Herdr integration to reflect that state.
+The event-bus contract emitted by authored extensions when a user interaction is blocking progress. A subagent child's bridge consumes it to mark the child blocked; a managed Herdr integration may also observe it. The name is kept for stability, not because Herdr is required.
 
 **External Pi package**:
 A separately installed third-party Pi package that is not owned by the Pi workspace but may be required by a workspace resource, such as an agent's extension-tool references.
@@ -83,7 +85,7 @@ The decision that a ticket's implementation passes the required checks and indep
 _Avoid_: Closure, merge
 
 **Loop worker session**:
-A named Pi session performing implementation or review for a loop run. It is distinct from an interactive visible subagent session.
+A named Pi session performing implementation or review for a loop run. It is distinct from an interactive child conversation.
 
 **Loop skill**:
 A skill vendored in the loop's curated directory and selectable by short name. It is distinct from workspace and user skills loaded through Pi discovery.
