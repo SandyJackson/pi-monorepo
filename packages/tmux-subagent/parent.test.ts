@@ -864,6 +864,28 @@ describe("retrieveResult", () => {
     },
   );
 
+  it("reports lost only after two consecutive polls without the child", async () => {
+    const tmux = createFakeTmux();
+    const request = existingChild();
+    let outcome: unknown;
+    void runtime(tmux)
+      .retrieveResult(request, { timeoutMs: POLL_MS * 3 })
+      .then((value) => {
+        outcome = value;
+      });
+
+    await vi.advanceTimersByTimeAsync(0); // absent
+    liveChild(tmux, request.childId);
+    await vi.advanceTimersByTimeAsync(POLL_MS); // live
+    tmux.kill(request.childId);
+    await vi.advanceTimersByTimeAsync(POLL_MS); // absent
+    expect(outcome).toBeUndefined();
+    liveChild(tmux, request.childId);
+    await vi.advanceTimersByTimeAsync(POLL_MS); // live, timed out
+
+    expect(outcome).toMatchObject({ status: "pending", stopped: "timed_out" });
+  });
+
   it("rejects another parent's child and an unknown request", async () => {
     const tmux = createFakeTmux();
     const foreign = existingChild({ parentSessionId: "other-session" });
@@ -947,6 +969,27 @@ describe("ask", () => {
     });
     expect(store.listRequestIds(first.childId)).toEqual(["r1", "r2"]);
     expect(store.readResult({ childId: first.childId, requestId: "r2" })).toBeUndefined();
+  });
+
+  it("admits only one of two concurrent asks when one slot is left", async () => {
+    const tmux = createFakeTmux();
+    const first = existingChild();
+    writeSessionFile(first.childId);
+    liveChild(tmux, first.childId);
+    const parent = runtime(tmux);
+    const controller = new AbortController();
+
+    const asks = [
+      parent.ask(first.childId, "Second", { timeoutMs: 60_000, signal: controller.signal }),
+      parent.ask(first.childId, "Third", { timeoutMs: 60_000, signal: controller.signal }),
+    ];
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    const outcomes = await Promise.all(asks);
+
+    expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(["rejected", "submitted"]);
+    expect(outcomes).toContainEqual(expect.objectContaining({ reason: "busy" }));
+    expect(store.listRequestIds(first.childId)).toEqual(["r1", "r2"]);
   });
 
   it("resumes a stopped child, whose bridge interrupts the stale request, then admits the ask", async () => {

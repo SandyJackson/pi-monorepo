@@ -4,10 +4,15 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ChildRecord, createStore, type Store } from "./store.ts";
 
-// Pass-through, so a test can make one write fail as a full disk would.
+// Pass-through, so a test can make one call fail as a full disk would, or
+// return a listing another writer has since made stale.
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, writeFileSync: vi.fn(actual.writeFileSync) };
+  return {
+    ...actual,
+    readdirSync: vi.fn(actual.readdirSync),
+    writeFileSync: vi.fn(actual.writeFileSync),
+  };
 });
 
 let root: string;
@@ -227,6 +232,17 @@ describe("reports", () => {
   });
   beforeEach(() => {
     child = store.createChild(childInput, "");
+  });
+
+  it("never replaces a report another writer created after the listing", () => {
+    const first = store.createReport(report("first"));
+    // A stale listing: the next report ID looks free, but m1 exists.
+    vi.mocked(fs.readdirSync).mockImplementationOnce(() => []);
+
+    const second = store.createReport(report("second"));
+
+    expect(second.reportId).toBe("m2");
+    expect(store.readReport(child.childId, "m1")).toEqual(first);
   });
 
   it("allocates m1, m2, … write-once and lists them in numeric order", () => {

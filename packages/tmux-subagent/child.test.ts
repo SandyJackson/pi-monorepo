@@ -386,6 +386,21 @@ describe("child bridge dispatch and settlement", () => {
     });
   });
 
+  it("records interrupted for an aborted outcome that settles with aborted false", async () => {
+    store.createRequest(child.childId, "Stop me");
+    await start();
+    await nextPoll();
+    await piStartsRun("Stop me");
+    fake.append(userEntry("u1", "Stop me"));
+
+    await fake.emit("agent_before_settle", { outcome: "aborted" });
+    await fake.emit("agent_settled", { aborted: false });
+
+    expect(store.readResult(ref("r1"))).toMatchObject({
+      result: { status: "failed", reason: "interrupted" },
+    });
+  });
+
   it("records error for an error outcome", async () => {
     store.createRequest(child.childId, "Break");
     await start();

@@ -189,6 +189,52 @@ describe("parent mode", () => {
   });
 });
 
+describe("report delivery", () => {
+  it("resends an unconfirmed report only once the session is idle with no pending messages", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = createStore(path.join(path.dirname(userAgentsDir), "subagents"));
+      const childId = store.createChild(
+        {
+          parent: { sessionId: "parent-session" },
+          worktree: projectDir,
+          cwd: projectDir,
+          agent: { name: "scout", source: "user" },
+          projectTrust: false,
+          depth: 1,
+          piCommand: ["/node", "/pi/cli.js"],
+        },
+        "",
+      ).childId;
+      store.createReport({
+        childId,
+        parentSessionId: "parent-session",
+        agent: "scout",
+        content: "x",
+      });
+      const fake = harness(true);
+      fake.state.idle = false;
+      await fake.emit("session_start", { reason: "startup" });
+      await vi.advanceTimersByTimeAsync(REPORT_POLL_MS);
+      expect(fake.customMessages).toHaveLength(1);
+
+      // Busy, then idle with the report still queued: it may yet be delivered.
+      await vi.advanceTimersByTimeAsync(REPORT_POLL_MS * 2);
+      fake.state.idle = true;
+      fake.state.pendingMessages = true;
+      await vi.advanceTimersByTimeAsync(REPORT_POLL_MS * 2);
+      expect(fake.customMessages).toHaveLength(1);
+
+      fake.state.pendingMessages = false;
+      await vi.advanceTimersByTimeAsync(REPORT_POLL_MS * 2);
+      expect(fake.customMessages).toHaveLength(2);
+      await fake.emit("session_shutdown", { reason: "quit" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("parent departure", () => {
   function stateStore() {
     return createStore(path.join(path.dirname(userAgentsDir), "subagents"));
@@ -232,6 +278,8 @@ describe("parent departure", () => {
     await fake.emit("session_start", { reason: "startup" });
 
     await fake.emit("session_shutdown", { reason: "reload" });
+    // Checked before session_start, whose clearDrain would erase a drain.
+    expect(store.hasDrain(mine)).toBe(false);
     await fake.emit("session_start", { reason: "reload" });
 
     expect(store.hasDrain(mine)).toBe(false);
@@ -425,6 +473,53 @@ describe("child mode", () => {
     store.writeDrain(childId);
     await fake.emit("session_shutdown", { reason: "quit" });
     expect(store.hasDrain(grandchild)).toBe(true);
+  });
+
+  it("records a depth-1 child's grandchildren under the child's worktree, at depth 2", async () => {
+    process.env.PI_SUBAGENT_NONCE = "launch-nonce";
+    const originalSocket = process.env.PI_SUBAGENT_TMUX_SOCKET;
+    // Only `tmux -V` reaches it: the missing cwd fails the launch before tmux starts anything.
+    process.env.PI_SUBAGENT_TMUX_SOCKET = `pi-sa-index-${process.pid}`;
+    try {
+      writeAgent(userAgentsDir, "scout.md", "scout", "scouts");
+      const store = createStore(path.join(rootDir, "subagents"));
+      const worktree = path.join(rootDir, "outer-worktree");
+      const childId = store.createChild(
+        {
+          parent: { sessionId: "parent" },
+          worktree,
+          cwd: projectDir,
+          agent: { name: "scout", source: "user" },
+          projectTrust: false,
+          depth: 1,
+          piCommand: ["/node", "/pi/cli.js"],
+        },
+        "",
+      ).childId;
+      const fake = harness(true);
+      fake.flags["subagent-child"] = store.childDir(childId);
+      fake.state.sessionId = childId;
+      await fake.emit("session_start", { reason: "startup" });
+      const subagent = fake.tools.find((tool) => tool.name === "subagent") as Tool;
+
+      await subagent.execute(
+        "call",
+        { tasks: [{ agent: "scout", instruction: "Look", cwd: "missing" }] },
+        undefined,
+        undefined,
+        fake.ctx,
+      );
+
+      const grandchild = store
+        .listChildIds()
+        .map((id) => store.readChild(id))
+        .find((record) => record.parent.sessionId === childId);
+      expect(grandchild).toMatchObject({ depth: 2, worktree });
+      await fake.emit("session_shutdown", { reason: "quit" });
+    } finally {
+      if (originalSocket === undefined) delete process.env.PI_SUBAGENT_TMUX_SOCKET;
+      else process.env.PI_SUBAGENT_TMUX_SOCKET = originalSocket;
+    }
   });
 
   it("gives a depth-2 child no parent tools and drains nothing when it exits", async () => {

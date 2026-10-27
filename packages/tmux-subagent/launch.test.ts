@@ -91,6 +91,20 @@ describe("ensureLive", () => {
     expect(session?.env).not.toHaveProperty("OTHER_KEY");
   });
 
+  it("is indeterminate for a live session without a launch nonce, and does not launch", async () => {
+    const tmux = createFakeTmux();
+    const name = `sa-${child.childId}`;
+    tmux.sessions.set(name, { name, cwd: root, env: {}, command: [] });
+
+    const result = await ensureLive(child.childId, { store, tmux: tmux.exec });
+
+    expect(result).toEqual({
+      status: "indeterminate",
+      error: `Child ${child.childId} has a live session without a launch nonce.`,
+    });
+    expect(tmux.launches).toBe(0);
+  });
+
   it("creates one session and one Pi process for concurrent callers, who share its nonce", async () => {
     const tmux = createFakeTmux({ onNewSession: (session) => becomeReady(session) });
 
