@@ -84,7 +84,7 @@ Ordinary subagents inherit Pi's globally loaded extensions but disable built-in 
 
 ## Agent Setup
 
-Installing the aggregate package makes workspace agents callable through `herdr-subagent` directly from the package. No copy step is required.
+Installing the aggregate package makes workspace agents callable through `tmux-subagent` directly from the package. No copy step is required.
 
 For migration from manually copied agents, follow [Remove previously copied agents](./agent-discovery.md#remove-previously-copied-agents). Delete those stale copies from Pi's user agent directory or they will keep overriding the package versions. That guide also covers deliberate user overrides and directory symlinks.
 
@@ -104,9 +104,9 @@ The workspace exposes these resources through its `package.json`:
 
 | Resource type | Entry point | Contents |
 |---|---|---|
-| Extensions | `pi.extensions` array | 6 child packages (herdr-subagent, herdr-bridge, session-auto-name, code-actions, worktree-trust, ketch) |
+| Extensions | `pi.extensions` array | 5 child packages (tmux-subagent, session-auto-name, code-actions, worktree-trust, ketch) |
 | Skills | `pi.skills` array | `skills/` directory with 35 skills |
-| Agents | `agents/` directory | Workspace definitions discovered by herdr-subagent |
+| Agents | `agents/` directory | Workspace definitions discovered by tmux-subagent |
 | Documentation | `docs/` directory | Bash policy, agent discovery, installation guide |
 
 ## Cutover from Old Runtime
@@ -119,6 +119,7 @@ If migrating from a previous dotfiles-based installation:
    - Delete `~/.config/pi/agent/extensions/bash-permission/`
    - Delete `~/.config/pi/agent/extensions/herdr-subagent/`
    - Delete `~/.config/pi/agent/extensions/herdr-bridge.ts`
+   - The workspace no longer ships these; subagents run through `tmux-subagent`. See its [README](../packages/tmux-subagent/README.md) for the picker binding.
    - Delete `~/.config/pi/agent/extensions/session-auto-name.ts`
    - Delete migrated skill directories from `~/.config/pi/agent/skills/`
 4. **Keep these intact** (do not remove):

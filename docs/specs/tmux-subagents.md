@@ -1,9 +1,9 @@
 # Tmux subagents V1
 
-Status: draft for review; not implemented.
+Status: implemented in `packages/tmux-subagent`.
 Target: Pi 1.3.0, tmux 3.8, Node ≥ 22.18, macOS, Workmux session mode.
 
-This is the single authoritative spec for the tmux subagent backend. It replaces `tmux-subagents-v1.md`, `tmux-subagents-v1-api.md`, and `tmux-subagents-v1-protocol.md`. The workflow in those documents is retained; their recovery protocol is not.
+This is the single authoritative spec for the tmux subagent backend. It replaced `tmux-subagents-v1.md`, `tmux-subagents-v1-api.md`, and `tmux-subagents-v1-protocol.md`, which were deleted at cutover. Their workflow was retained; their recovery protocol was not.
 
 Items marked **Verify** depend on Pi or tmux behaviour that must be confirmed by an integration test before the dependent code is written. If a Verify item fails, return to this spec rather than adding compensating machinery.
 

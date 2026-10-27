@@ -2,7 +2,7 @@
 
 ## Scope
 
-This note examines [`nicobailon/pi-intercom`](https://github.com/nicobailon/pi-intercom) at commit [`02913ed`](https://github.com/nicobailon/pi-intercom/tree/02913edcd7b1bdb21b480852ff82f674d309c651), tag `v0.18.1` (2026-10-22), and compares it with [Tmux subagents V1](../specs/tmux-subagents-v1.md). It asks what is worth reusing for parent-child messaging and follow-ups, and what actively conflicts with the spec.
+This note examines [`nicobailon/pi-intercom`](https://github.com/nicobailon/pi-intercom) at commit [`02913ed`](https://github.com/nicobailon/pi-intercom/tree/02913edcd7b1bdb21b480852ff82f674d309c651), tag `v0.18.1` (2026-10-22), and compares it with [Tmux subagents V1](../specs/tmux-subagents.md). It asks what is worth reusing for parent-child messaging and follow-ups, and what actively conflicts with the spec.
 
 Method: a disposable read-only clone at the pinned commit. Nothing was installed, executed, or configured; no Pi session, broker, or tmux server was started. Claims below come from that source, not from the README, except where the README is cited as documentation. Pi behaviour was checked against the installed `@earendil-works/pi-coding-agent@1.3.0` docs and distribution.
 
@@ -31,7 +31,7 @@ Single-writer rule: a registering process that presents an ID already held by a 
 
 Scoping: `PI_INTERCOM_SCOPE_ID` (or `/intercom-pool`) is an opaque routing scope. Sessions only list, address, queue mail to, and broadcast presence within the exact same scope; unscoped sessions never cross into scoped ones ([config.ts#L21-L32](https://github.com/nicobailon/pi-intercom/blob/02913edcd7b1bdb21b480852ff82f674d309c651/config.ts#L21-L32), [broker/broker.ts#L185-L210](https://github.com/nicobailon/pi-intercom/blob/02913edcd7b1bdb21b480852ff82f674d309c651/broker/broker.ts#L185-L210), scope test at [intercom.integration.test.ts#L784](https://github.com/nicobailon/pi-intercom/blob/02913edcd7b1bdb21b480852ff82f674d309c651/intercom.integration.test.ts#L784)). A scope is not an ACL: it partitions traffic, it does not authorize a sender to a recipient.
 
-Directory identity uses canonical paths, not strings: `normalizeCwd` resolves and `realpath`s, falling back to the resolved path when the directory is gone (`cwd.ts`). That is the same "canonical filesystem identity" concern the V1 spec raises for worktree grouping ([tmux-subagents-v1.md §2](../specs/tmux-subagents-v1.md)).
+Directory identity uses canonical paths, not strings: `normalizeCwd` resolves and `realpath`s, falling back to the resolved path when the directory is gone (`cwd.ts`). That is the same "canonical filesystem identity" concern the V1 spec raises for worktree grouping (the former `tmux-subagents-v1.md` §2, now [tmux-subagents.md §3](../specs/tmux-subagents.md#3-identities)).
 
 ## Persistence and delivery states
 

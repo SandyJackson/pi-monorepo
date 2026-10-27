@@ -7,10 +7,9 @@ My Pi setup in one repo. Extensions, skills, and agents I use day to day.
 | Package | What it is |
 | --- | --- |
 | [bash-permission](./packages/bash-permission) | Removed for now. It used to gate bash calls against an allow, ask, deny policy. The code is still in the repo; see `docs/bash-policy.md` for how to restore it. |
-| [herdr-bridge](./packages/herdr-bridge) | Emits `herdr:blocked` when a tool waits on user input, so Herdr shows it. |
-| [herdr-contract](./packages/herdr-contract) | Shared event name and payload for `herdr:blocked`. |
-| [herdr-subagent](./packages/herdr-subagent) | Delegates work to subagents in visible Herdr panes. |
+| [herdr-contract](./packages/herdr-contract) | Shared event name and payload for `herdr:blocked`. tmux-subagent uses it to mark a child blocked. |
 | [session-auto-name](./packages/session-auto-name) | Names untitled sessions after the first exchange. |
+| [tmux-subagent](./packages/tmux-subagent) | Delegates work to interactive Pi subagents on a private tmux server, with a picker and inspection float. |
 
 Skills live in [skills](./skills). Agent definitions live in [agents](./agents). Shared vocabulary is in [GLOSSARY.md](./GLOSSARY.md).
 
@@ -25,7 +24,7 @@ pnpm install
 pi install /absolute/path/to/pi-monorepo
 ```
 
-Workspace agents are discovered directly by herdr-subagent. If you previously copied them into Pi's user agent directory, follow [Remove previously copied agents](./docs/agent-discovery.md#remove-previously-copied-agents) so stale copies stop overriding the package versions.
+Workspace agents are discovered directly by tmux-subagent. If you previously copied them into Pi's user agent directory, follow [Remove previously copied agents](./docs/agent-discovery.md#remove-previously-copied-agents) so stale copies stop overriding the package versions.
 
 After changing code, run `pnpm install` if dependencies changed, then `/reload` in Pi to pick it up.
 

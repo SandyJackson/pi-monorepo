@@ -47,7 +47,7 @@ For an explicit check, the default base is the merge-base of `HEAD` and the loca
 Selection is conservative:
 
 - Package source, tests, fixtures and runtime resources select that package and its transitive workspace consumers. Dependencies, peer dependencies, optional dependencies and development dependencies all contribute edges.
-- A change to `packages/session-auto-name/` does not select issue-loop integration tests. A change to the shared agent parser in `packages/herdr-subagent/` does.
+- A change to `packages/session-auto-name/` does not select issue-loop integration tests. A change to the shared agent parser in `packages/tmux-subagent/` does.
 - Issue-loop agent definitions and curated skills select issue-loop integration tests. Package `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE.md`, and Markdown under a package's `docs/` do not.
 - Root Markdown and Markdown under `docs/` keep the fast suite. Root fast-test files also keep it.
 - Changes to any package manifest select the full suite because they can rename packages or remove dependency edges from the graph used for selection.

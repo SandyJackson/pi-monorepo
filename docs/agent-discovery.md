@@ -1,6 +1,6 @@
 # Agent discovery
 
-The workspace's `herdr-subagent` extension discovers callable agents from the aggregate package's `agents/` directory, located relative to the extension. Installing the aggregate package makes these workspace agents available without copying them into Pi's user agent directory. Discovery from arbitrary installed packages is outside this extension's scope.
+The workspace's `tmux-subagent` extension discovers callable agents from the aggregate package's `agents/` directory, located relative to the extension. Installing the aggregate package makes these workspace agents available without copying them into Pi's user agent directory. Discovery from arbitrary installed packages is outside this extension's scope.
 
 ## Precedence and trust
 
@@ -37,4 +37,4 @@ timeout: 90
 Explain the requested code without editing it.
 ```
 
-`tools` is an optional comma-separated string or YAML list of tool names. `model` is an optional model override. `thinking` is passed to visible subagents as `--thinking`; omit it to use Pi's default. `timeout` is an optional positive integer number of minutes setting the agent's default delegation timeout: the `subagent` call's `timeout` overrides it, an agent without one uses the 60-minute default, and an invalid value stops discovery with an error naming the file. See the package's [`agents/`](../agents/) directory for the available workspace definitions.
+`tools` is an optional comma-separated string or YAML list of tool names. `model` is an optional model override. `thinking` is passed to subagent children as `--thinking`; omit it to use Pi's default. `timeout` is an optional positive integer number of minutes setting the agent's default delegation timeout: the `subagent` call's `timeout` overrides it, an agent without one uses the 60-minute default, and an invalid value stops discovery with an error naming the file. See the package's [`agents/`](../agents/) directory for the available workspace definitions.

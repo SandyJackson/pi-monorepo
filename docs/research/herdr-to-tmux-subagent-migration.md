@@ -1,6 +1,6 @@
 # Migrating subagent delegation from Herdr to tmux
 
-**Status**: research complete; subsequent design consolidated in [Tmux subagents V1](../specs/tmux-subagents-v1.md). No source changes made. The spec supersedes this document's proposed target design and records corrections to the findings below.
+**Status**: research complete; subsequent design consolidated in [Tmux subagents V1](../specs/tmux-subagents.md). No source changes made. The spec supersedes this document's proposed target design and records corrections to the findings below.
 **Date**: 2026-10-23. **Branch**: `docs/herdr-to-tmux-subagents` at `69f348c`.
 **Purpose of this document**: let a fresh agent pick this up and turn it into a final spec. It records findings that are *not* in any other artifact. Current architecture, invariants and outcome model are already documented elsewhere — see §2 and do not restate them.
 
@@ -22,7 +22,7 @@ The result will be turned into a spec, so §6 lists the decisions that must be s
 | Artifact | Why |
 |---|---|
 | [`docs/reference/subagents_structure.md`](../reference/subagents_structure.md) | Implemented design: module ownership, callable agent catalog, ordered delegation operation, outcome table, persistent-pane invariant |
-| [`docs/reference/subagents_refactor_structure.md`](../reference/subagents_refactor_structure.md) | Rationale-level design; `:629` already names the extraction seam we now need ("A future non-Herdr runtime is deliberately not represented today… the single call from `subagent-tool.ts` to `executeHerdrDelegation()`") |
+| `docs/reference/subagents_refactor_structure.md` (deleted at cutover) | Rationale-level design; `:629` already names the extraction seam we now need ("A future non-Herdr runtime is deliberately not represented today… the single call from `subagent-tool.ts` to `executeHerdrDelegation()`") |
 | [`docs/research/pi-interactive-subagents.md`](pi-interactive-subagents.md) | Prior-art analysis of `HazAT/pi-interactive-subagents`: activity snapshots vs. sidecars vs. session JSONL, stale-`done` correlation |
 | [`docs/research/pi-worktree-patterns.md`](pi-worktree-patterns.md) | tmux-era prior art in §3 and §5, notably `RielJ/pi-git-worktrees` (hidden pool session, `destroy-unattached off`, `display-popup`) and the "terminal injection is racy" verdict |
 | [`docs/adr/0004-keep-herdr-agent-state-managed-by-herdr.md`](../adr/0004-keep-herdr-agent-state-managed-by-herdr.md) | **Will be superseded.** With Herdr gone, nobody owns child state; the workspace must |
