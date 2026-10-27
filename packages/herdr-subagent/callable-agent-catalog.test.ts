@@ -8,13 +8,13 @@ import type {
   InputEventResult,
   SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   discoverProjectAgents,
   discoverUserAgents,
   discoverWorkspaceAgents,
   mergeAgentLists,
-} from "./agents.js";
+} from "@pi-workspace/tmux-subagent/agents";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DELEGATED_TASK_FILE_FLAG, DELEGATED_TASK_PLACEHOLDER } from "./herdr/session.js";
 import extension from "./index.js";
 
