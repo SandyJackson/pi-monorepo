@@ -11,6 +11,7 @@ import type { SessionAnswerRef } from "./pi-session.ts";
 import {
   type ChildId,
   type ChildRecord,
+  canonical,
   createStore,
   owningWorktree,
   type ReportId,
@@ -187,7 +188,8 @@ export interface DrainResult {
 /** How often the parent looks for its children's undelivered reports. */
 export const REPORT_POLL_MS = 3000;
 
-const REPORT_TYPE = "subagent_report";
+/** The custom message type a report is delivered as; delivery is confirmed by it. */
+export const REPORT_TYPE = "subagent_report";
 
 /** `${childId}/${reportId}`, the global address of a report. */
 export function reportKey(report: { childId: ChildId; reportId: ReportId }): string {
@@ -263,14 +265,6 @@ function forEachOwnedChild(
 export function clearDrain(options: { parentSessionId: string; store?: Store }): DrainResult {
   const store = options.store ?? createStore();
   return forEachOwnedChild(store, options.parentSessionId, (childId) => store.removeDrain(childId));
-}
-
-function canonical(dir: string): string {
-  try {
-    return fs.realpathSync(dir);
-  } catch {
-    return dir;
-  }
 }
 
 /** Strip control characters except newline and tab; the instruction travels in a file. */

@@ -20,6 +20,7 @@ import {
   type DrainResult,
   deliveredReportKeys,
   type ParentRuntime,
+  REPORT_TYPE,
   reportEnvelope,
 } from "./parent.ts";
 import { createStore, type Store } from "./store.ts";
@@ -68,7 +69,7 @@ export default function (pi: ExtensionAPI): void {
       sendReport: (report) =>
         pi.sendMessage(
           {
-            customType: "subagent_report",
+            customType: REPORT_TYPE,
             content: reportEnvelope(report),
             display: true,
             details: { childId: report.childId, reportId: report.reportId },

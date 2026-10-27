@@ -12,7 +12,7 @@
 
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { ensureLive, isLive, readNonce } from "./launch.ts";
+import { ensureLive, isDirectory, isLive, readNonce } from "./launch.ts";
 import {
   type ChildId,
   type ChildRecord,
@@ -69,11 +69,7 @@ const EMPTY_SCOPE = "No subagents for this worktree";
 
 /** The §3 owning worktree of `dir`. Errors rather than guessing when `dir` is unusable. */
 function resolveWorktree(dir: string): string {
-  let isDirectory = false;
-  try {
-    isDirectory = fs.statSync(dir).isDirectory();
-  } catch {}
-  if (!dir || !isDirectory) throw new Error(`Cannot resolve the worktree of "${dir}".`);
+  if (!dir || !isDirectory(dir)) throw new Error(`Cannot resolve the worktree of "${dir}".`);
   return owningWorktree(dir);
 }
 

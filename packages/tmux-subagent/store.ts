@@ -150,7 +150,8 @@ export function defaultStoreRoot(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(agentDir, "subagents");
 }
 
-function canonical(dir: string): string {
+/** `dir` with symlinks resolved, or unchanged when it cannot be resolved. */
+export function canonical(dir: string): string {
   try {
     return fs.realpathSync(dir);
   } catch {
