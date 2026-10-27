@@ -5,9 +5,10 @@ import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import extension from "./index.ts";
-import { REPORT_POLL_MS, reportEnvelope } from "./parent.ts";
+import { REPORT_POLL_MS } from "./parent.ts";
 import { createStore, type ReportRecord } from "./store.ts";
 import { createFakePi } from "./test-support.ts";
+import { reportEnvelope } from "./tools.ts";
 
 const hasTmux = (() => {
   try {

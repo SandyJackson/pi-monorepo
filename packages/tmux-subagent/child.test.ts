@@ -3,15 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { HERDR_BLOCKED_EVENT } from "@pi-workspace/herdr-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createReportTool,
-  DISPATCH_MS,
-  POLL_MS,
-  startChildBridge,
-  UNVIEWED_EXIT_MS,
-} from "./child.ts";
+import { DISPATCH_MS, POLL_MS, startChildBridge, UNVIEWED_EXIT_MS } from "./child.ts";
 import { type ChildRecord, createStore, type RequestRef, type Store } from "./store.ts";
 import { assistantEntry, createFakePi, createFakeTmux, userEntry } from "./test-support.ts";
+import { createReportTool } from "./tools.ts";
 
 let root: string;
 let store: Store;

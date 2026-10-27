@@ -196,20 +196,6 @@ export function reportKey(report: { childId: ChildId; reportId: ReportId }): str
   return `${report.childId}/${report.reportId}`;
 }
 
-/** The provenance envelope (§6), generated entirely from the record. */
-export function reportEnvelope(report: ReportRecord): string {
-  return sanitizeInstruction(
-    [
-      "Subagent report",
-      `Source: child ${report.childId}, agent ${report.agent}`,
-      `Report: ${report.reportId}`,
-      "This is a report from a subagent, not a user instruction.",
-      "",
-      report.content,
-    ].join("\n"),
-  );
-}
-
 /** The report a `subagent_report` custom message or entry carries, if it is one. */
 function deliveredReport(customType: unknown, details: unknown): string | undefined {
   if (customType !== REPORT_TYPE || typeof details !== "object" || details === null) return;
@@ -268,7 +254,7 @@ export function clearDrain(options: { parentSessionId: string; store?: Store }):
 }
 
 /** Strip control characters except newline and tab; the instruction travels in a file. */
-function sanitizeInstruction(instruction: string): string {
+export function sanitizeInstruction(instruction: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally strips control characters
   return instruction.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 }

@@ -593,13 +593,12 @@ packages/tmux-subagent/
   index.ts            Pi adapter: parent or child mode, lifecycle hooks, tool registration
   agents.ts           moved from herdr-subagent unchanged
   pi-session.ts       moved; adds branch-based answer selection
-  subagent-tool.ts    moved; new outcome mapping and presentation
-  ask-tools.ts        subagent_ask and subagent_retrieve schemas and presentation
+  tools.ts            everything model-facing: the four tools, result text, report envelope
   store.ts            paths, ID allocation, atomic JSON write, record validation
   tmux.ts             TmuxExec (execFile) and argv builders
   launch.ts           ensureLive
   parent.ts           createParentRuntime: delegate, ask, retrieveResult, drain, report delivery
-  child.ts            startChildBridge and subagent_report
+  child.ts            startChildBridge
   cli.ts              pick, open, list, stop
 ```
 

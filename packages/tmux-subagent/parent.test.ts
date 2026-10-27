@@ -9,7 +9,6 @@ import {
   type DelegatedTaskRecord,
   POLL_MS,
   REPORT_POLL_MS,
-  reportEnvelope,
 } from "./parent.ts";
 import {
   createStore,
@@ -19,6 +18,7 @@ import {
   type Store,
 } from "./store.ts";
 import { createFakeTmux, type FakeSession } from "./test-support.ts";
+import { reportEnvelope } from "./tools.ts";
 
 let root: string;
 let parentCwd: string;

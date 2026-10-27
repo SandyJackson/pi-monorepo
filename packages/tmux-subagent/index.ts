@@ -12,8 +12,7 @@ import {
   discoverWorkspaceAgents,
   mergeAgentLists,
 } from "./agents.ts";
-import { createFollowUpTools } from "./ask-tools.ts";
-import { createReportTool, startChildBridge } from "./child.ts";
+import { startChildBridge } from "./child.ts";
 import {
   clearDrain,
   createParentRuntime,
@@ -21,10 +20,14 @@ import {
   deliveredReportKeys,
   type ParentRuntime,
   REPORT_TYPE,
-  reportEnvelope,
 } from "./parent.ts";
 import { createStore, type Store } from "./store.ts";
-import { createSubagentTool } from "./subagent-tool.ts";
+import {
+  createFollowUpTools,
+  createReportTool,
+  createSubagentTool,
+  reportEnvelope,
+} from "./tools.ts";
 
 const CHILD_FLAG = "subagent-child";
 
