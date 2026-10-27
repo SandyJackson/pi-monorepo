@@ -215,13 +215,14 @@ export type RequestAnswer =
  * Locate a request on the active branch (root first) and select its answer.
  *
  * The request entry is the first user message after `dispatchLeaf` (the
- * branch root when the session was empty) whose text equals the instruction.
+ * branch root when the session was empty) whose text equals `requestText`,
+ * the text Pi started the request's run with.
  * The answer is chosen from the entries after it by the same rule as
  * `inspectSession`. A missing dispatch point or request entry is `superseded`.
  */
 export function findRequestAnswer(
   branch: readonly unknown[],
-  options: { dispatchLeaf: string | null; instruction: string; sessionPath: string | undefined },
+  options: { dispatchLeaf: string | null; requestText: string; sessionPath: string | undefined },
 ): RequestAnswer {
   let start = 0;
   if (options.dispatchLeaf !== null) {
@@ -232,7 +233,7 @@ export function findRequestAnswer(
     start = leafIndex + 1;
   }
   const requestIndex = branch.findIndex(
-    (entry, index) => index >= start && isUserEntryWithText(entry, options.instruction),
+    (entry, index) => index >= start && isUserEntryWithText(entry, options.requestText),
   );
   if (requestIndex === -1) return { status: "superseded" };
 

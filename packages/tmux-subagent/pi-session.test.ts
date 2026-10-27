@@ -855,7 +855,7 @@ describe("pi-session request answer on the active branch", () => {
     ];
 
     expect(
-      findRequestAnswer(branch, { dispatchLeaf: "a0", instruction: "Review", sessionPath }),
+      findRequestAnswer(branch, { dispatchLeaf: "a0", requestText: "Review", sessionPath }),
     ).toEqual({ status: "found", answer: { path: sessionPath, entryId: "a2" } });
   });
 
@@ -863,7 +863,7 @@ describe("pi-session request answer on the active branch", () => {
     expect(
       findRequestAnswer([user("u1", "Go"), assistant("a1", "Done")], {
         dispatchLeaf: null,
-        instruction: "Go",
+        requestText: "Go",
         sessionPath,
       }),
     ).toEqual({ status: "found", answer: { path: sessionPath, entryId: "a1" } });
@@ -871,17 +871,17 @@ describe("pi-session request answer on the active branch", () => {
 
   it("reports a request entry with no terminal answer as found without an answer", () => {
     expect(
-      findRequestAnswer([user("u1", "Go")], { dispatchLeaf: null, instruction: "Go", sessionPath }),
+      findRequestAnswer([user("u1", "Go")], { dispatchLeaf: null, requestText: "Go", sessionPath }),
     ).toEqual({ status: "found", answer: null });
   });
 
   it("is superseded when the dispatch point or the request entry is not on the branch", () => {
     const branch = [user("u0", "Go"), assistant("a0", "Done")];
     expect(
-      findRequestAnswer(branch, { dispatchLeaf: "elsewhere", instruction: "Go", sessionPath }),
+      findRequestAnswer(branch, { dispatchLeaf: "elsewhere", requestText: "Go", sessionPath }),
     ).toEqual({ status: "superseded" });
     expect(
-      findRequestAnswer(branch, { dispatchLeaf: "a0", instruction: "Go", sessionPath }),
+      findRequestAnswer(branch, { dispatchLeaf: "a0", requestText: "Go", sessionPath }),
     ).toEqual({ status: "superseded" });
   });
 });

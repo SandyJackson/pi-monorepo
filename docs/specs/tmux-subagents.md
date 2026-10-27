@@ -443,17 +443,15 @@ function startChildBridge(pi: ExtensionAPI, options: { childDir: string; nonce: 
 On each poll, if `ctx.isIdle()`, `!ctx.hasPendingMessages()`, no UI prompt is open, and no request is current, take the lowest unsettled request:
 
 1. Record `dispatchLeaf = ctx.sessionManager.getLeafId()` and set `current` in memory.
-2. `pi.sendUserMessage(instruction, { deliverAs: "followUp" })`. It returns immediately; failures do not reach the caller. `deliverAs` matters only if the operator started a run in the moment since the idle check: the request then queues behind it instead of failing.
-3. Watch for this request's `input` event (`source: "extension"`, text equal to the instruction). It only shows that Pi received the input: an input handler can still consume it, and model or authentication checks run afterwards. Dispatch is confirmed by either:
-   - an `agent_start` after that `input` event (Pi was idle and started a run), or
-   - that `input` event carrying `streamingBehavior` (Pi was streaming and queued it as a follow-up).
+2. `pi.sendUserMessage(instruction, { deliverAs: "followUp", expandPromptTemplates: true })`. It returns immediately; failures do not reach the caller. `expandPromptTemplates` makes Pi treat the instruction as typed input: `/skill:<name>` and prompt templates are expanded, and an instruction naming an extension command runs that command (it then never reaches `input`, so step 4 settles it). Pi's `input` event carries the instruction before expansion. `deliverAs` makes Pi set `streamingBehavior` on the `input` event if a run started in the moment since the idle check, instead of throwing.
+3. Watch for this request's `input` event (`source: "extension"`, text equal to the instruction).
+   - If it carries `streamingBehavior`, a run started since the idle check. The bridge returns `{ action: "handled" }`, so Pi drops the input before expansion or queueing and the request never runs. The bridge clears `current` without writing `result.json`; the request stays queued and a later poll dispatches it again.
+   - Otherwise it only shows that Pi received the input: a later input handler can still consume it, and model or authentication checks run afterwards. Dispatch is confirmed by an `agent_start` after that `input` event. The `before_agent_start` event between them (`messageType: "user"`) carries `prompt`, the expanded text Pi starts the run with; the bridge keeps it as the request text for binding. Pi marks the session busy before `before_agent_start`, so no other prompt can start a run in between.
 
    On confirmation, write `result.json` `running` with the nonce and set `current` in `status.json`.
 4. If there is no confirmation within `DISPATCH_MS` (an internal constant, about 10 s), write `settled` / `failed` / `error` with `Pi did not start the request`, and clear `current`. This covers consumed input, a missing model, and failed authentication. Never re-dispatch: a late start after a resend would run the instruction twice.
 
-`running` is written only after Pi has started or queued the run, so a request without `result.json` was never started. That is why startup may dispatch it, and why §6 treats it as queued.
-
-In the queued case, an input handler could still consume the request after confirmation. Settlement then finds no request entry and records `superseded`. That is an honest result, so it needs no separate handling.
+`running` is written only after Pi has started the run, so a request without `result.json` was never started. That is why startup may dispatch it, why §6 treats it as queued, and why a request taken back in step 3 may be dispatched again.
 
 From dispatch to settlement, any `input` event with `source: "interactive"` sets `humanIntervened`.
 
@@ -462,10 +460,10 @@ From dispatch to settlement, any `input` event with `source: "interactive"` sets
 Pi's extension `message_end` fires before the message is persisted and carries no entry ID, so the bridge does not bind there. At settlement it locates the request's user entry on the current branch:
 
 1. Find `dispatchLeaf` in `ctx.sessionManager.getBranch()`. If `dispatchLeaf` was `null` (empty session), start from the branch root.
-2. The request entry is the first user-message entry after that point whose text equals the instruction.
+2. The request entry is the first user-message entry after that point whose text equals the request text: the `before_agent_start` prompt recorded in Dispatch step 3, which is the instruction after skill and template expansion.
 3. If `dispatchLeaf` is not on the branch, or no such entry follows it, the request is `superseded`.
 
-Text equality is safe here because it is scoped to entries after the dispatch point. An operator typing the identical instruction at the same moment is the only ambiguity, and either entry gives the same answer. **Verify:** the persisted user entry's text equals the instruction passed to `sendUserMessage` (no transformation by other extensions' `input` handlers in the child's extension set).
+Text equality is safe here because it is scoped to entries after the dispatch point. An operator typing the identical instruction at the same moment is the only ambiguity, and either entry gives the same answer. In Pi 1.3.0 the starting user message is built from the `before_agent_start` prompt unchanged when no images are attached (`_prepareRun`), so the persisted text equals the recorded request text. An extension `message_end` handler that replaces the user message would break this; none in the child's extension set does. The real-Pi integration test delegates a `/skill:` instruction and checks that it completes with the expanded text.
 
 ### Settlement
 
@@ -625,7 +623,7 @@ Deterministic (scripted tmux, temp store):
 13. Dispatch without an `input` confirmation settles `failed` / `error` and is not re-dispatched. A request entry missing from the branch at settlement yields `superseded`.
 14. An unconfirmed in-flight report is resent after the parent is observed idle; a confirmed one is not.
 15. Child `/reload` keeps the same nonce, and `status.json` stays valid for readiness.
-16. Dispatch: `input` followed by no `agent_start` (consumed input, missing auth) settles `failed` / `error`; `input` with `streamingBehavior` confirms as queued.
+16. Dispatch: `input` followed by no `agent_start` (consumed input, missing auth) settles `failed` / `error`; `input` with `streamingBehavior` is taken back and dispatched again when idle; a `/skill:` instruction is expanded and binds to its expanded entry.
 17. Launch arguments: an allowlist gains exactly `subagent_report`, plus `subagent_ask` and `subagent_retrieve` for a depth-1 child that lists `subagent`; `projectTrust` produces `--approve` or `--no-approve`, and a cwd outside the parent's gets `--no-approve`.
 18. Nesting: a depth-1 child registers the parent tools and creates `depth: 2` children with its worktree; a depth-2 child registers none; a depth-1 child exiting through drain drains its grandchildren.
 

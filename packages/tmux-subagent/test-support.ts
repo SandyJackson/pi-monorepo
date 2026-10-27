@@ -10,7 +10,7 @@ type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 export function createFakePi() {
   const handlers = new Map<string, Handler[]>();
   const busHandlers = new Map<string, Array<(data: unknown) => void>>();
-  const sent: Array<{ text: string; deliverAs?: string }> = [];
+  const sent: Array<{ text: string; deliverAs?: string; expandPromptTemplates?: boolean }> = [];
   const customMessages: Array<{ message: Record<string, unknown>; options?: unknown }> = [];
   const tools: Array<{ name: string }> = [];
   const flags: Record<string, string | boolean | undefined> = {};
@@ -56,8 +56,11 @@ export function createFakePi() {
           (handlers.get(event) ?? []).filter((h) => h !== handler),
         );
     },
-    sendUserMessage(text: string, options?: { deliverAs?: string }) {
-      sent.push({ text, deliverAs: options?.deliverAs });
+    sendUserMessage(
+      text: string,
+      options?: { deliverAs?: string; expandPromptTemplates?: boolean },
+    ) {
+      sent.push({ text, ...options });
     },
     sendMessage(message: Record<string, unknown>, options?: unknown) {
       customMessages.push({ message, options });
