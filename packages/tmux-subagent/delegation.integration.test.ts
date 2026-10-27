@@ -2,11 +2,13 @@
  * End to end: a real Pi with only this extension delegates two tasks to two
  * agents, each child runs in a real tmux session on a disposable socket, and
  * the parent gets both answers back in order. A follow-up to one child after
- * it has drained and exited resumes the saved conversation.
+ * it has drained and exited resumes the saved conversation. A child whose
+ * agent may delegate does so in turn, one level down.
  *
  * The model is a local mock OpenAI-compatible endpoint (no credentials): the
- * parent's model calls `subagent` when asked to DELEGATE, each child's model
- * echoes its instruction, and the parent's model echoes the tool result.
+ * parent's model calls `subagent` when asked to DELEGATE or NEST, a child's
+ * model calls it when asked to go DEEPER, other children's models echo their
+ * instruction, and a delegating model echoes the tool result.
  */
 
 import { execFile, execFileSync } from "node:child_process";
@@ -43,32 +45,42 @@ function messageText(message: ChatMessage | undefined): string {
     .join("");
 }
 
+function subagentCall(args: Record<string, unknown>): Record<string, unknown> {
+  return {
+    tool_calls: [
+      {
+        index: 0,
+        id: "call_1",
+        type: "function",
+        function: { name: "subagent", arguments: JSON.stringify(args) },
+      },
+    ],
+  };
+}
+
 /** The mock model's reply to one chat request, as an OpenAI streaming delta. */
 function reply(messages: ChatMessage[]): Record<string, unknown> {
   const last = messages.at(-1);
   if (last?.role === "tool") return { content: `PARENT SAW:\n${messageText(last)}` };
   const text = messageText(last);
   if (text.includes("DELEGATE")) {
-    return {
-      tool_calls: [
-        {
-          index: 0,
-          id: "call_1",
-          type: "function",
-          function: {
-            name: "subagent",
-            arguments: JSON.stringify({
-              tasks: [
-                { agent: "alpha", instruction: "say ALPHA" },
-                { agent: "beta", instruction: "say BETA" },
-              ],
-              label: "e2e",
-              timeout: 2,
-            }),
-          },
-        },
+    return subagentCall({
+      tasks: [
+        { agent: "alpha", instruction: "say ALPHA" },
+        { agent: "beta", instruction: "say BETA" },
       ],
-    };
+      label: "e2e",
+      timeout: 2,
+    });
+  }
+  if (text.includes("NEST")) {
+    return subagentCall({
+      tasks: [{ agent: "code-reviewer", instruction: "go DEEPER" }],
+      timeout: 2,
+    });
+  }
+  if (text.includes("DEEPER")) {
+    return subagentCall({ tasks: [{ agent: "alpha", instruction: "say GRANDCHILD" }], timeout: 1 });
   }
   return { content: `ECHO: ${text}` };
 }
@@ -125,69 +137,83 @@ afterAll(async () => {
   fs.rmSync(root, { recursive: true, force: true });
 }, 20_000);
 
+/**
+ * A throwaway Pi agent directory with the mock model, this extension, and
+ * test agents; then a top-level `pi --print <prompt>` run in a fresh project.
+ */
+async function runParent(name: string, prompt: string) {
+  const agentDir = path.join(root, name, "agent");
+  const projectDir = path.join(root, name, "project");
+  fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+  fs.mkdirSync(projectDir);
+  const port = (server.address() as AddressInfo).port;
+  fs.writeFileSync(
+    path.join(agentDir, "models.json"),
+    JSON.stringify({
+      providers: {
+        mock: {
+          baseUrl: `http://127.0.0.1:${port}/v1`,
+          api: "openai-completions",
+          apiKey: "mock",
+          models: [{ id: "echo" }],
+        },
+      },
+    }),
+  );
+  // Children load extensions from settings, so the extension is configured there.
+  fs.writeFileSync(
+    path.join(agentDir, "settings.json"),
+    JSON.stringify({
+      defaultProvider: "mock",
+      defaultModel: "echo",
+      extensions: [
+        path.join(import.meta.dirname, "index.ts"),
+        "-builtin:mcp",
+        "-builtin:llama.cpp",
+        "-builtin:codemode",
+        "-builtin:tool-search",
+      ],
+    }),
+  );
+  for (const agent of ["alpha", "beta"]) {
+    fs.writeFileSync(
+      path.join(agentDir, "agents", `${agent}.md`),
+      `---\nname: ${agent}\ndescription: ${agent} agent\ntools: read\n---\nYou are ${agent}.\n`,
+    );
+  }
+  // Overrides the workspace code-reviewer so it runs on the mock model.
+  fs.writeFileSync(
+    path.join(agentDir, "agents", "code-reviewer.md"),
+    "---\nname: code-reviewer\ndescription: Reviewer\ntools: read, subagent\n---\nYou review.\n",
+  );
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PI_CODING_AGENT_DIR: agentDir,
+    PI_SUBAGENT_TMUX_SOCKET: socket,
+    PI_OFFLINE: "1",
+  };
+  delete env.TMUX;
+  delete env.TMUX_PANE;
+  delete env.PI_SUBAGENT_NONCE;
+  const cli = path.join(getPackageDir(), "dist", "bundle", "cli.js");
+  const stdout = await new Promise<string>((resolve, reject) => {
+    const parent = execFile(
+      process.execPath,
+      [cli, "--print", "--session-dir", path.join(root, name, "parent-sessions"), prompt],
+      { cwd: projectDir, env, timeout: 90_000 },
+      (error, out, err) => (error ? reject(new Error(`${error.message}\n${err}`)) : resolve(out)),
+    );
+    // Print mode reads piped stdin to EOF before running the prompt.
+    parent.stdin?.end();
+  });
+  return { agentDir, projectDir, stdout };
+}
+
 it.skipIf(!hasTmux)(
   "delegates two tasks through tmux children and returns both answers in order",
   async () => {
-    const agentDir = path.join(root, "agent");
-    const projectDir = path.join(root, "project");
-    fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
-    fs.mkdirSync(projectDir);
-    const port = (server.address() as AddressInfo).port;
-    fs.writeFileSync(
-      path.join(agentDir, "models.json"),
-      JSON.stringify({
-        providers: {
-          mock: {
-            baseUrl: `http://127.0.0.1:${port}/v1`,
-            api: "openai-completions",
-            apiKey: "mock",
-            models: [{ id: "echo" }],
-          },
-        },
-      }),
-    );
-    // Children load extensions from settings, so the extension is configured there.
-    fs.writeFileSync(
-      path.join(agentDir, "settings.json"),
-      JSON.stringify({
-        defaultProvider: "mock",
-        defaultModel: "echo",
-        extensions: [
-          path.join(import.meta.dirname, "index.ts"),
-          "-builtin:mcp",
-          "-builtin:llama.cpp",
-          "-builtin:codemode",
-          "-builtin:tool-search",
-        ],
-      }),
-    );
-    for (const name of ["alpha", "beta"]) {
-      fs.writeFileSync(
-        path.join(agentDir, "agents", `${name}.md`),
-        `---\nname: ${name}\ndescription: ${name} agent\ntools: read\n---\nYou are ${name}.\n`,
-      );
-    }
-
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      PI_CODING_AGENT_DIR: agentDir,
-      PI_SUBAGENT_TMUX_SOCKET: socket,
-      PI_OFFLINE: "1",
-    };
-    delete env.TMUX;
-    delete env.TMUX_PANE;
-    delete env.PI_SUBAGENT_NONCE;
-    const cli = path.join(getPackageDir(), "dist", "bundle", "cli.js");
-    const stdout = await new Promise<string>((resolve, reject) => {
-      const parent = execFile(
-        process.execPath,
-        [cli, "--print", "--session-dir", path.join(root, "parent-sessions"), "DELEGATE"],
-        { cwd: projectDir, env, timeout: 90_000 },
-        (error, out, err) => (error ? reject(new Error(`${error.message}\n${err}`)) : resolve(out)),
-      );
-      // Print mode reads piped stdin to EOF before running the prompt.
-      parent.stdin?.end();
-    });
+    const { agentDir, projectDir, stdout } = await runParent("delegate", "DELEGATE");
 
     expect(stdout).toContain("Delegation: 2/2 tasks completed");
     const alpha = stdout.indexOf("### Task 1 — alpha — completed");
@@ -275,6 +301,50 @@ it.skipIf(!hasTmux)(
       request: followUp,
       result: followUpResult.result,
     });
+  },
+  180_000,
+);
+
+it.skipIf(!hasTmux)(
+  "lets a delegating child delegate to a grandchild, which it drains on exit",
+  async () => {
+    const { agentDir, projectDir, stdout } = await runParent("nest", "NEST");
+
+    // The parent sees the reviewer's answer, which carries the grandchild's.
+    expect(stdout).toMatch(
+      /Child code-reviewer-\w+, request r1\n[\s\S]*Child alpha-\w+, request r1\n\nECHO: say GRANDCHILD/,
+    );
+
+    const store = createStore(path.join(agentDir, "subagents"));
+    const records = fs
+      .readdirSync(path.join(store.root, "children"))
+      .map((childId) => store.readChild(childId));
+    const reviewer = records.find((child) => child.agent.name === "code-reviewer");
+    const grandchild = records.find((child) => child.agent.name === "alpha");
+    expect(records).toHaveLength(2);
+    expect(reviewer).toMatchObject({ depth: 1, worktree: projectDir });
+    expect(grandchild).toMatchObject({
+      depth: 2,
+      worktree: projectDir,
+      parent: { sessionId: reviewer?.childId },
+    });
+    if (!reviewer || !grandchild) return;
+    const answer = store.readResult({ childId: grandchild.childId, requestId: "r1" });
+    expect(answer).toMatchObject({ phase: "settled", result: { status: "completed" } });
+
+    // The parent's exit drains the reviewer; the reviewer's exit drains the grandchild.
+    expect(store.hasDrain(reviewer.childId)).toBe(true);
+    await expect
+      .poll(() => store.hasDrain(grandchild.childId), { timeout: 15_000, interval: 250 })
+      .toBe(true);
+    // The first test's resumed child may still be live on the shared socket.
+    const own = [reviewer, grandchild].map((child) => `sa-${child.childId}`);
+    await expect
+      .poll(() => liveSessions().filter((name) => own.includes(name)), {
+        timeout: 15_000,
+        interval: 250,
+      })
+      .toEqual([]);
   },
   180_000,
 );

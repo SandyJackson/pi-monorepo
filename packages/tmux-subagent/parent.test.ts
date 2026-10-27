@@ -225,6 +225,31 @@ describe("delegate", () => {
     });
   });
 
+  it("creates depth-2 children in its creator's worktree when running inside a child", async () => {
+    const tmux = createFakeTmux({ onNewSession: ready });
+    const child = createParentRuntime({
+      parentSessionId: "reviewer-7k2q",
+      parentCwd: path.join(root, "elsewhere"),
+      creator: { worktree: parentCwd },
+      isProjectTrusted: () => false,
+      ...noReports,
+      store,
+      tmux: tmux.exec,
+    });
+    const result = child.delegate([task(1, { cwd: ".", timeoutMs: POLL_MS })], {});
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    const [execution] = await result;
+    const request = (execution.outcome as { request: RequestRef }).request;
+
+    expect(store.readChild(request.childId)).toMatchObject({
+      parent: { sessionId: "reviewer-7k2q" },
+      worktree: parentCwd,
+      cwd: path.join(root, "elsewhere"),
+      depth: 2,
+      projectTrust: false,
+    });
+  });
+
   it("gives no child project trust when the parent project is untrusted", async () => {
     const tmux = createFakeTmux({ onNewSession: ready });
     const result = runtime(tmux, false).delegate([task(1, { timeoutMs: POLL_MS })], {});
