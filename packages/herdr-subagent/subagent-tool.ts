@@ -6,17 +6,17 @@ import {
   type ToolDefinition,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import {
   type AgentConfig,
   type AgentScope,
   formatMergedAgentList,
   resolveAgent,
-} from "./agents.ts";
+} from "@pi-workspace/tmux-subagent/agents";
+import { readAnswer } from "@pi-workspace/tmux-subagent/pi-session";
+import { Type } from "typebox";
 import type { DelegatedTaskExecution, DelegatedTaskRecord } from "./herdr/delegation.ts";
 import type { DelegatedTaskOutcome } from "./herdr/session.ts";
 import { DEFAULT_TURN_TIMEOUT_MINUTES } from "./herdr/session.ts";
-import { readAnswer } from "./pi-session.ts";
 
 const TaskItem = Type.Object(
   {
