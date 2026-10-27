@@ -547,7 +547,7 @@ describe("subagent_report", () => {
       properties: { content: { type: "string", minLength: 1 } },
     });
     expect(tool.description).toContain(
-      "For an initial delegated task your final answer already returns to the parent, finish the assigned work and do not use this tool.",
+      "For an initial delegated task, your final answer already returns to the parent. Finish the assigned work and do not use this tool.",
     );
 
     await expect(report({ content: "  \n " })).rejects.toThrow(/empty/);

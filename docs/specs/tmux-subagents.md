@@ -529,7 +529,7 @@ Strict schema `{ content: string }`, non-empty. Allocates the next report ID, co
 
 Tool guidance:
 
-> For an initial delegated task your final answer already returns to the parent, finish the assigned work and do not use this tool. During follow-up work or direct interaction with the operator, use reports when communicating additional findings to the parent is useful.
+> For an initial delegated task, your final answer already returns to the parent. Finish the assigned work and do not use this tool. During follow-up work or direct interaction with the operator, use reports when communicating additional findings to the parent is useful.
 
 ## 9. Model-facing tools
 

@@ -217,7 +217,7 @@ export function createSubagentTool(
   const description =
     [
       "Delegate work to a sub-agent. Available agent types are below.",
-      "Agents remain available after completion for follow up queries or actions",
+      "Agents remain available after completion for follow-up queries or actions.",
       "",
       "Call with no arguments to list available agents.",
       "",
@@ -501,7 +501,7 @@ export function createReportTool(options: {
     label: "Subagent report",
     description: [
       "Send findings to the parent agent that owns this subagent. The report is queued and reaches the parent as a follow-up message.",
-      "For an initial delegated task your final answer already returns to the parent, finish the assigned work and do not use this tool. During follow-up work or direct interaction with the operator, use reports when communicating additional findings to the parent is useful.",
+      "For an initial delegated task, your final answer already returns to the parent. Finish the assigned work and do not use this tool. During follow-up work or direct interaction with the operator, use reports when communicating additional findings to the parent is useful.",
     ].join("\n\n"),
     parameters: ReportParams,
     async execute(_toolCallId, params) {
