@@ -4,8 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./index.ts",
-    "./agents": "./agents.ts",
-    "./pi-session": "./pi-session.ts"
+    "./agents": "./agents.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
