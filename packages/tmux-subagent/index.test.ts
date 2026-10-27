@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +8,15 @@ import extension from "./index.ts";
 import { REPORT_POLL_MS, reportEnvelope } from "./parent.ts";
 import { createStore, type ReportRecord } from "./store.ts";
 import { createFakePi } from "./test-support.ts";
+
+const hasTmux = (() => {
+  try {
+    execFileSync("tmux", ["-V"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalNonce = process.env.PI_SUBAGENT_NONCE;
@@ -475,52 +485,56 @@ describe("child mode", () => {
     expect(store.hasDrain(grandchild)).toBe(true);
   });
 
-  it("records a depth-1 child's grandchildren under the child's worktree, at depth 2", async () => {
-    process.env.PI_SUBAGENT_NONCE = "launch-nonce";
-    const originalSocket = process.env.PI_SUBAGENT_TMUX_SOCKET;
-    // Only `tmux -V` reaches it: the missing cwd fails the launch before tmux starts anything.
-    process.env.PI_SUBAGENT_TMUX_SOCKET = `pi-sa-index-${process.pid}`;
-    try {
-      writeAgent(userAgentsDir, "scout.md", "scout", "scouts");
-      const store = createStore(path.join(rootDir, "subagents"));
-      const worktree = path.join(rootDir, "outer-worktree");
-      const childId = store.createChild(
-        {
-          parent: { sessionId: "parent" },
-          worktree,
-          cwd: projectDir,
-          agent: { name: "scout", source: "user" },
-          projectTrust: false,
-          depth: 1,
-          piCommand: ["/node", "/pi/cli.js"],
-        },
-        "",
-      ).childId;
-      const fake = harness(true);
-      fake.flags["subagent-child"] = store.childDir(childId);
-      fake.state.sessionId = childId;
-      await fake.emit("session_start", { reason: "startup" });
-      const subagent = fake.tools.find((tool) => tool.name === "subagent") as Tool;
+  // Delegation checks `tmux -V` before it creates any child.
+  it.skipIf(!hasTmux)(
+    "records a depth-1 child's grandchildren under the child's worktree, at depth 2",
+    async () => {
+      process.env.PI_SUBAGENT_NONCE = "launch-nonce";
+      const originalSocket = process.env.PI_SUBAGENT_TMUX_SOCKET;
+      // Only `tmux -V` reaches it: the missing cwd fails the launch before tmux starts anything.
+      process.env.PI_SUBAGENT_TMUX_SOCKET = `pi-sa-index-${process.pid}`;
+      try {
+        writeAgent(userAgentsDir, "scout.md", "scout", "scouts");
+        const store = createStore(path.join(rootDir, "subagents"));
+        const worktree = path.join(rootDir, "outer-worktree");
+        const childId = store.createChild(
+          {
+            parent: { sessionId: "parent" },
+            worktree,
+            cwd: projectDir,
+            agent: { name: "scout", source: "user" },
+            projectTrust: false,
+            depth: 1,
+            piCommand: ["/node", "/pi/cli.js"],
+          },
+          "",
+        ).childId;
+        const fake = harness(true);
+        fake.flags["subagent-child"] = store.childDir(childId);
+        fake.state.sessionId = childId;
+        await fake.emit("session_start", { reason: "startup" });
+        const subagent = fake.tools.find((tool) => tool.name === "subagent") as Tool;
 
-      await subagent.execute(
-        "call",
-        { tasks: [{ agent: "scout", instruction: "Look", cwd: "missing" }] },
-        undefined,
-        undefined,
-        fake.ctx,
-      );
+        await subagent.execute(
+          "call",
+          { tasks: [{ agent: "scout", instruction: "Look", cwd: "missing" }] },
+          undefined,
+          undefined,
+          fake.ctx,
+        );
 
-      const grandchild = store
-        .listChildIds()
-        .map((id) => store.readChild(id))
-        .find((record) => record.parent.sessionId === childId);
-      expect(grandchild).toMatchObject({ depth: 2, worktree });
-      await fake.emit("session_shutdown", { reason: "quit" });
-    } finally {
-      if (originalSocket === undefined) delete process.env.PI_SUBAGENT_TMUX_SOCKET;
-      else process.env.PI_SUBAGENT_TMUX_SOCKET = originalSocket;
-    }
-  });
+        const grandchild = store
+          .listChildIds()
+          .map((id) => store.readChild(id))
+          .find((record) => record.parent.sessionId === childId);
+        expect(grandchild).toMatchObject({ depth: 2, worktree });
+        await fake.emit("session_shutdown", { reason: "quit" });
+      } finally {
+        if (originalSocket === undefined) delete process.env.PI_SUBAGENT_TMUX_SOCKET;
+        else process.env.PI_SUBAGENT_TMUX_SOCKET = originalSocket;
+      }
+    },
+  );
 
   it("gives a depth-2 child no parent tools and drains nothing when it exits", async () => {
     process.env.PI_SUBAGENT_NONCE = "launch-nonce";

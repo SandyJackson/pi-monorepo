@@ -9,6 +9,7 @@ It supports two installation modes: **local development** (symlink) and **GitHub
 - pnpm (for local development only; Pi bundles its own pnpm)
 - Git (for GitHub installation)
 - The [Ketch](https://github.com/1broseidon/ketch) CLI on PATH, for agents that do external research
+- tmux on PATH, for agents that use subagents
 
 ## Local Development Installation
 
