@@ -48,7 +48,8 @@ export async function isLive(tmux: TmuxExec, childId: ChildId): Promise<boolean>
   return (await tmux(["has-session", "-t", sessionTarget(childId)])).code === 0;
 }
 
-async function readNonce(tmux: TmuxExec, childId: ChildId): Promise<string | undefined> {
+/** The launch nonce of a child's live session, or `undefined` when it has none. */
+export async function readNonce(tmux: TmuxExec, childId: ChildId): Promise<string | undefined> {
   const result = await tmux([
     "show-environment",
     "-t",

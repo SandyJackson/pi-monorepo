@@ -6,10 +6,11 @@
  * mismatch as an error, never as absence. Only a missing file is absence.
  */
 
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SessionAnswerRef } from "./pi-session.ts";
 
 // ---------------------------------------------------------------------------
@@ -95,6 +96,8 @@ export interface Store {
   /** Allocate a child ID by exclusive `mkdir`, then write child.json and system-prompt.md. */
   createChild(child: NewChild, systemPrompt: string): ChildRecord;
   readChild(childId: ChildId): ChildRecord;
+  /** Every child ID in the state directory: a directory scan, no index (§4). */
+  listChildIds(): ChildId[];
   /** Allocate the next request ID by exclusive `mkdir`, then write request.json. */
   createRequest(childId: ChildId, instruction: string): RequestRecord;
   readRequest(ref: RequestRef): RequestRecord | undefined;
@@ -108,9 +111,41 @@ export interface Store {
   writeTmuxConf(content: string): string;
 }
 
-/** `~/.pi/agent/subagents`, following Pi's agent directory (`PI_CODING_AGENT_DIR`). */
-export function defaultStoreRoot(): string {
-  return path.join(getAgentDir(), "subagents");
+/**
+ * `~/.pi/agent/subagents`, following Pi's agent directory (`PI_CODING_AGENT_DIR`).
+ * Resolved as Pi 1.3.0's `getAgentDir` does, without importing Pi, so the CLI
+ * can load this module under plain `node`.
+ */
+export function defaultStoreRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env.PI_CODING_AGENT_DIR;
+  const home = os.homedir();
+  let agentDir = path.join(home, ".pi", "agent");
+  if (configured === "~") agentDir = home;
+  else if (configured?.startsWith("~/")) agentDir = path.join(home, configured.slice(2));
+  else if (configured) agentDir = configured;
+  return path.join(agentDir, "subagents");
+}
+
+function canonical(dir: string): string {
+  try {
+    return fs.realpathSync(dir);
+  } catch {
+    return dir;
+  }
+}
+
+/** The owning worktree (§3): the Git top level of `cwd`, or `cwd` outside Git. */
+export function owningWorktree(cwd: string): string {
+  try {
+    const topLevel = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return canonical(topLevel.trim());
+  } catch {
+    return canonical(cwd);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -306,9 +341,10 @@ function requestNumber(requestId: string): number | undefined {
 
 export function createStore(root: string = defaultStoreRoot()): Store {
   const childrenDir = path.join(root, "children");
+  const isChildId = (name: string) => /^[a-z0-9][a-z0-9-]*$/.test(name);
   // IDs can come from the model in later tools; never let one leave the root.
   const childDir = (childId: ChildId) => {
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(childId)) throw new Error(`Invalid child ID: ${childId}`);
+    if (!isChildId(childId)) throw new Error(`Invalid child ID: ${childId}`);
     return path.join(childrenDir, childId);
   };
   const requestDir = (ref: RequestRef) => {
@@ -370,6 +406,17 @@ export function createStore(root: string = defaultStoreRoot()): Store {
       );
       if (!record) throw new Error(`Child ${childId} does not exist.`);
       return record;
+    },
+
+    listChildIds() {
+      let names: string[];
+      try {
+        names = fs.readdirSync(childrenDir);
+      } catch (error) {
+        if (isMissing(error)) return [];
+        throw error;
+      }
+      return names.filter(isChildId).sort();
     },
 
     createRequest(childId, instruction) {

@@ -136,6 +136,10 @@ export function createFakeTmux(
         return sessions.has(targetName(rest))
           ? ok()
           : fail(`can't find session: ${targetName(rest)}`);
+      case "kill-session":
+        return sessions.delete(targetName(rest))
+          ? ok()
+          : fail(`can't find session: ${targetName(rest)}`);
       case "show-environment": {
         const session = sessions.get(targetName(rest));
         if (!session) return fail(`no such session: =${targetName(rest)}`);
