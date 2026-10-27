@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ChildRecord } from "./store.ts";
 import {
@@ -29,6 +30,8 @@ const child: ChildRecord = {
 };
 
 const dir = "/state/children/scout-7k2q";
+/** This package's extension: loaded explicitly, since a child's cwd may not see the parent's settings. */
+const bridgeExtension = fileURLToPath(new URL("./index.ts", import.meta.url));
 
 describe("Pi launch arguments", () => {
   it("passes session identity, prompt, trust and child flags without optional settings", () => {
@@ -41,6 +44,8 @@ describe("Pi launch arguments", () => {
       "--approve",
       "--append-system-prompt",
       `${dir}/system-prompt.md`,
+      "--extension",
+      bridgeExtension,
       "--subagent-child",
       dir,
     ]);

@@ -75,6 +75,8 @@ export type ResultRecord =
       request: RequestRef;
       nonce: string;
       phase: "settled";
+      /** Present when Pi started the run; absent when it failed before starting. */
+      startedAt?: string;
       settledAt: string;
       result: RequestResult;
     };
@@ -336,6 +338,7 @@ function checkResult(ref: RequestRef) {
     if (value.phase === "running")
       return isString(value.startedAt) ? undefined : "invalid startedAt";
     if (value.phase === "settled") {
+      if (value.startedAt !== undefined && !isString(value.startedAt)) return "invalid startedAt";
       return isString(value.settledAt) ? checkRequestResult(value.result) : "invalid settledAt";
     }
     return "invalid phase";

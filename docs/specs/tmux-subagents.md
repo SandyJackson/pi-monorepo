@@ -135,6 +135,7 @@ type ResultRecord =
       request: RequestRef;
       nonce: string;
       phase: "settled";
+      startedAt?: string; // present only when Pi started the run
       settledAt: string;
       result: RequestResult;
     };
@@ -306,7 +307,7 @@ The initial instruction travels through `request.json` like every follow-up. The
 
 ### `ask`
 
-1. Load and validate the child. If its cwd or Pi session file is missing, or the parent project is no longer trusted while the child is a `project` agent or has `projectTrust: true`, return `invalid_target` with an actionable message.
+1. Load and validate the child. If its cwd is missing, or Pi started an earlier request (a result with `startedAt`) but the session file is missing, or the parent project is no longer trusted while the child is a `project` agent or has `projectTrust: true`, return `invalid_target` with an actionable message.
 2. If not live, `ensureLive(childId)`. On failure return `resume_failed`; nothing has been submitted. Readiness means the bridge has already marked any stale `running` request `interrupted` (§8).
 3. If two of its requests are unsettled (one running plus one queued), return `busy`. The parent is the only writer of requests, so this check needs only an in-process mutex per child.
 4. If `signal` is aborted, return `aborted`. After this point cancellation ends only the wait.
@@ -413,8 +414,10 @@ Pi arguments are identical for first launch and resume:
 --no-mcp [--model M] [--thinking T] [--tools a,b,subagent_report]
 --approve | --no-approve
 --append-system-prompt <childDir>/system-prompt.md
---subagent-child <childDir>
+--extension <this package's index.ts> --subagent-child <childDir>
 ```
+
+The bridge extension is loaded explicitly: a child whose cwd is outside a project-scoped installation does not read the parent's project settings. Pi dedupes extension paths by canonical path, so settings that also load it do not load it twice.
 
 - **Tools:** when the agent has a tool allowlist, append `subagent_report` to it. For a depth-1 child whose allowlist contains `subagent`, also append `subagent_ask` and `subagent_retrieve`. Pi filters extension tools against the allowlist, and every shipped agent has one. Nothing else is added. With no allowlist, Pi's default toolset already includes registered extension tools.
 - **Trust:** always pass one of the two flags, from `child.json` `projectTrust`, so a hidden child never stops at Pi's project-trust prompt before readiness. See §6 `delegate` for how the value is decided. A child shares its parent's trust: `--approve` applies even where Pi has an explicit "Do not trust" saved for a subdirectory of the parent's cwd. Operator decision after the code review.
@@ -449,7 +452,7 @@ On each poll, if `ctx.isIdle()`, `!ctx.hasPendingMessages()`, no UI prompt is op
 2. `pi.sendUserMessage(instruction, { deliverAs: "followUp", expandPromptTemplates: true })`. It returns immediately; failures do not reach the caller. `expandPromptTemplates` makes Pi treat the instruction as typed input: `/skill:<name>` and prompt templates are expanded, and an instruction naming an extension command runs that command (it then never reaches `input`, so step 4 settles it). Pi's `input` event carries the instruction before expansion. `deliverAs` makes Pi set `streamingBehavior` on the `input` event if a run started in the moment since the idle check, instead of throwing.
 3. Watch for this request's `input` event (`source: "extension"`, text equal to the instruction).
    - If it carries `streamingBehavior`, a run started since the idle check. The bridge returns `{ action: "handled" }`, so Pi drops the input before expansion or queueing and the request never runs. The bridge clears `current` without writing `result.json`; the request stays queued and a later poll dispatches it again.
-   - Otherwise it only shows that Pi received the input: a later input handler can still consume it, and model or authentication checks run afterwards. Dispatch is confirmed by an `agent_start` after that `input` event. The `before_agent_start` event between them (`messageType: "user"`) carries `prompt`, the expanded text Pi starts the run with; the bridge keeps it as the request text for binding. Pi marks the session busy before `before_agent_start`, so no other prompt can start a run in between.
+   - Otherwise it only shows that Pi received the input: a later input handler can still consume it, and model or authentication checks run afterwards. Dispatch is confirmed by an `agent_start` after that `input` event. The `before_agent_start` event between them (`messageType: "user"`) carries `prompt`, the expanded text Pi starts the run with; the bridge keeps it as the request text for binding. Pi marks the session busy before `before_agent_start`, so no other prompt can start a run in between. Any later input without `streamingBehavior` means Pi was idle, so the request's input never started a run (missing authentication, or a handler consumed it); the bridge then stops waiting for its `agent_start`, so an operator's run is not taken for the request.
 
    On confirmation, write `result.json` `running` with the nonce and set `current` in `status.json`.
 4. If there is no confirmation within `DISPATCH_MS` (an internal constant, about 10 s): when the `input` event was seen and Pi is not idle, Pi is still preparing the run (pre-run auto-compaction, `before_agent_start` handlers), so wait another `DISPATCH_MS`. Otherwise write `settled` / `failed` / `error` with `Pi did not start the request`, and clear `current`. This covers consumed input, a missing model, and failed authentication. Never re-dispatch: a late start after a resend would run the instruction twice.

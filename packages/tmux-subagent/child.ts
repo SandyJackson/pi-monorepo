@@ -43,6 +43,7 @@ interface CurrentRequest {
   dispatchLeaf: string | null;
   inputSeen: boolean;
   confirmed: boolean;
+  startedAt?: string;
   humanIntervened: boolean;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -69,12 +70,14 @@ export function startChildBridge(
   let uiPrompt: { label: string; since: string } | undefined;
   let herdrBlocked: { label: string; since: string } | undefined;
 
-  function settle(request: RequestRef, result: RequestResult): void {
+  /** `startedAt` is present only when Pi started the request's run. */
+  function settle(request: RequestRef, result: RequestResult, startedAt?: string): void {
     store.writeResult({
       version: 1,
       request,
       nonce,
       phase: "settled",
+      ...(startedAt ? { startedAt } : {}),
       settledAt: new Date().toISOString(),
       result,
     });
@@ -96,7 +99,7 @@ export function startChildBridge(
   function finish(result: RequestResult): void {
     if (!current) return;
     clearTimeout(current.timer);
-    settle(current.request, result);
+    settle(current.request, result, current.startedAt);
     current = undefined;
     writeStatus();
   }
@@ -105,12 +108,13 @@ export function startChildBridge(
     if (!current || current.confirmed) return;
     clearTimeout(current.timer);
     current.confirmed = true;
+    current.startedAt = new Date().toISOString();
     store.writeResult({
       version: 1,
       request: current.request,
       nonce,
       phase: "running",
-      startedAt: new Date().toISOString(),
+      startedAt: current.startedAt,
     });
     writeStatus();
   }
@@ -242,12 +246,16 @@ export function startChildBridge(
     const result = store.readResult({ childId, requestId });
     if (result?.phase !== "running") continue;
     if (result.nonce === nonce && options.reason !== "reload") continue;
-    settle(result.request, {
-      status: "failed",
-      reason: "interrupted",
-      error: "The child stopped while this request was running.",
-      humanIntervened: false,
-    });
+    settle(
+      result.request,
+      {
+        status: "failed",
+        reason: "interrupted",
+        error: "The child stopped while this request was running.",
+        humanIntervened: false,
+      },
+      result.startedAt,
+    );
   }
   writeStatus();
 
@@ -270,6 +278,8 @@ export function startChildBridge(
   pi.on("input", (event) => {
     if (!current) return { action: "continue" };
     if (event.source === "interactive") current.humanIntervened = true;
+    // Input while Pi is idle means the request's own input never started a run.
+    if (!current.confirmed && !event.streamingBehavior) current.inputSeen = false;
     if (!current.confirmed && event.source === "extension" && event.text === current.instruction) {
       if (event.streamingBehavior) {
         // A run started since the idle check. Taken back here, the request

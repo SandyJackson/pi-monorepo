@@ -357,6 +357,44 @@ describe("child bridge dispatch and settlement", () => {
     expect(store.readResult(ref("r1"))).toBeUndefined();
   });
 
+  it("does not confirm an operator's run that starts after Pi rejected the request's input", async () => {
+    store.createRequest(child.childId, "Mine");
+    await start();
+    await nextPoll();
+    // Missing authentication or a consuming input handler: no run starts.
+    await fake.emit("input", { text: "Mine", source: "extension" });
+
+    await fake.emit("input", { text: "Operator prompt", source: "interactive" });
+    fake.state.idle = false;
+    await fake.emit("before_agent_start", { messageType: "user", prompt: "Operator prompt" });
+    await fake.emit("agent_start");
+
+    expect(store.readResult(ref("r1"))).toBeUndefined();
+    fake.state.idle = true;
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS);
+    expect(store.readResult(ref("r1"))).toMatchObject({
+      phase: "settled",
+      result: { status: "failed", error: "Pi did not start the request" },
+    });
+  });
+
+  it("records the start time on a request that ran, and none on one that never started", async () => {
+    store.createRequest(child.childId, "Never runs");
+    store.createRequest(child.childId, "Runs");
+    await start();
+    await nextPoll();
+    await vi.advanceTimersByTimeAsync(DISPATCH_MS);
+    await nextPoll();
+    await piStartsRun("Runs");
+    await piCompletesRun("Runs", "Done");
+
+    expect(store.readResult(ref("r1"))).not.toHaveProperty("startedAt");
+    expect(store.readResult(ref("r2"))).toMatchObject({
+      phase: "settled",
+      startedAt: expect.any(String),
+    });
+  });
+
   it("records superseded when the request entry is not on the branch at settlement", async () => {
     store.createRequest(child.childId, "Moved away");
     await start();

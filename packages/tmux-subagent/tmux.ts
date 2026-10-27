@@ -7,6 +7,7 @@
 
 import { execFile } from "node:child_process";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ChildId, ChildRecord } from "./store.ts";
 
 /**
@@ -166,6 +167,12 @@ export function buildNewSessionArgs(options: {
 const CHILD_TOOLS = ["subagent_report"];
 /** Allowed as well for a depth-1 child that may delegate, so it can follow up on its children. */
 const FOLLOW_UP_TOOLS = ["subagent_ask", "subagent_retrieve"];
+/**
+ * This package's extension, loaded explicitly: a child whose cwd is outside a
+ * project-scoped installation does not see the parent's settings. Pi dedupes
+ * extension paths, so settings that also load it do not load it twice.
+ */
+const BRIDGE_EXTENSION = fileURLToPath(new URL("./index.ts", import.meta.url));
 
 /** Pi arguments for a child, identical for first launch and resume. */
 export function buildPiArguments(child: ChildRecord, childDir: string): string[] {
@@ -187,7 +194,7 @@ export function buildPiArguments(child: ChildRecord, childDir: string): string[]
   }
   args.push(child.projectTrust ? "--approve" : "--no-approve");
   args.push("--append-system-prompt", path.join(childDir, "system-prompt.md"));
-  args.push("--subagent-child", childDir);
+  args.push("--extension", BRIDGE_EXTENSION, "--subagent-child", childDir);
   return args;
 }
 

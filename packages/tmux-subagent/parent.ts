@@ -576,11 +576,11 @@ export function createParentRuntime(options: {
     return undefined;
   }
 
-  /** Whether any request has started, so Pi has written the conversation to disk. */
+  /** Whether Pi started any request's run, so it has written the conversation to disk. */
   function hasStarted(childId: ChildId): boolean {
     return store
       .listRequestIds(childId)
-      .some((requestId) => store.readResult({ childId, requestId }) !== undefined);
+      .some((requestId) => store.readResult({ childId, requestId })?.startedAt !== undefined);
   }
 
   function hasSessionFile(childId: ChildId): boolean {

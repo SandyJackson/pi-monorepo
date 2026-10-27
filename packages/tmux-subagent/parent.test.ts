@@ -79,12 +79,14 @@ function ready(session: FakeSession): void {
   });
 }
 
-function settle(request: RequestRef, result: RequestResult): void {
+/** Settle a request; `started` false is one that failed before Pi started it. */
+function settle(request: RequestRef, result: RequestResult, started = true): void {
   store.writeResult({
     version: 1,
     request,
     nonce: "n",
     phase: "settled",
+    ...(started ? { startedAt: "2026-01-01T00:00:00.000Z" } : {}),
     settledAt: "2026-01-01T00:00:00.000Z",
     result,
   });
@@ -1072,6 +1074,31 @@ describe("ask", () => {
     });
     expect(store.listRequestIds(foreign.childId)).toEqual(["r1"]);
     expect(tmux.launches).toBe(0);
+  });
+
+  it("admits an ask to a child whose only request failed before Pi started it", async () => {
+    const tmux = createFakeTmux();
+    const first = existingChild();
+    // Missing authentication: the dispatch deadline settled r1 and Pi wrote no session file.
+    settle(
+      first,
+      {
+        status: "failed",
+        reason: "error",
+        error: "Pi did not start the request",
+        humanIntervened: false,
+      },
+      false,
+    );
+    liveChild(tmux, first.childId);
+
+    const asked = runtime(tmux).ask(first.childId, "Again", { timeoutMs: POLL_MS });
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+
+    expect(await asked).toMatchObject({
+      status: "submitted",
+      request: { childId: first.childId, requestId: "r2" },
+    });
   });
 
   it("rejects a missing cwd, a missing session file, and lost project trust as invalid_target", async () => {
