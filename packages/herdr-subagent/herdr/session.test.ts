@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { PiSessionInspector, readAnswer } from "@pi-workspace/tmux-subagent/pi-session";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createScriptedHerdr, standardLaunchResponse } from "../herdr-test-support.ts";
-import { PiSessionInspector, readAnswer } from "../pi-session.ts";
 import {
   DELEGATED_TASK_FILE_FLAG,
   DELEGATED_TASK_PLACEHOLDER,

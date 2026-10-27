@@ -1,5 +1,5 @@
 /**
- * agents.ts — Agent discovery and frontmatter parsing for herdr-subagent.
+ * agents.ts — Agent discovery and frontmatter parsing for subagent backends.
  *
  * Discovers workspace agents from the aggregate package, user agents from
  * Pi's agent directory, and trusted project agents from `.pi/agents/`.

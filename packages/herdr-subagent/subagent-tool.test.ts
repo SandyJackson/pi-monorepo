@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type AgentConfig, discoverProjectAgents } from "@pi-workspace/tmux-subagent/agents";
 import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
-import { type AgentConfig, discoverProjectAgents } from "./agents.js";
 import type { DelegatedTaskOutcome } from "./herdr/session.js";
 import { createSubagentTool, type ExecuteDelegation } from "./subagent-tool.js";
 

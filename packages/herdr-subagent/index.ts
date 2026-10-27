@@ -9,7 +9,7 @@ import {
   discoverUserAgents,
   discoverWorkspaceAgents,
   mergeAgentLists,
-} from "./agents.ts";
+} from "@pi-workspace/tmux-subagent/agents";
 import { executeHerdrDelegation, herdrDelegationEnvironment } from "./herdr/delegation.ts";
 import { DELEGATED_TASK_FILE_FLAG, DELEGATED_TASK_PLACEHOLDER } from "./herdr/session.ts";
 import { createSubagentTool } from "./subagent-tool.ts";
