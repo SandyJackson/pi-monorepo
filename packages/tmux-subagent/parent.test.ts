@@ -407,3 +407,351 @@ describe("delegate", () => {
     expect(children()).toEqual([]);
   });
 });
+
+/** A child of this parent with one request, as an earlier delegation leaves it. */
+function existingChild(overrides: { parentSessionId?: string } = {}): RequestRef {
+  const child = store.createChild(
+    {
+      parent: { sessionId: overrides.parentSessionId ?? "parent-session" },
+      worktree: parentCwd,
+      cwd: parentCwd,
+      agent: { name: "scout", source: "user", timeoutMinutes: 5 },
+      projectTrust: true,
+      depth: 1,
+      piCommand: ["node", "pi"],
+    },
+    "You scout.",
+  );
+  return store.createRequest(child.childId, "Task 1").request;
+}
+
+/** A live session for a child whose bridge is ready under `nonce`. */
+function liveChild(tmux: ReturnType<typeof createFakeTmux>, childId: string, nonce = "n"): void {
+  tmux.sessions.set(`sa-${childId}`, {
+    name: `sa-${childId}`,
+    cwd: parentCwd,
+    env: { PI_SUBAGENT_NONCE: nonce },
+    command: [],
+  });
+  store.writeStatus(childId, { version: 1, nonce, pid: 1, state: "idle" });
+}
+
+describe("retrieveResult", () => {
+  it("returns a settled result immediately without launching", async () => {
+    const tmux = createFakeTmux();
+    const request = existingChild();
+    settle(request, { status: "completed", answer: null, humanIntervened: false });
+
+    const outcome = await runtime(tmux).retrieveResult(request, { timeoutMs: 60_000 });
+
+    expect(outcome).toEqual({
+      status: "settled",
+      request,
+      result: { status: "completed", answer: null, humanIntervened: false },
+    });
+    expect(tmux.launches).toBe(0);
+  });
+
+  it("gives each call a fresh timeout and leaves the request and child alone", async () => {
+    const tmux = createFakeTmux();
+    const request = existingChild();
+    liveChild(tmux, request.childId);
+    store.writeResult({
+      version: 1,
+      request,
+      nonce: "n",
+      phase: "running",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const before = fs.readFileSync(
+      path.join(store.childDir(request.childId), "requests", "r1", "request.json"),
+      "utf8",
+    );
+    const parent = runtime(tmux);
+
+    for (let call = 0; call < 2; call++) {
+      const pending = parent.retrieveResult(request, { timeoutMs: POLL_MS * 4 });
+      let done = false;
+      void pending.then(() => {
+        done = true;
+      });
+      await vi.advanceTimersByTimeAsync(POLL_MS * 3);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+      expect(await pending).toEqual({
+        status: "pending",
+        request,
+        state: "running",
+        stopped: "timed_out",
+      });
+    }
+
+    expect(
+      fs.readFileSync(
+        path.join(store.childDir(request.childId), "requests", "r1", "request.json"),
+        "utf8",
+      ),
+    ).toBe(before);
+    expect(store.listRequestIds(request.childId)).toEqual(["r1"]);
+    expect(tmux.sessions.has(`sa-${request.childId}`)).toBe(true);
+    expect(tmux.calls.map((args) => args[0])).not.toContain("kill-session");
+    expect(tmux.launches).toBe(0);
+  });
+
+  it("stops waiting on abort without touching the request", async () => {
+    const tmux = createFakeTmux();
+    const request = existingChild();
+    liveChild(tmux, request.childId);
+    const controller = new AbortController();
+
+    const pending = runtime(tmux).retrieveResult(request, {
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(await pending).toEqual({
+      status: "pending",
+      request,
+      state: "queued",
+      stopped: "aborted",
+    });
+    expect(store.readResult(request)).toBeUndefined();
+    expect(tmux.sessions.has(`sa-${request.childId}`)).toBe(true);
+  });
+
+  it.each([
+    { started: false, label: "never started" },
+    { started: true, label: "running" },
+  ])(
+    "reports lost with started $started for a stopped child after two polls ($label)",
+    async ({ started }) => {
+      const tmux = createFakeTmux();
+      const request = existingChild();
+      if (started) {
+        store.writeResult({
+          version: 1,
+          request,
+          nonce: "old",
+          phase: "running",
+          startedAt: "2026-01-01T00:00:00.000Z",
+        });
+      }
+
+      let outcome: unknown;
+      void runtime(tmux)
+        .retrieveResult(request, { timeoutMs: 60_000 })
+        .then((value) => {
+          outcome = value;
+        });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+
+      expect(outcome).toEqual({ status: "lost", request, started });
+      expect(tmux.launches).toBe(0);
+    },
+  );
+
+  it("rejects another parent's child and an unknown request", async () => {
+    const tmux = createFakeTmux();
+    const foreign = existingChild({ parentSessionId: "other-session" });
+    settle(foreign, { status: "completed", answer: null, humanIntervened: false });
+    const own = existingChild();
+
+    await expect(runtime(tmux).retrieveResult(foreign, { timeoutMs: 1 })).rejects.toThrow(
+      /another parent/,
+    );
+    await expect(
+      runtime(tmux).retrieveResult({ ...own, requestId: "r9" }, { timeoutMs: 1 }),
+    ).rejects.toThrow(/no request r9/);
+  });
+});
+
+/** The Pi session file a child writes once its conversation starts. */
+function writeSessionFile(childId: string): void {
+  fs.writeFileSync(
+    path.join(store.childDir(childId), "session", `2026-01-01T00-00-00-000Z_${childId}.jsonl`),
+    "{}\n",
+  );
+}
+
+const done: RequestResult = { status: "completed", answer: null, humanIntervened: false };
+
+describe("ask", () => {
+  it("submits the next request to a live child and waits for its result", async () => {
+    const tmux = createFakeTmux();
+    const first = existingChild();
+    settle(first, done);
+    writeSessionFile(first.childId);
+    liveChild(tmux, first.childId);
+    const next = { childId: first.childId, requestId: "r2" };
+
+    const asked = runtime(tmux).ask(first.childId, "Follow up\u0007", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.readRequest(next)?.instruction).toBe("Follow up");
+    settle(next, done);
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    expect(await asked).toEqual({
+      status: "submitted",
+      request: next,
+      retrieval: { status: "settled", request: next, result: done },
+    });
+    expect(tmux.launches).toBe(0);
+  });
+
+  it("is busy at one running and one queued request, and a cancelled wait leaves the queue", async () => {
+    const tmux = createFakeTmux();
+    const first = existingChild();
+    writeSessionFile(first.childId);
+    liveChild(tmux, first.childId);
+    store.writeResult({
+      version: 1,
+      request: first,
+      nonce: "n",
+      phase: "running",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const parent = runtime(tmux);
+    const controller = new AbortController();
+
+    const queued = parent.ask(first.childId, "Second", {
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    expect(await queued).toMatchObject({
+      status: "submitted",
+      request: { requestId: "r2" },
+      retrieval: { status: "pending", state: "queued", stopped: "aborted" },
+    });
+
+    expect(await parent.ask(first.childId, "Third", { timeoutMs: 60_000 })).toEqual({
+      status: "rejected",
+      childId: first.childId,
+      reason: "busy",
+      error: `Child ${first.childId} already has a request running and one queued. Nothing was submitted.`,
+    });
+    expect(store.listRequestIds(first.childId)).toEqual(["r1", "r2"]);
+    expect(store.readResult({ childId: first.childId, requestId: "r2" })).toBeUndefined();
+  });
+
+  it("resumes a stopped child, whose bridge interrupts the stale request, then admits the ask", async () => {
+    const first = existingChild();
+    writeSessionFile(first.childId);
+    store.writeResult({
+      version: 1,
+      request: first,
+      nonce: "old",
+      phase: "running",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    });
+    store.createRequest(first.childId, "Queued before the stop");
+    const tmux = createFakeTmux({
+      onNewSession: (session) => {
+        // The bridge's startup reconciliation, then readiness.
+        settle(first, {
+          status: "failed",
+          reason: "interrupted",
+          error: "stopped",
+          humanIntervened: false,
+        });
+        ready(session);
+      },
+    });
+
+    const asked = runtime(tmux).ask(first.childId, "Third", { timeoutMs: POLL_MS });
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+
+    expect(await asked).toMatchObject({
+      status: "submitted",
+      request: { childId: first.childId, requestId: "r3" },
+      retrieval: { status: "pending", state: "queued", stopped: "timed_out" },
+    });
+    expect(tmux.launches).toBe(1);
+  });
+
+  it("reports resume_failed and submits nothing when the child cannot be resumed", async () => {
+    const tmux = createFakeTmux({ newSessionError: "no server" });
+    const first = existingChild();
+
+    const outcome = await runtime(tmux).ask(first.childId, "Again", { timeoutMs: 60_000 });
+
+    expect(outcome).toMatchObject({
+      status: "rejected",
+      childId: first.childId,
+      reason: "resume_failed",
+      error: expect.stringContaining("no server"),
+    });
+    expect(store.listRequestIds(first.childId)).toEqual(["r1"]);
+  });
+
+  it("submits nothing when aborted before submission", async () => {
+    const tmux = createFakeTmux();
+    const first = existingChild();
+    liveChild(tmux, first.childId);
+    const controller = new AbortController();
+    controller.abort();
+
+    const outcome = await runtime(tmux).ask(first.childId, "Again", {
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+
+    expect(outcome).toMatchObject({ status: "rejected", reason: "aborted" });
+    expect(store.listRequestIds(first.childId)).toEqual(["r1"]);
+  });
+
+  it("rejects another parent's child as invalid_target without touching it", async () => {
+    const tmux = createFakeTmux();
+    const foreign = existingChild({ parentSessionId: "other-session" });
+    liveChild(tmux, foreign.childId);
+
+    const outcome = await runtime(tmux).ask(foreign.childId, "Mine now", { timeoutMs: 60_000 });
+
+    expect(outcome).toMatchObject({
+      status: "rejected",
+      reason: "invalid_target",
+      error: expect.stringContaining("another parent"),
+    });
+    expect(store.listRequestIds(foreign.childId)).toEqual(["r1"]);
+    expect(tmux.launches).toBe(0);
+  });
+
+  it("rejects a missing cwd, a missing session file, and lost project trust as invalid_target", async () => {
+    const tmux = createFakeTmux();
+    const goneCwd = existingChild();
+    const childJson = path.join(store.childDir(goneCwd.childId), "child.json");
+    fs.writeFileSync(
+      childJson,
+      JSON.stringify({ ...store.readChild(goneCwd.childId), cwd: path.join(root, "gone") }),
+    );
+    const noSession = existingChild();
+    settle(noSession, done);
+    const trusted = existingChild();
+
+    const parent = runtime(tmux, false);
+    const outcomes = [
+      await parent.ask(goneCwd.childId, "Again", { timeoutMs: 1 }),
+      await parent.ask(noSession.childId, "Again", { timeoutMs: 1 }),
+      await parent.ask(trusted.childId, "Again", { timeoutMs: 1 }),
+    ];
+
+    expect(outcomes).toEqual([
+      expect.objectContaining({ reason: "invalid_target", error: expect.stringContaining("cwd") }),
+      expect.objectContaining({
+        reason: "invalid_target",
+        error: expect.stringContaining("session file is missing"),
+      }),
+      expect.objectContaining({
+        reason: "invalid_target",
+        error: expect.stringContaining("/trust"),
+      }),
+    ]);
+    expect(tmux.launches).toBe(0);
+  });
+});

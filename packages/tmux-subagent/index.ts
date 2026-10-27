@@ -10,8 +10,10 @@ import {
   discoverWorkspaceAgents,
   mergeAgentLists,
 } from "./agents.ts";
+import { createFollowUpTools } from "./ask-tools.ts";
 import { startChildBridge } from "./child.ts";
 import { createParentRuntime } from "./parent.ts";
+import { createStore } from "./store.ts";
 import { createSubagentTool } from "./subagent-tool.ts";
 
 const CHILD_FLAG = "subagent-child";
@@ -42,12 +44,28 @@ export default function (pi: ExtensionAPI): void {
       includeProjectAgents ? discoverProjectAgents(parentCwd) : [],
       discoverWorkspaceAgents(),
     );
+    const store = createStore();
     const runtime = createParentRuntime({
       parentSessionId: ctx.sessionManager.getSessionId(),
       parentSessionName: ctx.sessionManager.getSessionName(),
       parentCwd,
       isProjectTrusted: () => ctx.isProjectTrusted(),
+      store,
     });
+    const [askTool, retrieveTool] = createFollowUpTools({
+      ask: runtime.ask,
+      retrieveResult: runtime.retrieveResult,
+      defaultTimeoutMinutes: (childId) => {
+        try {
+          return store.readChild(childId).agent.timeoutMinutes;
+        } catch {
+          // The runtime reports the unreadable child itself.
+          return undefined;
+        }
+      },
+    });
+    pi.registerTool(askTool);
+    pi.registerTool(retrieveTool);
     pi.registerTool(
       createSubagentTool({
         agents,

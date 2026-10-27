@@ -60,7 +60,7 @@ async function readNonce(tmux: TmuxExec, childId: ChildId): Promise<string | und
   return result.code === 0 && line.startsWith(prefix) ? line.slice(prefix.length) : undefined;
 }
 
-function isDirectory(dir: string): boolean {
+export function isDirectory(dir: string): boolean {
   try {
     return fs.statSync(dir).isDirectory();
   } catch {

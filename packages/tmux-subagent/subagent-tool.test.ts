@@ -156,7 +156,8 @@ describe("subagent request schema", () => {
 
 const request = { childId: "alpha-7k2q", requestId: "r1" };
 const header = "Child alpha-7k2q, request r1\n\n";
-const stillWorking = "The child is still working on the request; nothing was stopped.";
+const stillWorking =
+  "The child is still working on the request; nothing was stopped. Use subagent_retrieve with childId alpha-7k2q and requestId r1 to keep waiting.";
 
 const statusCases: Array<{
   name: string;
