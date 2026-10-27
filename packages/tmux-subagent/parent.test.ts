@@ -716,14 +716,16 @@ describe("drain", () => {
 });
 
 /** A child of this parent with one request, as an earlier delegation leaves it. */
-function existingChild(overrides: { parentSessionId?: string } = {}): RequestRef {
+function existingChild(
+  overrides: { parentSessionId?: string; source?: "user" | "project"; projectTrust?: boolean } = {},
+): RequestRef {
   const child = store.createChild(
     {
       parent: { sessionId: overrides.parentSessionId ?? "parent-session" },
       worktree: parentCwd,
       cwd: parentCwd,
-      agent: { name: "scout", source: "user", timeoutMinutes: 5 },
-      projectTrust: true,
+      agent: { name: "scout", source: overrides.source ?? "user", timeoutMinutes: 5 },
+      projectTrust: overrides.projectTrust ?? true,
       depth: 1,
       piCommand: ["node", "pi"],
     },
@@ -1060,5 +1062,20 @@ describe("ask", () => {
       }),
     ]);
     expect(tmux.launches).toBe(0);
+  });
+
+  it("rejects a project agent's child as invalid_target once the parent project is untrusted, even without inherited trust", async () => {
+    const tmux = createFakeTmux();
+    const project = existingChild({ source: "project", projectTrust: false });
+    liveChild(tmux, project.childId);
+
+    const outcome = await runtime(tmux, false).ask(project.childId, "Again", { timeoutMs: 1 });
+
+    expect(outcome).toMatchObject({
+      status: "rejected",
+      reason: "invalid_target",
+      error: expect.stringContaining("/trust"),
+    });
+    expect(store.listRequestIds(project.childId)).toEqual(["r1"]);
   });
 });
