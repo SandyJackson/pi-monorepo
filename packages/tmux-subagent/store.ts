@@ -502,20 +502,26 @@ export function createStore(root: string = defaultStoreRoot()): Store {
       for (;;) {
         const highest = listRequestIds(childId).map(requestNumber).at(-1) ?? 0;
         const request = { childId, requestId: `r${highest + 1}` };
-        try {
-          fs.mkdirSync(requestDir(request), { mode: DIR_MODE });
-        } catch (error) {
-          if (isTaken(error)) continue;
-          throw error;
-        }
         const record: RequestRecord = {
           version: 1,
           request,
           instruction,
           submittedAt: new Date().toISOString(),
         };
-        writeJson(path.join(requestDir(request), "request.json"), record);
-        return record;
+        // Built under a name listRequestIds ignores, then renamed into place:
+        // the rename is the submission point, so a request directory always
+        // holds its request.json.
+        const temp = fs.mkdtempSync(path.join(requestsDir, ".new-"));
+        try {
+          writeJson(path.join(temp, "request.json"), record);
+          fs.renameSync(temp, requestDir(request));
+          return record;
+        } catch (error) {
+          fs.rmSync(temp, { recursive: true, force: true });
+          // Another writer took this ID: its directory is not empty.
+          if (isTaken(error) || (error as NodeJS.ErrnoException)?.code === "ENOTEMPTY") continue;
+          throw error;
+        }
       }
     },
 

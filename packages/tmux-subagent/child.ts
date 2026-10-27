@@ -121,7 +121,7 @@ export function startChildBridge(
       const request = { childId, requestId };
       if (store.readResult(request)) continue;
       try {
-        // Absent means the parent has not renamed it into place yet: keep the order.
+        // createRequest renames the directory into place with request.json inside.
         return store.readRequest(request);
       } catch (error) {
         // An unreadable request can never run; settle it so the parent sees why

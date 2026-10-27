@@ -1,8 +1,14 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ChildRecord, createStore, type Store } from "./store.ts";
+
+// Pass-through, so a test can make one write fail as a full disk would.
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, writeFileSync: vi.fn(actual.writeFileSync) };
+});
 
 let root: string;
 let store: Store;
@@ -109,6 +115,19 @@ describe("requests and results", () => {
     expect(ids[0]).toBe("r1");
     expect(ids[10]).toBe("r11");
     expect(store.listRequestIds(child.childId)).toEqual(ids);
+  });
+
+  it("leaves no request behind when writing it fails, so the next one is r1", () => {
+    vi.mocked(fs.writeFileSync).mockImplementationOnce(() => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+
+    expect(() => store.createRequest(child.childId, "Lost")).toThrow("ENOSPC");
+    expect(store.listRequestIds(child.childId)).toEqual([]);
+    expect(store.createRequest(child.childId, "Next").request.requestId).toBe("r1");
+    expect(store.readRequest({ childId: child.childId, requestId: "r1" })).toMatchObject({
+      instruction: "Next",
+    });
   });
 
   it("writes request.json once with the instruction and reads it back", () => {
