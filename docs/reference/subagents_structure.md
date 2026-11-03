@@ -23,7 +23,7 @@ packages/tmux-subagent/
 
 | Module | Owns | Depends on |
 |---|---|---|
-| `index.ts` | Deciding mode and depth in `session_start` from `--subagent-child` and `child.json`; building the catalog; registering tools; binding drain to `session_shutdown` | everything below except `cli.ts` |
+| `index.ts` | Deciding mode and depth in `session_start` from `--subagent-child` and `child.json`; building the catalog; registering tools; binding drain to `session_shutdown`; blocking child conversation switches and forks | everything below except `cli.ts` |
 | `agents.ts` | Discovering workspace, user, and trusted project agents; project > user > workspace precedence; resolution | Pi's `parseFrontmatter`/`getAgentDir` |
 | `pi-session.ts` | Exact answer references `{path, entryId}` and selecting the answer to a request on the active branch | nothing (fs only) |
 | `subagent-tool.ts` / `ask-tools.ts` | Strict schemas, per-task validation, minute-to-millisecond conversion, presentation with `truncateHead` | `parent.ts` types, `pi-session.ts` |
@@ -67,6 +67,11 @@ Live tmux state is discovered, never stored. A child is live when its tmux sessi
 - **Drain:** the child exits only when `drain` exists, it is idle, has no unsettled request or open prompt, and no client is attached. The check runs on transitions, never at startup. A blocked child stays.
 
 ## Lifecycle
+
+Child processes cannot switch or fork conversations: the adapter cancels
+`session_before_switch` and `session_before_fork` in child mode. Reload and
+navigation within the conversation remain allowed. A stopped child always
+relaunches into its original conversation.
 
 | Pi event | Parent action |
 |---|---|

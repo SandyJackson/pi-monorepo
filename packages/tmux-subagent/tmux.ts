@@ -98,34 +98,13 @@ export function launchEnvironment(env: NodeJS.ProcessEnv): Record<string, string
   return result;
 }
 
-/**
- * A name tmux can take in the space-separated `update-environment` list:
- * no whitespace, no glob characters (tmux matches the list with fnmatch), and
- * no `;`, which ends a tmux command.
- */
-function isListableName(name: string): boolean {
-  return /^[^\s=*?[\]\\;]+$/.test(name) && !DROPPED_VARIABLES.has(name);
-}
-
-/** Variable names in `show-environment -g` output, including ones marked removed (`-NAME`). */
-export function environmentNames(stdout: string): string[] {
-  return stdout
-    .split("\n")
-    .map((line) => line.replace(/^-/, "").split("=")[0])
-    .filter(Boolean);
-}
-
-/**
- * The `update-environment` list for a launch: every variable of the launcher,
- * so tmux copies each value from the client, and every variable of the
- * server's global environment, so tmux removes those the launcher lacks.
- */
-export function updateEnvironmentNames(
-  env: Record<string, string>,
-  globalNames: readonly string[],
-): string[] {
-  return [...new Set([...Object.keys(env), ...globalNames])].filter(isListableName).sort();
-}
+// tmux 3.8's V/g and V/c loops select global and invoking-client names at
+// command execution, including on cold start. Never expand environ_value.
+// Restrict names to ordinary identifiers: update-environment splits on spaces
+// and commas, and interprets names as glob patterns.
+const ENVIRONMENT_NAME =
+  "#{?environ_hidden,,#{?#{m/r:^[A-Za-z_][A-Za-z0-9_]*$,#{environ_name}},#{environ_name} ,}}";
+const UPDATE_ENVIRONMENT = `#{V/g:${ENVIRONMENT_NAME}}#{V/c:${ENVIRONMENT_NAME}}`;
 
 /**
  * Start a child's session. Variable values never appear in argv, which
@@ -139,23 +118,23 @@ export function buildNewSessionArgs(options: {
   childId: ChildId;
   cwd: string;
   nonce: string;
-  variables: readonly string[];
   command: readonly string[];
 }): string[] {
   const args = [
     "-f",
     options.confPath,
     "set-option",
-    "-g",
+    "-gF",
     "update-environment",
-    options.variables.join(" "),
+    UPDATE_ENVIRONMENT,
     ";",
     "new-session",
     "-d",
     "-s",
     `sa-${options.childId}`,
     "-c",
-    options.cwd,
+    // -c expands tmux formats; a trailing semicolon also ends an argv command.
+    options.cwd.replaceAll("#", "##").replace(/;$/, "\\;"),
     "-e",
     `PI_SUBAGENT_NONCE=${options.nonce}`,
   ];

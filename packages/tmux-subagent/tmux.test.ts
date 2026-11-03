@@ -8,11 +8,9 @@ import {
   buildNewSessionArgs,
   buildPiArguments,
   createTmuxExec,
-  environmentNames,
   launchEnvironment,
   projectTrustFor,
   tmuxSocket,
-  updateEnvironmentNames,
 } from "./tmux.ts";
 
 const child: ChildRecord = {
@@ -109,23 +107,22 @@ describe("project trust", () => {
 });
 
 describe("private tmux server", () => {
-  it("starts a child session from argv with the private config, cwd, nonce and variable names", () => {
+  it("starts a child session with the private config, cwd, nonce and server-side environment selection", () => {
     expect(
       buildNewSessionArgs({
         confPath: "/state/tmux.conf",
         childId: "scout-7k2q",
         cwd: "/repo dir",
         nonce: "abc",
-        variables: ["HOME", "SEARCH_API_KEY"],
         command: ["/node", "/pi/cli.js", "--no-mcp"],
       }),
     ).toEqual([
       "-f",
       "/state/tmux.conf",
       "set-option",
-      "-g",
+      "-gF",
       "update-environment",
-      "HOME SEARCH_API_KEY",
+      expect.any(String),
       ";",
       "new-session",
       "-d",
@@ -140,17 +137,6 @@ describe("private tmux server", () => {
       "/pi/cli.js",
       "--no-mcp",
     ]);
-  });
-
-  it("lists the launcher's and the server's variable names that tmux can take, never the nonce", () => {
-    const global = "PATH=/bin\nOTHER_KEY=theirs\n-REMOVED\nPI_SUBAGENT_NONCE=old\n";
-
-    expect(
-      updateEnvironmentNames(
-        { PATH: "/usr/bin", OWN_KEY: "mine", "WITH SPACE": "x", "GLOB*": "y", "SEMI;": "z" },
-        environmentNames(global),
-      ),
-    ).toEqual(["OTHER_KEY", "OWN_KEY", "PATH", "REMOVED"]);
   });
 
   it("drops tmux nesting variables, a stale nonce and unset values from the launch environment", () => {

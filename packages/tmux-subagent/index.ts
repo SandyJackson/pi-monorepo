@@ -14,6 +14,7 @@ import {
 } from "./agents.ts";
 import { createFollowUpTools } from "./ask-tools.ts";
 import { createReportTool, startChildBridge } from "./child.ts";
+import * as text from "./model-text.ts";
 import {
   clearDrain,
   createParentRuntime,
@@ -129,6 +130,19 @@ export default function (pi: ExtensionAPI): void {
     const child = store.readChild(childId);
     if (child.depth === 1) runtime = startParent(ctx, store, { worktree: child.worktree });
   });
+
+  // The parent tracks a child by its session, so a child never leaves it. Reload stays allowed.
+  function lockChild(_event: unknown, ctx: ExtensionContext) {
+    if (!pi.getFlag(CHILD_FLAG)) return;
+    try {
+      ctx.ui.notify(text.CHILD_SESSION_LOCKED, "warning");
+    } catch {
+      // Pi lets the operation through when a handler throws, so a failed notice must not.
+    }
+    return { cancel: true };
+  }
+  pi.on("session_before_switch", lockChild);
+  pi.on("session_before_fork", lockChild);
 
   pi.on("message_end", (event) => {
     runtime?.observeMessage(event.message);

@@ -45,6 +45,7 @@ beforeAll(() => {
     `import * as fs from "node:fs";
 const childDir = process.argv[process.argv.indexOf("--subagent-child") + 1];
 fs.writeFileSync(childDir + "/env.json", JSON.stringify(process.env));
+fs.writeFileSync(childDir + "/cwd.txt", process.cwd());
 const status = { version: 1, nonce: process.env.PI_SUBAGENT_NONCE, pid: process.pid, state: "idle" };
 fs.writeFileSync(childDir + "/status.json", JSON.stringify(status));
 setInterval(() => {}, 1000);
@@ -75,6 +76,7 @@ function fakeTmux(): TmuxExec {
     onNewSession: (session) => {
       const childDir = session.command[session.command.indexOf("--subagent-child") + 1];
       fs.writeFileSync(path.join(childDir, "env.json"), JSON.stringify(session.env));
+      fs.writeFileSync(path.join(childDir, "cwd.txt"), session.cwd);
       const status = { version: 1, nonce: session.env.PI_SUBAGENT_NONCE, pid: 1, state: "idle" };
       fs.writeFileSync(path.join(childDir, "status.json"), JSON.stringify(status));
     },
@@ -95,12 +97,12 @@ describe.each(backends)("$name", ({ name, skip, exec }) => {
     tmux = exec();
   });
 
-  function addChild(): string {
+  function addChild(cwd = root): string {
     return store.createChild(
       {
         parent: { sessionId: "parent" },
         worktree: root,
-        cwd: root,
+        cwd,
         agent: { name: "scout", source: "user" },
         projectTrust: false,
         depth: 1,
@@ -115,9 +117,49 @@ describe.each(backends)("$name", ({ name, skip, exec }) => {
   }
 
   it.skipIf(skip)(
+    "isolates concurrent cold-start launchers without reading environment values into command output",
+    async () => {
+      const first = addChild();
+      const second = addChild();
+      const calls: string[][] = [];
+      const tracked: TmuxExec = (args, options) => {
+        calls.push([...args]);
+        return tmux(args, options);
+      };
+      const results = await Promise.all([
+        ensureLive(first, {
+          store,
+          tmux: tracked,
+          env: { ...base, ONLY_FIRST: "first-secret", MULTILINE: "first\nsecret=value" },
+        }),
+        ensureLive(second, {
+          store,
+          tmux: tracked,
+          env: { ...base, ONLY_SECOND: "second-secret", MULTILINE: "second\nsecret=value" },
+        }),
+      ]);
+
+      expect(results.map((result) => result.status)).toEqual(["live", "live"]);
+      expect(childEnv(first)).toMatchObject({
+        ONLY_FIRST: "first-secret",
+        MULTILINE: "first\nsecret=value",
+      });
+      expect(childEnv(first)).not.toHaveProperty("ONLY_SECOND");
+      expect(childEnv(second)).toMatchObject({
+        ONLY_SECOND: "second-secret",
+        MULTILINE: "second\nsecret=value",
+      });
+      expect(childEnv(second)).not.toHaveProperty("ONLY_FIRST");
+      expect(calls).not.toContainEqual(["show-environment", "-g"]);
+      expect(JSON.stringify(calls)).not.toMatch(/first-secret|second-secret|secret=value/);
+    },
+    20_000,
+  );
+
+  it.skipIf(skip)(
     "gives each child its own launcher's variables, not those of the launcher that started the server",
     async () => {
-      // The first launch starts the server with this launcher's environment.
+      // A later launcher must override shared values and remove absent variables.
       const first = addChild();
       const firstLive = await ensureLive(first, {
         store,
@@ -142,6 +184,18 @@ describe.each(backends)("$name", ({ name, skip, exec }) => {
       );
     },
     20_000,
+  );
+
+  it.skipIf(skip).each(["#{session_name}", "#S", "trailing;"])(
+    "launches in the literal directory %s, not a tmux format or command separator",
+    async (directory) => {
+      const cwd = path.join(root, directory);
+      fs.mkdirSync(cwd, { recursive: true });
+      const childId = addChild(cwd);
+
+      expect((await ensureLive(childId, { store, tmux, env: base })).status).toBe("live");
+      expect(fs.readFileSync(path.join(store.childDir(childId), "cwd.txt"), "utf8")).toBe(cwd);
+    },
   );
 
   it.skipIf(skip)("counts a child without a session as attached, never as unviewed", async () => {

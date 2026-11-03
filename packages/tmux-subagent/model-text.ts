@@ -403,6 +403,14 @@ export const RUN_ERROR = "The child's run ended with an error.";
 export const NO_SETTLE_OUTCOME = "Pi settled without an outcome";
 
 // ---------------------------------------------------------------------------
+// Child conversation lock: an operator notice
+// ---------------------------------------------------------------------------
+
+// index.ts lockChild(): a child refused /new, /resume, /import, /fork or /clone
+export const CHILD_SESSION_LOCKED =
+  "This subagent child stays in its own conversation. Switching or forking sessions is disabled.";
+
+// ---------------------------------------------------------------------------
 // subagent_report tool
 // ---------------------------------------------------------------------------
 

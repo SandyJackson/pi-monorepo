@@ -181,17 +181,16 @@ export function createFakeTmux(
           ? ok()
           : fail(`can't find session: ${targetName(rest)}`);
       case "set-option": {
-        if (rest[1] !== "-g" || rest[2] !== "update-environment") return fail("unscripted option");
-        updateEnvironment = (rest[3] ?? "").split(" ").filter(Boolean);
+        if (rest[1] !== "-gF" || rest[2] !== "update-environment") return fail("unscripted option");
         globalEnv ??= definedEnv(env);
+        // Model the names-only global/client union, not a general format parser.
+        // launch.integration.test.ts checks this contract against real tmux.
+        updateEnvironment = [
+          ...new Set([...Object.keys(globalEnv), ...Object.keys(definedEnv(env))]),
+        ].filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
         return ok();
       }
       case "show-environment": {
-        if (rest[1] === "-g") {
-          if (!globalEnv) return fail("no server running on /tmp/tmux-1/fake");
-          const lines = Object.entries(globalEnv).map(([name, value]) => `${name}=${value}\n`);
-          return ok(lines.join(""));
-        }
         const session = sessions.get(targetName(rest));
         if (!session) return fail(`no such session: =${targetName(rest)}`);
         const name = rest.at(-1) ?? "";
@@ -226,7 +225,7 @@ export function createFakeTmux(
         });
         const session = {
           name,
-          cwd: rest[rest.indexOf("-c") + 1],
+          cwd: rest[rest.indexOf("-c") + 1].replaceAll("##", "#").replace(/\\;$/, ";"),
           env: childEnv,
           command: rest.slice(separator + 1),
         };

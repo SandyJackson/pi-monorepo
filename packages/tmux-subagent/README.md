@@ -30,6 +30,16 @@ node cli.ts stop  <childId> | --worktree <path>
   `open` resumes the child.
 - `list` only reads state. It never starts Pi.
 
+### Child conversations
+
+A child stays in the conversation its parent created. `/new`, `/resume`,
+`/import`, `/fork`, and `/clone` are blocked inside it. `/reload` and navigation
+within its conversation tree still work. Stopping a child only ends its
+process; opening it again resumes that same conversation.
+
+Forking or switching the parent does not transfer its children to another
+conversation. Resuming the original parent restores access to its children.
+
 ### Key binding
 
 Nothing changes your tmux configuration. To use the picker, add a binding to

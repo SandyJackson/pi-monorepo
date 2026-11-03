@@ -118,6 +118,17 @@ describe("parent mode", () => {
     await fake.emit("session_shutdown", { reason: "quit" });
   });
 
+  it("leaves session switching and forking to the operator", async () => {
+    const fake = harness(true);
+
+    expect(await fake.emit("session_before_switch", { reason: "new" })).not.toContainEqual({
+      cancel: true,
+    });
+    expect(
+      await fake.emit("session_before_fork", { entryId: "e1", position: "before" }),
+    ).not.toContainEqual({ cancel: true });
+  });
+
   it("never exposes project agents when the project is untrusted", async () => {
     writeAgent(userAgentsDir, "user.md", "user", "global definition");
     writeAgent(projectAgentsDir, "project.md", "project", "local definition");
@@ -558,6 +569,32 @@ describe("child mode", () => {
     expect(fake.tools.map((tool) => tool.name)).toEqual(["subagent_report"]);
     await fake.emit("session_shutdown", { reason: "quit" });
     expect(store.hasDrain(stray)).toBe(false);
+  });
+
+  it.each([
+    ["session_before_switch", { reason: "new" }],
+    ["session_before_switch", { reason: "resume", targetSessionFile: "/other.jsonl" }],
+    ["session_before_fork", { entryId: "e1", position: "before" }],
+  ])("cancels %s %o and tells the operator why", async (type, event) => {
+    const { fake } = childHarness();
+    const notify = vi.fn();
+    Object.assign(fake.ctx, { ui: { notify } });
+
+    expect(await fake.emit(type, event)).toEqual([{ cancel: true }]);
+    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/subagent child/i), "warning");
+  });
+
+  it("cancels the switch even when the notice cannot be shown", async () => {
+    const { fake } = childHarness();
+    Object.assign(fake.ctx, {
+      ui: {
+        notify: () => {
+          throw new Error("no UI");
+        },
+      },
+    });
+
+    expect(await fake.emit("session_before_switch", { reason: "new" })).toEqual([{ cancel: true }]);
   });
 
   it("refuses to run as a child without a launch nonce", async () => {

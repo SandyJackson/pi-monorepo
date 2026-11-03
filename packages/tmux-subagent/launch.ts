@@ -13,12 +13,10 @@ import type { ChildId, Store } from "./store.ts";
 import {
   buildNewSessionArgs,
   buildPiArguments,
-  environmentNames,
   launchEnvironment,
   sessionTarget,
   TMUX_CONF,
   type TmuxExec,
-  updateEnvironmentNames,
 } from "./tmux.ts";
 
 export type EnsureLiveResult =
@@ -107,16 +105,12 @@ export async function ensureLive(
     const confPath = store.writeTmuxConf(TMUX_CONF);
     const childDir = store.childDir(childId);
     const env = launchEnvironment(deps.env ?? process.env);
-    // A server started by another launcher holds that launcher's environment.
-    const global = await tmux(["show-environment", "-g"], { env });
-    const globalNames = global.code === 0 ? environmentNames(global.stdout) : [];
     const started = await tmux(
       buildNewSessionArgs({
         confPath,
         childId,
         cwd: child.cwd,
         nonce: launchNonce,
-        variables: updateEnvironmentNames(env, globalNames),
         command: [...child.piCommand, ...buildPiArguments(child, childDir)],
       }),
       { env },
