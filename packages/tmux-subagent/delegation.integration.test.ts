@@ -164,7 +164,7 @@ async function runParent(name: string, prompt: string) {
       },
     }),
   );
-  // Children load extensions from settings, so the extension is configured there.
+  // The parent loads the extension from settings; children get it with --extension.
   fs.writeFileSync(
     path.join(agentDir, "settings.json"),
     JSON.stringify({
@@ -288,7 +288,7 @@ it.skipIf(!hasTmux)(
       runtime.dispose();
     }
     const followUp = { childId: alphaId, requestId: "r2" };
-    if (asked.status === "rejected") throw new Error(`ask rejected: ${JSON.stringify(asked)}`);
+    if (asked.status === "rejected") throw new Error(`ask rejected: ${asked.error}`);
     expect(asked).toMatchObject({
       status: "submitted",
       request: followUp,

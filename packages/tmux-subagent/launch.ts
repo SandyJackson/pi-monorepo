@@ -8,6 +8,7 @@
 
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
+import * as text from "./model-text.ts";
 import type { ChildId, Store } from "./store.ts";
 import {
   buildNewSessionArgs,
@@ -20,18 +21,10 @@ import {
   updateEnvironmentNames,
 } from "./tmux.ts";
 
-/** Why `ensureLive` did not reach readiness. Callers render their own text. */
-export type LaunchProblem =
-  | { kind: "cwd_missing"; cwd: string }
-  | { kind: "tmux_failed"; detail: string }
-  | { kind: "exited_early" }
-  | { kind: "no_nonce" }
-  | { kind: "not_ready"; seconds: number; detail?: string };
-
 export type EnsureLiveResult =
   | { status: "live"; nonce: string }
-  | { status: "failed"; problem: LaunchProblem }
-  | { status: "indeterminate"; problem: LaunchProblem };
+  | { status: "failed"; error: string }
+  | { status: "indeterminate"; error: string };
 
 /** How long a launched child has to write `status.json` with its nonce. */
 export const READY_MS = 30_000;
@@ -108,7 +101,7 @@ export async function ensureLive(
   } else {
     // From another cwd, Pi would silently start a new empty session with this ID.
     if (!isDirectory(child.cwd)) {
-      return { status: "failed", problem: { kind: "cwd_missing", cwd: child.cwd } };
+      return { status: "failed", error: text.cwdNotDirectory(child.cwd) };
     }
     const launchNonce = randomBytes(16).toString("hex");
     const confPath = store.writeTmuxConf(TMUX_CONF);
@@ -134,12 +127,12 @@ export async function ensureLive(
       // Another launcher won the race; wait for its process instead.
       nonce = await readNonce(tmux, childId);
     } else {
-      const detail = started.stderr.trim() || `exit ${started.code}`;
-      return { status: "failed", problem: { kind: "tmux_failed", detail } };
+      const detail = started.stderr.trim() || null;
+      return { status: "failed", error: text.tmuxStartFailed(detail, started.code) };
     }
   }
   if (nonce === undefined) {
-    return { status: "indeterminate", problem: { kind: "no_nonce" } };
+    return { status: "indeterminate", error: text.liveWithoutNonce(childId) };
   }
 
   const deadline = Date.now() + READY_MS;
@@ -151,17 +144,13 @@ export async function ensureLive(
       statusError = error instanceof Error ? error.message : String(error);
     }
     if (!(await isLive(tmux, childId))) {
-      return { status: "failed", problem: { kind: "exited_early" } };
+      return { status: "failed", error: text.exitedBeforeReady(childId) };
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       return {
         status: "indeterminate",
-        problem: {
-          kind: "not_ready",
-          seconds: READY_MS / 1000,
-          ...(statusError ? { detail: statusError } : {}),
-        },
+        error: text.notReady(childId, READY_MS / 1000, statusError),
       };
     }
     await sleep(Math.min(READY_POLL_MS, remaining));

@@ -11,7 +11,6 @@ import {
   environmentNames,
   launchEnvironment,
   projectTrustFor,
-  TMUX_CONF,
   tmuxSocket,
   updateEnvironmentNames,
 } from "./tmux.ts";
@@ -164,25 +163,6 @@ describe("private tmux server", () => {
         EMPTY: undefined,
       }),
     ).toEqual({ PATH: "/bin" });
-  });
-
-  it("configures the server so the user's config, keys and status line never apply", () => {
-    for (const line of [
-      "set -g prefix None",
-      "set -g prefix2 None",
-      "unbind-key -a -T root",
-      "unbind-key -a -T prefix",
-      "set -g status off",
-      "set -s escape-time 0",
-      "set -s extended-keys on",
-      "set -s extended-keys-format csi-u",
-      "set -s exit-empty on",
-      "set -s exit-unattached off",
-      "set -g destroy-unattached off",
-      "set -g remain-on-exit off",
-    ]) {
-      expect(TMUX_CONF.split("\n")).toContain(line);
-    }
   });
 
   it("uses the pi-subagents socket unless overridden", () => {

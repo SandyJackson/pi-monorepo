@@ -11,6 +11,7 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as text from "./model-text.ts";
 import type { SessionAnswerRef } from "./pi-session.ts";
 
 // ---------------------------------------------------------------------------
@@ -57,28 +58,13 @@ export interface RequestRecord {
   submittedAt: string;
 }
 
-/** Why the child bridge failed a request; `tools.ts` renders the text. */
-export const FAILURE_CAUSES = [
-  "unreadable_request",
-  "not_started",
-  "stopped_while_running",
-  "off_branch",
-  "run_interrupted",
-  "run_error",
-  "no_outcome",
-] as const;
-
-export type FailureCause = (typeof FAILURE_CAUSES)[number];
-
 /** The child-recorded terminal result of one request. Final once written. */
 export type RequestResult =
   | { status: "completed"; answer: SessionAnswerRef | null; humanIntervened: boolean }
   | {
       status: "failed";
       reason: "error" | "interrupted" | "superseded";
-      cause: FailureCause;
-      /** A raw system message, such as why `request.json` could not be read. */
-      detail?: string;
+      error: string;
       humanIntervened: boolean;
     };
 
@@ -244,16 +230,16 @@ function readJson<T>(
   file: string,
   validate: (value: unknown) => string | undefined,
 ): T | undefined {
-  let text: string;
+  let content: string;
   try {
-    text = fs.readFileSync(file, "utf8");
+    content = fs.readFileSync(file, "utf8");
   } catch (error) {
     if (isMissing(error)) return undefined;
     throw error;
   }
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    value = JSON.parse(content);
   } catch {
     throw new Error(`Invalid ${file}: not JSON`);
   }
@@ -338,8 +324,7 @@ function checkRequestResult(value: unknown): string | undefined {
   }
   if (value.status === "failed") {
     return ["error", "interrupted", "superseded"].includes(value.reason as string) &&
-      FAILURE_CAUSES.includes(value.cause as FailureCause) &&
-      isOptionalString(value.detail)
+      isString(value.error)
       ? undefined
       : "invalid failure";
   }
@@ -435,19 +420,19 @@ export function createStore(root: string = defaultStoreRoot()): Store {
   // IDs can come from the model in later tools; never let one leave the root.
   const isChildId = (name: string) => /^[a-z0-9][a-z0-9-]*$/.test(name);
   const childDir = (childId: ChildId) => {
-    if (!isChildId(childId)) throw new Error(`Invalid child ID: ${childId}`);
+    if (!isChildId(childId)) throw new Error(text.invalidChildId(childId));
     return path.join(childrenDir, childId);
   };
   const drainFile = (childId: ChildId) => path.join(childDir(childId), "drain");
   const requestDir = (ref: RequestRef) => {
     if (requestNumber(ref.requestId) === undefined) {
-      throw new Error(`Invalid request ID: ${ref.requestId}`);
+      throw new Error(text.invalidRequestId(ref.requestId));
     }
     return path.join(childDir(ref.childId), "requests", ref.requestId);
   };
 
   const reportFile = (childId: ChildId, reportId: ReportId) => {
-    if (reportNumber(reportId) === undefined) throw new Error(`Invalid report ID: ${reportId}`);
+    if (reportNumber(reportId) === undefined) throw new Error(text.invalidReportId(reportId));
     return path.join(childDir(childId), "reports", `${reportId}.json`);
   };
 
@@ -491,9 +476,7 @@ export function createStore(root: string = defaultStoreRoot()): Store {
         writeJson(path.join(childDir(childId), "child.json"), record);
         return record;
       }
-      throw new Error(
-        `Could not allocate a child ID for ${slug} after ${MAX_ID_ATTEMPTS} attempts.`,
-      );
+      throw new Error(text.childIdExhausted(slug, MAX_ID_ATTEMPTS));
     },
 
     readChild(childId) {
@@ -501,7 +484,7 @@ export function createStore(root: string = defaultStoreRoot()): Store {
         path.join(childDir(childId), "child.json"),
         checkChild(childId),
       );
-      if (!record) throw new Error(`Child ${childId} does not exist.`);
+      if (!record) throw new Error(text.childMissing(childId));
       return record;
     },
 

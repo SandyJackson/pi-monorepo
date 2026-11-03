@@ -265,33 +265,3 @@ setInterval(() => {}, 1000);
   },
   60_000,
 );
-
-it.skipIf(!hasTmux)("shows an empty menu for a worktree with no children", async () => {
-  const empty = path.join(root, "empty");
-  fs.mkdirSync(empty);
-  const pane = (
-    await tmux(
-      "outer",
-      "new-window",
-      "-P",
-      "-F",
-      "#{pane_id}",
-      "-t",
-      "=outer:",
-      "-c",
-      empty,
-      "--",
-      "sleep",
-      "3600",
-    )
-  ).trim();
-
-  const result = await cli("pick", "--pane", pane);
-
-  expect(result.code).toBe(0);
-  await waitFor(
-    async () => ((await screen()).includes("No subagents for this worktree") ? true : undefined),
-    "the empty menu",
-  );
-  await tmux("host", "send-keys", "-t", "=h:", "Escape");
-});

@@ -6,14 +6,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentConfig } from "./agents.ts";
-import { ensureLive, isDirectory, isLive, type LaunchProblem, sleep } from "./launch.ts";
+import { ensureLive, isDirectory, isLive, sleep } from "./launch.ts";
+import * as text from "./model-text.ts";
 import type { SessionAnswerRef } from "./pi-session.ts";
 import {
   type ChildId,
   type ChildRecord,
   canonical,
   createStore,
-  type FailureCause,
   owningWorktree,
   type ReportId,
   type ReportRecord,
@@ -50,9 +50,6 @@ export type DelegatedTaskRecord = DelegatedTask & {
   timeoutMs?: number;
 };
 
-/** Why a child could not be started or resumed: `ensureLive`'s problem, or what it threw. */
-export type StartProblem = LaunchProblem | { kind: "launch_error"; detail: string };
-
 export type DelegatedTaskOutcome =
   | {
       status: "completed";
@@ -64,21 +61,15 @@ export type DelegatedTaskOutcome =
       status: "failed";
       request: RequestRef;
       reason: "error" | "interrupted" | "superseded";
-      cause: FailureCause;
-      detail?: string;
+      error: string;
     }
   | { status: "timed_out"; request: RequestRef }
   | { status: "aborted"; stage: "before_launch" }
   | { status: "aborted"; stage: "observing"; request: RequestRef }
   | { status: "session_closed"; request: RequestRef }
-  | {
-      status: "launch_failed";
-      childId?: ChildId;
-      /** `record_failed`: writing the child or request record threw. */
-      problem: StartProblem | { kind: "record_failed"; detail: string };
-    }
-  | { status: "launch_indeterminate"; request: RequestRef; problem: StartProblem }
-  | { status: "observation_failed"; request: RequestRef; detail: string };
+  | { status: "launch_failed"; childId?: ChildId; error: string }
+  | { status: "launch_indeterminate"; request: RequestRef; error: string }
+  | { status: "observation_failed"; request: RequestRef; error: string };
 
 /** The single terminal outcome of one delegated task, paired with its record. */
 export interface DelegatedTaskExecution {
@@ -92,34 +83,15 @@ export type ExecuteDelegation = (
     /** Purpose label recorded with each child. */
     label?: string;
     signal?: AbortSignal;
-    onProgress?: (update: { taskNumber: number; request: RequestRef; state: PendingState }) => void;
+    onProgress?: (update: { taskNumber: number; line: string }) => void;
   },
 ) => Promise<DelegatedTaskExecution[]>;
-
-/**
- * A failure the runtime throws instead of returning, as a code with data.
- * The tools in `tools.ts` render its text.
- */
-export type ParentProblem =
-  | { code: "too_many_tasks"; count: number }
-  | { code: "tmux_missing"; detail: string }
-  | { code: "state_dir_unwritable"; detail: string }
-  | { code: "not_owned"; childId: ChildId }
-  | { code: "unknown_request"; request: RequestRef }
-  | { code: "observation_failed"; request: RequestRef; detail: string };
-
-export class SubagentError extends Error {
-  constructor(readonly problem: ParentProblem) {
-    super(`Subagent problem: ${problem.code}`);
-    this.name = "SubagentError";
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Waiting (§6 retrieveResult)
 // ---------------------------------------------------------------------------
 
-export type PendingState = "queued" | "running" | "blocked";
+type PendingState = "queued" | "running" | "blocked";
 
 export interface WaitOptions {
   timeoutMs: number;
@@ -183,19 +155,14 @@ async function waitForResult(
 // Runtime
 // ---------------------------------------------------------------------------
 
-/** Why `ask` cannot use a child. */
-export type TargetProblem =
-  | { kind: "not_owned" }
-  | { kind: "unreadable"; detail: string }
-  | { kind: "cwd_missing"; cwd: string }
-  | { kind: "session_missing" }
-  | { kind: "untrusted" };
-
 /** Outcome of subagent_ask. */
 export type AskOutcome =
-  | { status: "rejected"; childId: ChildId; reason: "invalid_target"; problem: TargetProblem }
-  | { status: "rejected"; childId: ChildId; reason: "resume_failed"; problem: StartProblem }
-  | { status: "rejected"; childId: ChildId; reason: "busy" | "aborted" }
+  | {
+      status: "rejected";
+      childId: ChildId;
+      reason: "invalid_target" | "busy" | "resume_failed" | "aborted";
+      error: string;
+    }
   | { status: "submitted"; request: RequestRef; retrieval: RetrievalOutcome };
 
 export interface ParentRuntime {
@@ -228,6 +195,11 @@ export const REPORT_TYPE = "subagent_report";
 /** `${childId}/${reportId}`, the global address of a report. */
 export function reportKey(report: { childId: ChildId; reportId: ReportId }): string {
   return `${report.childId}/${report.reportId}`;
+}
+
+/** The provenance envelope (§6), generated entirely from the record. */
+export function reportEnvelope(report: ReportRecord): string {
+  return sanitizeInstruction(text.reportEnvelopeText(report));
 }
 
 /** The report a `subagent_report` custom message or entry carries, if it is one. */
@@ -288,7 +260,7 @@ export function clearDrain(options: { parentSessionId: string; store?: Store }):
 }
 
 /** Strip control characters except newline and tab; the instruction travels in a file. */
-export function sanitizeInstruction(instruction: string): string {
+function sanitizeInstruction(instruction: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally strips control characters
   return instruction.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 }
@@ -305,13 +277,7 @@ function toDelegatedOutcome(outcome: RetrievalOutcome): DelegatedTaskOutcome {
             answer: result.answer,
             humanIntervened: result.humanIntervened,
           }
-        : {
-            status: "failed",
-            request,
-            reason: result.reason,
-            cause: result.cause,
-            ...(result.detail === undefined ? {} : { detail: result.detail }),
-          };
+        : { status: "failed", request, reason: result.reason, error: result.error };
     }
     case "pending":
       return outcome.stopped === "timed_out"
@@ -406,19 +372,19 @@ export function createParentRuntime(options: {
     try {
       await tmux(["-V"]);
     } catch (error) {
-      throw new SubagentError({ code: "tmux_missing", detail: message(error) });
+      throw new Error(text.tmuxUnavailable(message(error)));
     }
     try {
       fs.mkdirSync(store.root, { recursive: true, mode: 0o700 });
       fs.accessSync(store.root, fs.constants.W_OK);
     } catch (error) {
-      throw new SubagentError({ code: "state_dir_unwritable", detail: message(error) });
+      throw new Error(text.stateDirNotWritable(message(error)));
     }
   }
 
   const delegate: ExecuteDelegation = async (tasks, { label, signal, onProgress }) => {
     if (tasks.length > MAX_DELEGATED_TASKS) {
-      throw new SubagentError({ code: "too_many_tasks", count: tasks.length });
+      throw new Error(text.tooManyTasks(tasks.length, MAX_DELEGATED_TASKS));
     }
     if (tasks.length === 0) return [];
     if (signal?.aborted) {
@@ -467,24 +433,20 @@ export function createParentRuntime(options: {
         ).childId;
         request = store.createRequest(childId, sanitizeInstruction(task.instruction)).request;
       } catch (error) {
-        outcomes.push(
-          Promise.resolve({
-            status: "launch_failed",
-            childId,
-            problem: { kind: "record_failed", detail: message(error) },
-          }),
-        );
+        outcomes.push(Promise.resolve({ status: "launch_failed", childId, error: message(error) }));
         continue;
       }
 
-      const live = await start(childId);
+      const live = await ensureLive(childId, { store, tmux }).catch(
+        (error: unknown) => ({ status: "failed", error: message(error) }) as const,
+      );
       if (live.status === "failed") {
-        outcomes.push(Promise.resolve({ status: "launch_failed", childId, problem: live.problem }));
+        outcomes.push(Promise.resolve({ status: "launch_failed", childId, error: live.error }));
         continue;
       }
       if (live.status === "indeterminate") {
         outcomes.push(
-          Promise.resolve({ status: "launch_indeterminate", request, problem: live.problem }),
+          Promise.resolve({ status: "launch_indeterminate", request, error: live.error }),
         );
         continue;
       }
@@ -495,13 +457,17 @@ export function createParentRuntime(options: {
         {
           timeoutMs: task.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MINUTES * 60_000,
           signal,
-          onProgress: (update) => onProgress?.({ taskNumber: task.taskNumber, ...update }),
+          onProgress: (update) =>
+            onProgress?.({
+              taskNumber: task.taskNumber,
+              line: text.requestProgress(update.request, update.state),
+            }),
         },
         { store, tmux },
       ).then(toDelegatedOutcome, (error: unknown) => ({
         status: "observation_failed" as const,
         request,
-        detail: message(error),
+        error: message(error),
       }));
       outcomes.push(wait);
     }
@@ -510,21 +476,11 @@ export function createParentRuntime(options: {
     return tasks.map((task, index) => ({ task, outcome: settled[index] }));
   };
 
-  /** `ensureLive`, with a thrown error as a `launch_error` problem. */
-  function start(
-    childId: ChildId,
-  ): Promise<{ status: "live" } | { status: "failed" | "indeterminate"; problem: StartProblem }> {
-    return ensureLive(childId, { store, tmux }).catch((error: unknown) => ({
-      status: "failed" as const,
-      problem: { kind: "launch_error" as const, detail: message(error) },
-    }));
-  }
-
   /** A child of this parent session; ownership is never inferred from the terminal. */
   function ownedChild(childId: ChildId): ChildRecord {
     const child = store.readChild(childId);
     if (child.parent.sessionId !== options.parentSessionId) {
-      throw new SubagentError({ code: "not_owned", childId });
+      throw new Error(text.belongsToAnotherParent(childId));
     }
     return child;
   }
@@ -535,7 +491,7 @@ export function createParentRuntime(options: {
   ): Promise<RetrievalOutcome> {
     ownedChild(request.childId);
     if (!store.readRequest(request)) {
-      throw new SubagentError({ code: "unknown_request", request });
+      throw new Error(text.noSuchRequest(request.childId, request.requestId));
     }
     return waitForResult(request, waitOptions, { store, tmux });
   }
@@ -545,22 +501,26 @@ export function createParentRuntime(options: {
     instruction: string,
     waitOptions: WaitOptions,
   ): Promise<AskOutcome> {
-    let problem: TargetProblem | undefined;
+    const reject = (
+      reason: Extract<AskOutcome, { status: "rejected" }>["reason"],
+      error: string,
+    ): AskOutcome => ({ status: "rejected", childId, reason, error });
+
+    let problem: string | undefined;
     try {
       problem = askProblem(ownedChild(childId));
     } catch (error) {
-      problem =
-        error instanceof SubagentError
-          ? { kind: "not_owned" }
-          : { kind: "unreadable", detail: message(error) };
+      problem = message(error);
     }
-    if (problem) return { status: "rejected", childId, reason: "invalid_target", problem };
+    if (problem) return reject("invalid_target", problem);
 
     if (!(await isLive(tmux, childId))) {
       // Readiness means the bridge has already marked a stale running request interrupted.
-      const live = await start(childId);
+      const live = await ensureLive(childId, { store, tmux }).catch(
+        (error: unknown) => ({ status: "failed", error: message(error) }) as const,
+      );
       if (live.status !== "live") {
-        return { status: "rejected", childId, reason: "resume_failed", problem: live.problem };
+        return reject("resume_failed", text.resumeFailed(childId, live.error));
       }
     }
 
@@ -569,8 +529,12 @@ export function createParentRuntime(options: {
     const unsettled = store
       .listRequestIds(childId)
       .filter((requestId) => store.readResult({ childId, requestId })?.phase !== "settled");
-    if (unsettled.length >= 2) return { status: "rejected", childId, reason: "busy" };
-    if (waitOptions.signal?.aborted) return { status: "rejected", childId, reason: "aborted" };
+    if (unsettled.length >= 2) {
+      return reject("busy", text.busy(childId));
+    }
+    if (waitOptions.signal?.aborted) {
+      return reject("aborted", text.ASK_ABORTED);
+    }
     // The rename inside createRequest is the submission point.
     const { request } = store.createRequest(childId, sanitizeInstruction(instruction));
 
@@ -581,18 +545,20 @@ export function createParentRuntime(options: {
         retrieval: await waitForResult(request, waitOptions, { store, tmux }),
       };
     } catch (error) {
-      throw new SubagentError({ code: "observation_failed", request, detail: message(error) });
+      throw new Error(text.observingSubmittedFailed(childId, request.requestId, message(error)));
     }
   }
 
   /** Why `ask` cannot use this child, or undefined when it can. */
-  function askProblem(child: ChildRecord): TargetProblem | undefined {
-    if (!isDirectory(child.cwd)) return { kind: "cwd_missing", cwd: child.cwd };
+  function askProblem(child: ChildRecord): string | undefined {
+    if (!isDirectory(child.cwd)) {
+      return text.cwdMissing(child.childId, child.cwd);
+    }
     if (hasStarted(child.childId) && !hasSessionFile(child.childId)) {
-      return { kind: "session_missing" };
+      return text.sessionFileMissing(child.childId);
     }
     if ((child.agent.source === "project" || child.projectTrust) && !options.isProjectTrusted()) {
-      return { kind: "untrusted" };
+      return text.needsProjectTrust(child.childId);
     }
     return undefined;
   }

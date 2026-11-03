@@ -10,6 +10,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import * as text from "./model-text.ts";
 
 // ---------------------------------------------------------------------------
 // Exported types
@@ -252,27 +253,34 @@ export function discoverProjectAgents(cwd: string): AgentConfig[] {
   return [];
 }
 
-/** Why `resolveAgent` found no agent; `tools.ts` renders the text. */
-export type AgentResolutionProblem =
-  | { problem: "no_agents"; scope: AgentScope; userAgentsDir: string }
-  | { problem: "unknown_agent"; name: string };
-
-/** Resolve an agent by name from a previously merged agent list. */
+/**
+ * Resolve an agent by name from a previously merged agent list.
+ *
+ * Returns the matched AgentConfig, or an error object with a formatted
+ * message listing all available agents in the requested scope.
+ */
 export function resolveAgent(
   name: string,
   agents: AgentConfig[],
   scope: AgentScope,
-): AgentConfig | AgentResolutionProblem {
+): AgentConfig | { error: string } {
   const config = agents.find((agent) => agent.name === name);
-  if (config) return config;
-  if (agents.length === 0) {
-    return {
-      problem: "no_agents",
-      scope,
-      userAgentsDir: path.join(getAgentDir(), AGENTS_DIR_NAME),
-    };
+
+  if (!config) {
+    if (agents.length === 0) {
+      return {
+        error: text.noAgentsFound(
+          scope,
+          scope === "project"
+            ? text.nearestProjectAgentsDir(CONFIG_DIR_NAME)
+            : `${path.join(getAgentDir(), AGENTS_DIR_NAME)}/`,
+        ),
+      };
+    }
+    return { error: text.unknownAgent(name, formatMergedAgentList(agents)) };
   }
-  return { problem: "unknown_agent", name };
+
+  return config;
 }
 
 /**
@@ -291,4 +299,18 @@ export function mergeAgentLists(
   return Array.from(map.values()).sort((leftAgent, rightAgent) =>
     leftAgent.name.localeCompare(rightAgent.name),
   );
+}
+
+/**
+ * Format a merged agent list without source labels.
+ * Suitable for model-facing descriptions and no-task listings.
+ */
+export function formatMergedAgentList(agents: AgentConfig[]): string {
+  if (agents.length === 0) return text.NO_AGENTS;
+  return agents
+    .map((agent) => {
+      const desc = agent.description ? ` — ${agent.description}` : "";
+      return `  ${agent.name}${desc}`;
+    })
+    .join("\n");
 }

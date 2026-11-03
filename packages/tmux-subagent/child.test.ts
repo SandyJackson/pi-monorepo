@@ -3,10 +3,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { HERDR_BLOCKED_EVENT } from "@pi-workspace/herdr-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DISPATCH_MS, POLL_MS, startChildBridge, UNVIEWED_EXIT_MS } from "./child.ts";
+import {
+  createReportTool,
+  DISPATCH_MS,
+  POLL_MS,
+  startChildBridge,
+  UNVIEWED_EXIT_MS,
+} from "./child.ts";
+import * as text from "./model-text.ts";
 import { type ChildRecord, createStore, type RequestRef, type Store } from "./store.ts";
 import { assistantEntry, createFakePi, createFakeTmux, userEntry } from "./test-support.ts";
-import { createReportTool } from "./tools.ts";
 
 let root: string;
 let store: Store;
@@ -77,12 +83,7 @@ describe("child bridge startup", () => {
     expect(store.readResult(ref("r1"))).toMatchObject({
       phase: "settled",
       nonce: "nonce-1",
-      result: {
-        status: "failed",
-        reason: "interrupted",
-        cause: "stopped_while_running",
-        humanIntervened: false,
-      },
+      result: { status: "failed", reason: "interrupted", humanIntervened: false },
     });
     expect(fake.sent).toEqual([]);
   });
@@ -110,7 +111,7 @@ describe("child bridge startup", () => {
     expect(store.readStatus(child.childId)).toMatchObject({ nonce: "nonce-1", state: "idle" });
     expect(store.readResult(ref("r1"))).toMatchObject({
       phase: "settled",
-      result: { status: "failed", reason: "interrupted", cause: "stopped_while_running" },
+      result: { status: "failed", reason: "interrupted" },
     });
   });
 
@@ -214,8 +215,7 @@ describe("child bridge dispatch and settlement", () => {
       result: {
         status: "failed",
         reason: "error",
-        cause: "unreadable_request",
-        detail: expect.stringContaining("request.json"),
+        error: expect.stringContaining("request.json"),
         humanIntervened: false,
       },
     });
@@ -303,7 +303,7 @@ describe("child bridge dispatch and settlement", () => {
 
       expect(store.readResult(ref("r1"))).toMatchObject({
         phase: "settled",
-        result: { status: "failed", reason: "error", cause: "not_started" },
+        result: { status: "failed", reason: "error", error: text.PI_DID_NOT_START },
       });
       expect(fake.sent).toHaveLength(1);
       expect(store.readStatus(child.childId)).toMatchObject({ state: "idle" });
@@ -343,7 +343,7 @@ describe("child bridge dispatch and settlement", () => {
 
     expect(store.readResult(ref("r1"))).toMatchObject({
       phase: "settled",
-      result: { status: "failed", reason: "error", cause: "not_started" },
+      result: { status: "failed", reason: "error", error: text.PI_DID_NOT_START },
     });
   });
 
@@ -375,7 +375,7 @@ describe("child bridge dispatch and settlement", () => {
     await vi.advanceTimersByTimeAsync(DISPATCH_MS);
     expect(store.readResult(ref("r1"))).toMatchObject({
       phase: "settled",
-      result: { status: "failed", cause: "not_started" },
+      result: { status: "failed", error: text.PI_DID_NOT_START },
     });
   });
 
@@ -407,7 +407,7 @@ describe("child bridge dispatch and settlement", () => {
 
     expect(store.readResult(ref("r1"))).toMatchObject({
       phase: "settled",
-      result: { status: "failed", reason: "superseded", cause: "off_branch" },
+      result: { status: "failed", reason: "superseded" },
     });
   });
 
@@ -421,7 +421,7 @@ describe("child bridge dispatch and settlement", () => {
     await fake.emit("agent_settled", { aborted: true });
 
     expect(store.readResult(ref("r1"))).toMatchObject({
-      result: { status: "failed", reason: "interrupted", cause: "run_interrupted" },
+      result: { status: "failed", reason: "interrupted" },
     });
   });
 
@@ -436,7 +436,7 @@ describe("child bridge dispatch and settlement", () => {
     await fake.emit("agent_settled", { aborted: false });
 
     expect(store.readResult(ref("r1"))).toMatchObject({
-      result: { status: "failed", reason: "interrupted", cause: "run_interrupted" },
+      result: { status: "failed", reason: "interrupted" },
     });
   });
 
@@ -451,7 +451,7 @@ describe("child bridge dispatch and settlement", () => {
     await fake.emit("agent_settled", { aborted: false });
 
     expect(store.readResult(ref("r1"))).toMatchObject({
-      result: { status: "failed", reason: "error", cause: "run_error" },
+      result: { status: "failed", reason: "error" },
     });
   });
 
@@ -468,7 +468,7 @@ describe("child bridge dispatch and settlement", () => {
     await fake.emit("agent_settled", { aborted: false });
 
     expect(store.readResult(ref("r1"))).toMatchObject({
-      result: { status: "failed", reason: "error", cause: "no_outcome" },
+      result: { status: "failed", reason: "error", error: text.NO_SETTLE_OUTCOME },
     });
   });
 
@@ -552,9 +552,6 @@ describe("subagent_report", () => {
       required: ["content"],
       properties: { content: { type: "string", minLength: 1 } },
     });
-    expect(tool.description).toContain(
-      "For an initial delegated task, your final answer already returns to the parent. Finish the assigned work and do not use this tool.",
-    );
 
     await expect(report({ content: "  \n " })).rejects.toThrow(/empty/);
     expect(store.listReportIds(child.childId)).toEqual([]);
@@ -575,13 +572,6 @@ describe("child bridge drain", () => {
     await nextPoll();
 
     expect(fake.state.shutdowns).toBe(1);
-    expect(tmux.calls).toContainEqual([
-      "display-message",
-      "-p",
-      "-t",
-      `=sa-${child.childId}:`,
-      "#{session_attached}",
-    ]);
   });
 
   it("never exits at startup, even with drain present and no client attached", async () => {

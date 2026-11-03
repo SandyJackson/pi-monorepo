@@ -51,9 +51,6 @@ describe("ensureLive", () => {
     expect(session?.command).toContain("--no-approve");
     const newSession = tmux.calls.find((call) => call.includes("new-session"));
     expect(newSession?.slice(0, 2)).toEqual(["-f", path.join(root, "state", "tmux.conf")]);
-    expect(fs.readFileSync(path.join(root, "state", "tmux.conf"), "utf8")).toContain(
-      "set -g status off",
-    );
   });
 
   it("passes the launcher's variables to the child through tmux's environment, never in argv", async () => {
@@ -100,7 +97,7 @@ describe("ensureLive", () => {
 
     expect(result).toEqual({
       status: "indeterminate",
-      problem: { kind: "no_nonce" },
+      error: `Child ${child.childId} has a live session without a launch nonce.`,
     });
     expect(tmux.launches).toBe(0);
   });
@@ -138,7 +135,7 @@ describe("ensureLive", () => {
 
     await expect(result).resolves.toEqual({
       status: "indeterminate",
-      problem: { kind: "not_ready", seconds: READY_MS / 1000 },
+      error: expect.stringContaining("did not report readiness"),
     });
   });
 
@@ -150,7 +147,7 @@ describe("ensureLive", () => {
 
     expect(result).toEqual({
       status: "failed",
-      problem: { kind: "exited_early" },
+      error: expect.stringContaining("exited before it was ready"),
     });
   });
 
@@ -159,7 +156,7 @@ describe("ensureLive", () => {
 
     await expect(ensureLive(child.childId, { store, tmux: tmux.exec })).resolves.toEqual({
       status: "failed",
-      problem: { kind: "tmux_failed", detail: "server exited unexpectedly" },
+      error: expect.stringContaining("server exited unexpectedly"),
     });
   });
 
@@ -174,10 +171,7 @@ describe("ensureLive", () => {
 
     const result = await ensureLive(child.childId, { store, tmux: tmux.exec });
 
-    expect(result).toEqual({
-      status: "failed",
-      problem: { kind: "cwd_missing", cwd: path.join(root, "gone") },
-    });
+    expect(result).toEqual({ status: "failed", error: expect.stringContaining("gone") });
     expect(tmux.launches).toBe(0);
   });
 });

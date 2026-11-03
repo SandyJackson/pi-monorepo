@@ -11,11 +11,15 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   SessionStartEvent,
+  ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { HERDR_BLOCKED_EVENT, isHerdrBlockedPayload } from "@pi-workspace/herdr-contract";
+import { Type } from "typebox";
 import { isAttached } from "./launch.ts";
+import * as text from "./model-text.ts";
 import { findRequestAnswer } from "./pi-session.ts";
 import {
+  type ChildId,
   createStore,
   type RequestRecord,
   type RequestRef,
@@ -130,8 +134,7 @@ export function startChildBridge(
         settle(request, {
           status: "failed",
           reason: "error",
-          cause: "unreadable_request",
-          detail: error instanceof Error ? error.message : String(error),
+          error: text.requestUnreadable(error instanceof Error ? error.message : String(error)),
           humanIntervened: false,
         });
       }
@@ -155,7 +158,7 @@ export function startChildBridge(
       finish({
         status: "failed",
         reason: "error",
-        cause: "not_started",
+        error: text.PI_DID_NOT_START,
         humanIntervened: current.humanIntervened,
       });
       exitIfDrained().catch(() => {});
@@ -249,7 +252,7 @@ export function startChildBridge(
       {
         status: "failed",
         reason: "interrupted",
-        cause: "stopped_while_running",
+        error: text.STOPPED_WHILE_RUNNING,
         humanIntervened: false,
       },
       result.startedAt,
@@ -325,28 +328,28 @@ export function startChildBridge(
       finish({
         status: "failed",
         reason: "superseded",
-        cause: "off_branch",
+        error: text.REQUEST_SUPERSEDED,
         humanIntervened,
       });
     } else if (event.aborted || settledOutcome === "aborted") {
       finish({
         status: "failed",
         reason: "interrupted",
-        cause: "run_interrupted",
+        error: text.RUN_INTERRUPTED,
         humanIntervened,
       });
     } else if (settledOutcome === "error") {
       finish({
         status: "failed",
         reason: "error",
-        cause: "run_error",
+        error: text.RUN_ERROR,
         humanIntervened,
       });
     } else if (settledOutcome === undefined) {
       finish({
         status: "failed",
         reason: "error",
-        cause: "no_outcome",
+        error: text.NO_SETTLE_OUTCOME,
         humanIntervened,
       });
     } else {
@@ -378,4 +381,41 @@ export function startChildBridge(
     if (current) clearTimeout(current.timer);
     unsubscribeBlocked();
   });
+}
+
+const ReportParams = Type.Object(
+  {
+    content: Type.String({ minLength: 1, description: text.REPORT_CONTENT_PARAM }),
+  },
+  { additionalProperties: false },
+);
+
+/**
+ * `subagent_report` (§8): queue a report for the parent named in this
+ * child's `child.json`. The model supplies only the content.
+ */
+export function createReportTool(options: {
+  store: Store;
+  childId: ChildId;
+}): ToolDefinition<typeof ReportParams> {
+  return {
+    name: "subagent_report",
+    label: text.REPORT_LABEL,
+    description: text.REPORT_DESCRIPTION,
+    parameters: ReportParams,
+    async execute(_toolCallId, params) {
+      if (!params.content.trim()) throw new Error(text.REPORT_CONTENT_EMPTY);
+      const child = options.store.readChild(options.childId);
+      const { reportId } = options.store.createReport({
+        childId: child.childId,
+        parentSessionId: child.parent.sessionId,
+        agent: child.agent.name,
+        content: params.content,
+      });
+      return {
+        content: [{ type: "text", text: text.reportQueued(reportId) }],
+        details: undefined,
+      };
+    },
+  };
 }

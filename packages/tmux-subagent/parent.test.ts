@@ -9,6 +9,7 @@ import {
   type DelegatedTaskRecord,
   POLL_MS,
   REPORT_POLL_MS,
+  reportEnvelope,
 } from "./parent.ts";
 import {
   createStore,
@@ -18,7 +19,6 @@ import {
   type Store,
 } from "./store.ts";
 import { createFakeTmux, type FakeSession } from "./test-support.ts";
-import { reportEnvelope } from "./tools.ts";
 
 let root: string;
 let parentCwd: string;
@@ -327,9 +327,9 @@ describe("delegate", () => {
 
   it("reports progress as the request moves through queued, running and blocked", async () => {
     const tmux = createFakeTmux({ onNewSession: ready });
-    const updates: unknown[] = [];
+    const lines: string[] = [];
     const result = runtime(tmux).delegate([task(1, { timeoutMs: POLL_MS * 4 })], {
-      onProgress: (update) => updates.push(update),
+      onProgress: (update) => lines.push(`${update.taskNumber}: ${update.line}`),
     });
     await vi.advanceTimersByTimeAsync(0);
     const [childId] = children();
@@ -352,11 +352,10 @@ describe("delegate", () => {
     await vi.advanceTimersByTimeAsync(POLL_MS * 4);
     const [execution] = await result;
 
-    const request = { childId, requestId: "r1" };
-    expect(updates).toEqual([
-      { taskNumber: 1, request, state: "queued" },
-      { taskNumber: 1, request, state: "running" },
-      { taskNumber: 1, request, state: "blocked" },
+    expect(lines).toEqual([
+      `1: Child ${childId}, request r1: queued`,
+      `1: Child ${childId}, request r1: running`,
+      `1: Child ${childId}, request r1: blocked`,
     ]);
     expect(execution.outcome).toEqual({
       status: "timed_out",
@@ -391,7 +390,7 @@ describe("delegate", () => {
 
     settle(
       { childId, requestId: "r1" },
-      { status: "failed", reason: "error", cause: "run_error", humanIntervened: false },
+      { status: "failed", reason: "error", error: "boom", humanIntervened: false },
     );
     tmux.kill(childId);
     await vi.advanceTimersByTimeAsync(POLL_MS * 3);
@@ -401,7 +400,7 @@ describe("delegate", () => {
       status: "failed",
       request: { childId, requestId: "r1" },
       reason: "error",
-      cause: "run_error",
+      error: "boom",
     });
   });
 
@@ -411,7 +410,7 @@ describe("delegate", () => {
     expect(failed.outcome).toEqual({
       status: "launch_failed",
       childId: expect.stringMatching(/^scout-/),
-      problem: { kind: "tmux_failed", detail: "no server" },
+      error: expect.stringContaining("no server"),
     });
 
     const silent = createFakeTmux();
@@ -421,7 +420,7 @@ describe("delegate", () => {
     expect(indeterminate.outcome).toMatchObject({
       status: "launch_indeterminate",
       request: { requestId: "r1" },
-      problem: { kind: "not_ready", seconds: 30 },
+      error: expect.stringContaining("did not report readiness"),
     });
   });
 
@@ -437,7 +436,7 @@ describe("delegate", () => {
     expect(execution.outcome).toMatchObject({
       status: "observation_failed",
       request: { childId, requestId: "r1" },
-      detail: expect.stringContaining("result.json"),
+      error: expect.stringContaining("result.json"),
     });
   });
 
@@ -453,9 +452,7 @@ describe("delegate", () => {
       },
     });
 
-    await expect(missing.delegate([task(1)], {})).rejects.toMatchObject({
-      problem: { code: "tmux_missing", detail: "spawn tmux ENOENT" },
-    });
+    await expect(missing.delegate([task(1)], {})).rejects.toThrow(/tmux/);
     expect(children()).toEqual([]);
   });
 });
@@ -897,13 +894,12 @@ describe("retrieveResult", () => {
     settle(foreign, { status: "completed", answer: null, humanIntervened: false });
     const own = existingChild();
 
-    await expect(runtime(tmux).retrieveResult(foreign, { timeoutMs: 1 })).rejects.toMatchObject({
-      problem: { code: "not_owned", childId: foreign.childId },
-    });
-    const unknown = { ...own, requestId: "r9" };
-    await expect(runtime(tmux).retrieveResult(unknown, { timeoutMs: 1 })).rejects.toMatchObject({
-      problem: { code: "unknown_request", request: unknown },
-    });
+    await expect(runtime(tmux).retrieveResult(foreign, { timeoutMs: 1 })).rejects.toThrow(
+      /another parent/,
+    );
+    await expect(
+      runtime(tmux).retrieveResult({ ...own, requestId: "r9" }, { timeoutMs: 1 }),
+    ).rejects.toThrow(/no request r9/);
   });
 });
 
@@ -971,6 +967,7 @@ describe("ask", () => {
       status: "rejected",
       childId: first.childId,
       reason: "busy",
+      error: `Child ${first.childId} already has a request running and one queued. Nothing was submitted.`,
     });
     expect(store.listRequestIds(first.childId)).toEqual(["r1", "r2"]);
     expect(store.readResult({ childId: first.childId, requestId: "r2" })).toBeUndefined();
@@ -1014,7 +1011,7 @@ describe("ask", () => {
         settle(first, {
           status: "failed",
           reason: "interrupted",
-          cause: "stopped_while_running",
+          error: "stopped",
           humanIntervened: false,
         });
         ready(session);
@@ -1042,7 +1039,7 @@ describe("ask", () => {
       status: "rejected",
       childId: first.childId,
       reason: "resume_failed",
-      problem: { kind: "tmux_failed", detail: "no server" },
+      error: expect.stringContaining("no server"),
     });
     expect(store.listRequestIds(first.childId)).toEqual(["r1"]);
   });
@@ -1070,11 +1067,10 @@ describe("ask", () => {
 
     const outcome = await runtime(tmux).ask(foreign.childId, "Mine now", { timeoutMs: 60_000 });
 
-    expect(outcome).toEqual({
+    expect(outcome).toMatchObject({
       status: "rejected",
-      childId: foreign.childId,
       reason: "invalid_target",
-      problem: { kind: "not_owned" },
+      error: expect.stringContaining("another parent"),
     });
     expect(store.listRequestIds(foreign.childId)).toEqual(["r1"]);
     expect(tmux.launches).toBe(0);
@@ -1089,7 +1085,7 @@ describe("ask", () => {
       {
         status: "failed",
         reason: "error",
-        cause: "not_started",
+        error: "Pi did not start the request",
         humanIntervened: false,
       },
       false,
@@ -1105,33 +1101,50 @@ describe("ask", () => {
     });
   });
 
-  it("rejects a missing cwd, a missing session file, and lost project trust as invalid_target", async () => {
+  it.each([
+    {
+      name: "its cwd no longer exists",
+      setup: (request: RequestRef) => {
+        const childJson = path.join(store.childDir(request.childId), "child.json");
+        const record = store.readChild(request.childId);
+        fs.writeFileSync(childJson, JSON.stringify({ ...record, cwd: path.join(root, "gone") }));
+      },
+      error: "cwd",
+    },
+    {
+      name: "its Pi session file is missing after a run",
+      setup: (request: RequestRef) => settle(request, done),
+      error: "session file is missing",
+    },
+  ])("rejects a child as invalid_target when $name", async ({ setup, error }) => {
     const tmux = createFakeTmux();
-    const goneCwd = existingChild();
-    const childJson = path.join(store.childDir(goneCwd.childId), "child.json");
-    fs.writeFileSync(
-      childJson,
-      JSON.stringify({ ...store.readChild(goneCwd.childId), cwd: path.join(root, "gone") }),
-    );
-    const noSession = existingChild();
-    settle(noSession, done);
-    const trusted = existingChild();
+    const request = existingChild();
+    setup(request);
 
-    const parent = runtime(tmux, false);
-    const outcomes = [
-      await parent.ask(goneCwd.childId, "Again", { timeoutMs: 1 }),
-      await parent.ask(noSession.childId, "Again", { timeoutMs: 1 }),
-      await parent.ask(trusted.childId, "Again", { timeoutMs: 1 }),
-    ];
+    const outcome = await runtime(tmux).ask(request.childId, "Again", { timeoutMs: 1 });
 
-    expect(outcomes).toEqual([
-      expect.objectContaining({
-        reason: "invalid_target",
-        problem: { kind: "cwd_missing", cwd: path.join(root, "gone") },
-      }),
-      expect.objectContaining({ reason: "invalid_target", problem: { kind: "session_missing" } }),
-      expect.objectContaining({ reason: "invalid_target", problem: { kind: "untrusted" } }),
-    ]);
+    expect(outcome).toMatchObject({
+      status: "rejected",
+      reason: "invalid_target",
+      error: expect.stringContaining(error),
+    });
+    expect(store.listRequestIds(request.childId)).toEqual(["r1"]);
+    expect(tmux.launches).toBe(0);
+  });
+
+  it("rejects a trusted child as invalid_target once the parent project is no longer trusted", async () => {
+    const tmux = createFakeTmux();
+    const trusted = existingChild({ projectTrust: true });
+    writeSessionFile(trusted.childId);
+
+    const outcome = await runtime(tmux, false).ask(trusted.childId, "Again", { timeoutMs: 1 });
+
+    expect(outcome).toMatchObject({
+      status: "rejected",
+      reason: "invalid_target",
+      error: expect.stringContaining("/trust"),
+    });
+    expect(store.listRequestIds(trusted.childId)).toEqual(["r1"]);
     expect(tmux.launches).toBe(0);
   });
 
@@ -1145,7 +1158,7 @@ describe("ask", () => {
     expect(outcome).toMatchObject({
       status: "rejected",
       reason: "invalid_target",
-      problem: { kind: "untrusted" },
+      error: expect.stringContaining("/trust"),
     });
     expect(store.listRequestIds(project.childId)).toEqual(["r1"]);
   });

@@ -1,5 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
-import { type AgentConfig, parseAgentFileContent, resolveAgent } from "./agents.js";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  type AgentConfig,
+  discoverProjectAgents,
+  mergeAgentLists,
+  parseAgentFileContent,
+} from "./agents.ts";
 
 describe("parseAgentFileContent", () => {
   it("extracts model, tools and body with the filename as fallback name", () => {
@@ -65,37 +73,53 @@ Body.`,
   });
 });
 
-describe("resolveAgent", () => {
-  const alpha: AgentConfig = {
-    name: "alpha",
-    description: "Alpha agent",
-    systemPromptBody: "",
-    source: "user",
-    sourceDir: "/agents",
-    filePath: "/agents/alpha.md",
-  };
+describe("discoverProjectAgents", () => {
+  it.each(["0", "-1", "1.5", "nope", "true", "null", '"90"', "[]", "{}"])(
+    "rejects invalid timeout %s with the agent file and requirement",
+    (timeout) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "tmux-subagent-agents-"));
+      try {
+        const agentsDir = path.join(root, ".pi", "agents");
+        fs.mkdirSync(agentsDir, { recursive: true });
+        const agentPath = path.join(agentsDir, "alpha.md");
+        fs.writeFileSync(
+          agentPath,
+          `---\nname: alpha\ndescription: Alpha\ntimeout: ${timeout}\n---\n`,
+        );
 
-  it("returns the named agent", () => {
-    expect(resolveAgent("alpha", [alpha], "user")).toBe(alpha);
-  });
+        expect(() => discoverProjectAgents(root)).toThrow(
+          `${agentPath}: frontmatter \`timeout\` must be a positive integer number of minutes`,
+        );
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
 
-  it("returns a code for an unknown agent", () => {
-    expect(resolveAgent("missing", [alpha], "user")).toEqual({
-      problem: "unknown_agent",
-      name: "missing",
-    });
-  });
+describe("mergeAgentLists", () => {
+  function agent(name: string, source: AgentConfig["source"]): AgentConfig {
+    return {
+      name,
+      description: `${name} from ${source}`,
+      systemPromptBody: "",
+      source,
+      sourceDir: `/${source}`,
+      filePath: `/${source}/${name}.md`,
+    };
+  }
 
-  it("returns a code naming the user agents directory when there are no agents", () => {
-    vi.stubEnv("PI_CODING_AGENT_DIR", "/pi-agent");
-    try {
-      expect(resolveAgent("alpha", [], "both")).toEqual({
-        problem: "no_agents",
-        scope: "both",
-        userAgentsDir: "/pi-agent/agents",
-      });
-    } finally {
-      vi.unstubAllEnvs();
-    }
+  it("lets a project agent replace a user agent, and a user agent a workspace one, of the same name", () => {
+    const merged = mergeAgentLists(
+      [agent("reviewer", "user"), agent("scout", "user")],
+      [agent("reviewer", "project")],
+      [agent("reviewer", "workspace"), agent("scout", "workspace"), agent("planner", "workspace")],
+    );
+
+    expect(merged.map((config) => [config.name, config.source])).toEqual([
+      ["planner", "workspace"],
+      ["reviewer", "project"],
+      ["scout", "user"],
+    ]);
   });
 });

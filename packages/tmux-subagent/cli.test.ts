@@ -528,7 +528,7 @@ describe("open", () => {
 describe("running under node", () => {
   const cliPath = fileURLToPath(new URL("./cli.ts", import.meta.url));
 
-  it("loads only its own state, tmux, and launch modules, never Pi", () => {
+  it("loads only its own state, tmux, launch, and text modules, never Pi", () => {
     const script = `
       import { registerHooks } from "node:module";
       const loaded = [];
@@ -546,7 +546,13 @@ describe("running under node", () => {
     const local = (JSON.parse(output) as string[])
       .filter((url) => !url.startsWith("node:"))
       .map((url) => path.basename(fileURLToPath(url)));
-    expect([...new Set(local)].sort()).toEqual(["cli.ts", "launch.ts", "store.ts", "tmux.ts"]);
+    expect([...new Set(local)].sort()).toEqual([
+      "cli.ts",
+      "launch.ts",
+      "model-text.ts",
+      "store.ts",
+      "tmux.ts",
+    ]);
   });
 
   it("runs directly, finding the store through Pi's agent directory", () => {
