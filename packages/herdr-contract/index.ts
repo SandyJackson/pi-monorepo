@@ -2,7 +2,8 @@
  * herdr-contract — shared event contract for herdr:blocked events
  *
  * Defines the stable event name and payload type used by authored emitters
- * (bash-permission, herdr-bridge) to communicate blocking state to Herdr.
+ * (bash-permission) to communicate blocking state. tmux-subagent consumes it
+ * in child mode to mark the child blocked.
  *
  * This contract is versioned with the workspace and must not change the
  * runtime event name or payload shape.

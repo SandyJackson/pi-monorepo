@@ -3,15 +3,15 @@ import { planAffectedTests, type WorkspacePackage } from "./test-policy.ts";
 
 const packages: WorkspacePackage[] = [
   { directory: "packages/issue-loop", name: "@test/loop", dependencies: ["@test/agents"] },
-  { directory: "packages/herdr-subagent", name: "@test/agents", dependencies: ["@test/contract"] },
+  { directory: "packages/tmux-subagent", name: "@test/agents", dependencies: ["@test/contract"] },
   { directory: "packages/herdr-contract", name: "@test/contract", dependencies: [] },
   { directory: "packages/session-auto-name", name: "@test/names", dependencies: [] },
 ];
 const slowTests = [
   "packages/issue-loop/cli-lifecycle.test.ts",
   "packages/issue-loop/process.integration.test.ts",
-  "packages/herdr-subagent/delegated-task-startup.test.ts",
-  "packages/herdr-subagent/herdr/tab-create.smoke.test.ts",
+  "packages/tmux-subagent/delegation.integration.test.ts",
+  "packages/tmux-subagent/cli.integration.test.ts",
 ];
 
 describe("affected test policy", () => {
@@ -48,8 +48,8 @@ describe("affected test policy", () => {
   });
 
   it("includes consumers of a shared agent parser", () => {
-    const plan = planAffectedTests(["packages/herdr-subagent/agents.ts"], packages, slowTests);
-    expect(plan.affectedPackages).toEqual(["packages/herdr-subagent", "packages/issue-loop"]);
+    const plan = planAffectedTests(["packages/tmux-subagent/agents.ts"], packages, slowTests);
+    expect(plan.affectedPackages).toEqual(["packages/issue-loop", "packages/tmux-subagent"]);
     expect(plan.integrationTests).toEqual([...slowTests].sort());
   });
 
@@ -57,8 +57,8 @@ describe("affected test policy", () => {
     const plan = planAffectedTests(["packages/herdr-contract/index.ts"], packages, slowTests);
     expect(plan.affectedPackages).toEqual([
       "packages/herdr-contract",
-      "packages/herdr-subagent",
       "packages/issue-loop",
+      "packages/tmux-subagent",
     ]);
     expect(plan.integrationTests).toEqual([...slowTests].sort());
   });

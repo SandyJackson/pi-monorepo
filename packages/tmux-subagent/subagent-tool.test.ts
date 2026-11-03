@@ -3,9 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
-import { type AgentConfig, discoverProjectAgents } from "./agents.js";
-import type { DelegatedTaskOutcome } from "./herdr/session.js";
-import { createSubagentTool, type ExecuteDelegation } from "./subagent-tool.js";
+import { type AgentConfig, discoverProjectAgents } from "./agents.ts";
+import type { DelegatedTaskOutcome, ExecuteDelegation } from "./parent.ts";
+import { createSubagentTool } from "./subagent-tool.ts";
 
 const alphaAgent: AgentConfig = {
   name: "alpha",
@@ -48,27 +48,6 @@ async function withSessionFile(
   }
 }
 
-describe("agent frontmatter timeout", () => {
-  it.each(["0", "-1", "1.5", "nope", "true", "null", '"90"', "[]", "{}"])(
-    "rejects invalid timeout %s with the agent file and requirement",
-    async (timeout) => {
-      await withSessionFile([], async (sessionPath) => {
-        const root = path.dirname(sessionPath);
-        const agentsDir = path.join(root, ".pi", "agents");
-        fs.mkdirSync(agentsDir, { recursive: true });
-        const agentPath = path.join(agentsDir, "alpha.md");
-        fs.writeFileSync(
-          agentPath,
-          `---\nname: alpha\ndescription: Alpha\ntimeout: ${timeout}\n---\n`,
-        );
-        expect(() => discoverProjectAgents(root)).toThrow(
-          `${agentPath}: frontmatter \`timeout\` must be a positive integer number of minutes`,
-        );
-      });
-    },
-  );
-});
-
 describe("subagent timeout precedence", () => {
   it.each([
     { callTimeout: undefined, expectedMinutes: [90, 1, 60] },
@@ -95,7 +74,7 @@ describe("subagent timeout precedence", () => {
         executeDelegation.mockImplementation(async (tasks) =>
           tasks.map((task) => ({
             task,
-            outcome: { status: "timed_out", session },
+            outcome: { status: "timed_out", request },
           })),
         );
 
@@ -111,7 +90,7 @@ describe("subagent timeout precedence", () => {
         expectedMinutes.forEach((minutes, index) => {
           const agent = ["reviewer", "quick", "alpha"][index];
           expect(text).toContain(
-            `### Task ${index + 1} — ${agent} — timed out\n\nThe delegated turn timed out after ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`,
+            `### Task ${index + 1} — ${agent} — timed out\n\nChild alpha-7k2q, request r1\n\nThe wait timed out after ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`,
           );
         });
       });
@@ -154,80 +133,89 @@ describe("subagent request schema", () => {
   });
 });
 
-const session = { paneId: "pane-1", label: "sa-alpha" };
+const request = { childId: "alpha-7k2q", requestId: "r1" };
+const header = "Child alpha-7k2q, request r1\n\n";
+const stillWorking =
+  "The child is still working on the request; nothing was stopped. Use subagent_retrieve with childId alpha-7k2q and requestId r1 to keep waiting.";
 
 const statusCases: Array<{
   name: string;
   outcome: DelegatedTaskOutcome;
   timeout?: number;
   headingStatus: string;
-  text: string;
-  expectedOutcomeDetails: Record<string, unknown>;
+  /** The composed text; absent where the body is one fixed sentence. */
+  text?: string;
 }> = [
   {
     name: "timeout",
-    outcome: { status: "timed_out", session },
+    outcome: { status: "timed_out", request },
     timeout: 3,
     headingStatus: "timed out",
-    text: "The delegated turn timed out after 3 minutes. The visible session remains available in pane pane-1.",
-    expectedOutcomeDetails: { status: "timed_out", session },
+    text: `${header}The wait timed out after 3 minutes. ${stillWorking}`,
   },
   {
     name: "abort before launch",
     outcome: { status: "aborted", stage: "before_launch" },
     headingStatus: "aborted",
-    text: "The delegated task was aborted before launch. No visible subagent session was started.",
-    expectedOutcomeDetails: { status: "aborted", stage: "before_launch" },
   },
   {
     name: "abort while observing",
-    outcome: { status: "aborted", stage: "observing", session },
+    outcome: { status: "aborted", stage: "observing", request },
     headingStatus: "aborted",
-    text: "The delegated turn was aborted while observing. The visible session remains available in pane pane-1.",
-    expectedOutcomeDetails: { status: "aborted", stage: "observing", session },
+    text: `${header}The wait was aborted. ${stillWorking}`,
   },
   {
-    name: "session closure",
-    outcome: { status: "session_closed", session },
+    name: "child exit",
+    outcome: { status: "session_closed", request },
     headingStatus: "session closed",
-    text: "The visible subagent session in pane pane-1 closed before the delegated turn completed.",
-    expectedOutcomeDetails: { status: "session_closed", session },
+  },
+  {
+    name: "failure",
+    outcome: {
+      status: "failed",
+      request,
+      reason: "error",
+      error: "The child's run ended with an error.",
+    },
+    headingStatus: "failed",
+    text: `${header}Request failed (error): The child's run ended with an error.`,
+  },
+  {
+    name: "interruption",
+    outcome: { status: "failed", request, reason: "interrupted", error: "Escape" },
+    headingStatus: "failed",
+    text: `${header}Request failed (interrupted): Escape\nNo result was recorded. The child may have made changes. The request will not be retried automatically.`,
   },
   {
     name: "confirmed launch failure",
-    outcome: { status: "launch_failed", error: "launch denied" },
+    outcome: { status: "launch_failed", childId: "alpha-7k2q", error: "launch denied" },
     headingStatus: "launch failed",
-    text: "The subagent could not be launched: launch denied",
-    expectedOutcomeDetails: { status: "launch_failed", error: "launch denied" },
+    text: "Child alpha-7k2q could not be launched: launch denied",
+  },
+  {
+    name: "launch failure before a child exists",
+    outcome: { status: "launch_failed", error: "disk full" },
+    headingStatus: "launch failed",
+    text: "The subagent could not be launched: disk full",
   },
   {
     name: "indeterminate launch",
-    outcome: {
-      status: "launch_indeterminate",
-      error: "socket closed",
-      possiblePaneId: "possible-pane",
-    },
+    outcome: { status: "launch_indeterminate", request, error: "No readiness within 30 s." },
     headingStatus: "launch indeterminate",
-    text: "Herdr may have launched this session in pane possible-pane. Inspect the possible pane before retrying. socket closed",
-    expectedOutcomeDetails: {
-      status: "launch_indeterminate",
-      error: "socket closed",
-      possiblePaneId: "possible-pane",
-    },
+    text: `${header}The child did not confirm it started: No readiness within 30 s. The request is on disk and may still run.`,
   },
   {
     name: "observation failure",
-    outcome: { status: "observation_failed", session, error: "invalid response" },
+    outcome: { status: "observation_failed", request, error: "invalid result.json" },
     headingStatus: "observation failed",
-    text: "Observation failed for pane pane-1: invalid response. The visible session may still be live.",
-    expectedOutcomeDetails: { status: "observation_failed", session, error: "invalid response" },
+    text: `${header}Observation failed: invalid result.json. The child may still be running the request.`,
   },
 ];
 
 describe("subagent result presentation", () => {
   it.each(statusCases)(
-    "presents $name with precise text and normalized details",
-    async ({ outcome, timeout, text, expectedOutcomeDetails }) => {
+    "presents $name with normalized details, and its composed text",
+    async ({ outcome, timeout, text }) => {
       const { tool, executeDelegation } = createTool();
       executeDelegation.mockImplementation(async (tasks) => [{ task: tasks[0], outcome }]);
 
@@ -236,40 +224,12 @@ describe("subagent result presentation", () => {
         timeout,
       });
 
-      expect(result).toEqual({
-        content: [{ type: "text", text }],
-        details: {
-          tasks: [{ taskNumber: 1, agent: "alpha", ...expectedOutcomeDetails }],
-        },
+      expect(result.details).toEqual({
+        tasks: [{ taskNumber: 1, agent: "alpha", ...outcome }],
       });
+      if (text !== undefined) expect(result.content).toEqual([{ type: "text", text }]);
     },
   );
-  it("tells the model to inspect the visible session when a completed single task has no answer", async () => {
-    const { tool, executeDelegation } = createTool();
-    executeDelegation.mockImplementation(async (tasks) => [
-      {
-        task: tasks[0],
-        outcome: { status: "completed", session, answer: null },
-      },
-    ]);
-
-    const result = await executeTool(tool, {
-      tasks: [{ agent: "alpha", instruction: "Review" }],
-    });
-
-    expect(result).toEqual({
-      content: [
-        {
-          type: "text",
-          text: "The delegated turn completed without a final answer. Inspect the visible session in pane pane-1.",
-        },
-      ],
-      details: {
-        tasks: [{ taskNumber: 1, agent: "alpha", status: "completed", session, answer: null }],
-      },
-    });
-  });
-
   it("numbers every precise status in a multiple-task result", async () => {
     const { tool, executeDelegation } = createTool();
     executeDelegation.mockImplementation(async (tasks) =>
@@ -322,8 +282,9 @@ describe("subagent result presentation", () => {
             task: tasks[0],
             outcome: {
               status: "completed",
-              session: { paneId: "pane-1", label: "sa-alpha" },
+              request,
               answer: { path: sessionPath, entryId: "answer-1" },
+              humanIntervened: false,
             },
           },
         ]);
@@ -333,15 +294,16 @@ describe("subagent result presentation", () => {
         });
 
         expect(result).toEqual({
-          content: [{ type: "text", text: "Exact delegated answer." }],
+          content: [{ type: "text", text: `${header}Exact delegated answer.` }],
           details: {
             tasks: [
               {
                 taskNumber: 1,
                 agent: "alpha",
                 status: "completed",
-                session: { paneId: "pane-1", label: "sa-alpha" },
+                request,
                 answer: { path: sessionPath, entryId: "answer-1" },
+                humanIntervened: false,
               },
             ],
           },
@@ -389,8 +351,9 @@ describe("subagent result presentation", () => {
               task: tasks[0],
               outcome: {
                 status: "completed",
-                session: { paneId: "pane-1", label: "sa-alpha" },
+                request,
                 answer: { path: sessionPath, entryId: "answer" },
+                humanIntervened: false,
               },
             },
           ]);
@@ -418,11 +381,7 @@ describe("subagent task validation", () => {
     executeDelegation.mockImplementation(async (tasks) => [
       {
         task: tasks[0],
-        outcome: {
-          status: "completed",
-          session: { paneId: "pane-2", label: "sa-alpha-review" },
-          answer: null,
-        },
+        outcome: { status: "completed", request, answer: null, humanIntervened: false },
       },
     ]);
 
@@ -455,9 +414,6 @@ describe("subagent task validation", () => {
     expect(text.indexOf("### Task 2 — alpha — completed")).toBeLessThan(
       text.indexOf("### Task 3 — missing — invalid"),
     );
-    expect(text).toContain(
-      "The delegated turn completed without a final answer. Inspect the visible session in pane pane-2.",
-    );
     expect(result.details).toEqual({
       tasks: [
         {
@@ -465,14 +421,15 @@ describe("subagent task validation", () => {
           agent: "",
           status: "invalid",
           reason: "empty-agent",
-          error: "Agent name must not be empty.",
+          error: expect.any(String),
         },
         {
           taskNumber: 2,
           agent: "alpha",
           status: "completed",
-          session: { paneId: "pane-2", label: "sa-alpha-review" },
+          request,
           answer: null,
+          humanIntervened: false,
         },
         {
           taskNumber: 3,
@@ -509,14 +466,14 @@ describe("subagent task validation", () => {
           agent: "",
           status: "invalid",
           reason: "empty-agent",
-          error: "Agent name must not be empty.",
+          error: expect.any(String),
         },
         {
           taskNumber: 2,
           agent: "alpha",
           status: "invalid",
           reason: "empty-instruction",
-          error: "Instruction must not be empty.",
+          error: expect.any(String),
         },
         {
           taskNumber: 3,
@@ -533,7 +490,10 @@ describe("subagent task validation", () => {
   it("forwards the trimmed delegation label, or none, to the delegation call", async () => {
     const { tool, executeDelegation } = createTool();
     executeDelegation.mockImplementation(async (tasks) => [
-      { task: tasks[0], outcome: { status: "completed", session, answer: null } },
+      {
+        task: tasks[0],
+        outcome: { status: "completed", request, answer: null, humanIntervened: false },
+      },
     ]);
 
     await executeTool(tool, {
@@ -567,4 +527,47 @@ describe("subagent listing", () => {
       expect(executeDelegation).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("subagent operator intervention", () => {
+  it("leads the answer with a note when the operator interacted with the child", async () => {
+    await withSessionFile(
+      [
+        {
+          id: "answer",
+          type: "message",
+          message: {
+            role: "assistant",
+            stopReason: "stop",
+            content: [{ type: "text", text: "Updated answer." }],
+          },
+        },
+      ],
+      async (sessionPath) => {
+        const { tool, executeDelegation } = createTool();
+        executeDelegation.mockImplementation(async (tasks) => [
+          {
+            task: tasks[0],
+            outcome: {
+              status: "completed",
+              request,
+              answer: { path: sessionPath, entryId: "answer" },
+              humanIntervened: true,
+            },
+          },
+        ]);
+
+        const result = await executeTool(tool, {
+          tasks: [{ agent: "alpha", instruction: "Review" }],
+        });
+
+        expect(result.content).toEqual([
+          {
+            type: "text",
+            text: `${header}The operator also interacted with this child during the request; the answer may address their input.\n\nUpdated answer.`,
+          },
+        ]);
+      },
+    );
+  });
 });

@@ -8,21 +8,18 @@ importers:
 
   .:
     dependencies:
-      '@pi-workspace/herdr-bridge':
-        specifier: workspace:*
-        version: link:packages/herdr-bridge
       '@pi-workspace/herdr-contract':
         specifier: workspace:*
         version: link:packages/herdr-contract
-      '@pi-workspace/herdr-subagent':
-        specifier: workspace:*
-        version: link:packages/herdr-subagent
       '@pi-workspace/ketch':
         specifier: workspace:*
         version: link:packages/ketch
       '@pi-workspace/session-auto-name':
         specifier: workspace:*
         version: link:packages/session-auto-name
+      '@pi-workspace/tmux-subagent':
+        specifier: workspace:*
+        version: link:packages/tmux-subagent
       '@pi-workspace/worktree-trust':
         specifier: workspace:*
         version: link:packages/worktree-trust
@@ -83,41 +80,20 @@ importers:
         specifier: 1.3.0
         version: 1.3.0
 
-  packages/herdr-bridge:
-    devDependencies:
-      '@earendil-works/pi-coding-agent':
-        specifier: 1.3.0
-        version: 1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
-      '@pi-workspace/herdr-contract':
-        specifier: workspace:*
-        version: link:../herdr-contract
-
   packages/herdr-contract:
     devDependencies:
       '@earendil-works/pi-coding-agent':
         specifier: 1.3.0
         version: 1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
 
-  packages/herdr-subagent:
-    devDependencies:
-      '@earendil-works/pi-coding-agent':
-        specifier: 1.3.0
-        version: 1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
-      '@types/node':
-        specifier: ^22.0.0
-        version: 22.20.1
-      typebox:
-        specifier: '*'
-        version: 1.3.10
-
   packages/issue-loop:
     dependencies:
       '@earendil-works/pi-coding-agent':
         specifier: 1.3.0
         version: 1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
-      '@pi-workspace/herdr-subagent':
+      '@pi-workspace/tmux-subagent':
         specifier: workspace:*
-        version: link:../herdr-subagent
+        version: link:../tmux-subagent
 
   packages/ketch:
     devDependencies:
@@ -142,6 +118,22 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 1.3.0
         version: 1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
+
+  packages/tmux-subagent:
+    dependencies:
+      '@pi-workspace/herdr-contract':
+        specifier: workspace:*
+        version: link:../herdr-contract
+    devDependencies:
+      '@earendil-works/pi-coding-agent':
+        specifier: 1.3.0
+        version: 1.3.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typebox:
+        specifier: '*'
+        version: 1.3.27
 
   packages/worktree-trust:
     devDependencies:

@@ -39,8 +39,7 @@ describe("Pi workspace package", () => {
 
   it.each([
     "@pi-workspace/herdr-contract",
-    "@pi-workspace/herdr-subagent",
-    "@pi-workspace/herdr-bridge",
+    "@pi-workspace/tmux-subagent",
     "@pi-workspace/ketch",
     "@pi-workspace/session-auto-name",
     "@tmustier/pi-code-actions",
@@ -54,6 +53,10 @@ describe("Pi workspace package", () => {
       expect(entry).toMatch(/\.ts$/);
       expect(statSync(resolve(root, entry)).isFile(), entry).toBe(true);
     }
+  });
+
+  it("delegates to subagents through the tmux backend", () => {
+    expect(manifest.pi.extensions).toContain("./packages/tmux-subagent/index.ts");
   });
 
   it("ships the workspace Ketch tools", () => {

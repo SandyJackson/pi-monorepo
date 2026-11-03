@@ -1,5 +1,5 @@
 /**
- * agents.ts — Agent discovery and frontmatter parsing for herdr-subagent.
+ * agents.ts — Agent discovery and frontmatter parsing for subagent backends.
  *
  * Discovers workspace agents from the aggregate package, user agents from
  * Pi's agent directory, and trusted project agents from `.pi/agents/`.
@@ -10,6 +10,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import * as text from "./model-text.ts";
 
 // ---------------------------------------------------------------------------
 // Exported types
@@ -268,14 +269,15 @@ export function resolveAgent(
   if (!config) {
     if (agents.length === 0) {
       return {
-        error:
-          `No agents found in scope "${scope}". ` +
-          `Expected agent files in ${scope === "project" ? `the nearest ${CONFIG_DIR_NAME}/agents/ directory` : `${path.join(getAgentDir(), AGENTS_DIR_NAME)}/`}.`,
+        error: text.noAgentsFound(
+          scope,
+          scope === "project"
+            ? text.nearestProjectAgentsDir(CONFIG_DIR_NAME)
+            : `${path.join(getAgentDir(), AGENTS_DIR_NAME)}/`,
+        ),
       };
     }
-    return {
-      error: `Unknown agent "${name}". Available agents:\n${formatMergedAgentList(agents)}`,
-    };
+    return { error: text.unknownAgent(name, formatMergedAgentList(agents)) };
   }
 
   return config;
@@ -304,7 +306,7 @@ export function mergeAgentLists(
  * Suitable for model-facing descriptions and no-task listings.
  */
 export function formatMergedAgentList(agents: AgentConfig[]): string {
-  if (agents.length === 0) return "none";
+  if (agents.length === 0) return text.NO_AGENTS;
   return agents
     .map((agent) => {
       const desc = agent.description ? ` — ${agent.description}` : "";
