@@ -2,10 +2,6 @@
 
 This repository uses `pnpm` for all of its tooling. Speak to the user.
 
-Significant pieces of work should always take place on a separate worktree,
-not on `master` or `main`.
-Worktrees are managed with worktrunk load the skill for more information.
-
 ## Checks
 
 While iterating, run the relevant tests, e.g.
