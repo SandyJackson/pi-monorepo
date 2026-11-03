@@ -1,0 +1,10 @@
+windows:
+  - name: editor
+    panes:
+      - command: <agent>
+        focus: true
+      - split: vertical
+        size: 20
+  - name: setup
+    panes:
+      - command: pnpm install
