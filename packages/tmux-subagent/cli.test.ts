@@ -404,6 +404,18 @@ describe("pick", () => {
 });
 
 describe("open", () => {
+  it("rejects a different socket before starting or attaching a child", async () => {
+    const child = addChild();
+    store.bindSocket("parent-socket");
+
+    const result = await run(["open", child.childId, "--pane", "%1"]);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/parent-socket.*pi-subagents-test/);
+    expect(privateTmux.calls).toEqual([]);
+    expect(result.outer.calls.some((call) => call[0] === "new-pane")).toBe(false);
+  });
+
   function attachArgs(childId: string) {
     return [
       "new-pane",

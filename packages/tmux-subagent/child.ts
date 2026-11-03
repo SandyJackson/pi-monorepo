@@ -26,7 +26,7 @@ import {
   type RequestResult,
   type Store,
 } from "./store.ts";
-import { createTmuxExec, type TmuxExec } from "./tmux.ts";
+import { createTmuxExec, type TmuxExec, tmuxSocket } from "./tmux.ts";
 
 /** How often the bridge looks for a request to dispatch and for `drain`. */
 export const POLL_MS = 250;
@@ -64,9 +64,11 @@ export function startChildBridge(
   const { nonce, ctx } = options;
   const childId = path.basename(options.childDir);
   const store = options.store ?? createStore(path.dirname(path.dirname(options.childDir)));
+  if (!options.tmux) store.bindSocket(tmuxSocket());
   const tmux = options.tmux ?? createTmuxExec();
 
   let current: CurrentRequest | undefined;
+  let agentRunning = !ctx.isIdle();
   let outcome: AgentActivityOutcome | undefined;
   let uiPrompt: { label: string; since: string } | undefined;
   let herdrBlocked: { label: string; since: string } | undefined;
@@ -85,14 +87,14 @@ export function startChildBridge(
   }
 
   function writeStatus(): void {
-    const running = current?.confirmed ? current.request.requestId : undefined;
+    const requestId = current?.confirmed ? current.request.requestId : undefined;
     const blocked = uiPrompt ?? herdrBlocked;
     store.writeStatus(childId, {
       version: 1,
       nonce,
       pid: process.pid,
-      state: running ? "running" : "idle",
-      ...(running ? { current: running } : {}),
+      state: agentRunning ? "running" : "idle",
+      ...(requestId ? { current: requestId } : {}),
       ...(blocked ? { blocked } : {}),
     });
   }
@@ -117,7 +119,6 @@ export function startChildBridge(
       phase: "running",
       startedAt: current.startedAt,
     });
-    writeStatus();
   }
 
   /** The lowest request without a result: never started, so safe to dispatch. */
@@ -301,8 +302,10 @@ export function startChildBridge(
   });
 
   pi.on("agent_start", () => {
+    agentRunning = true;
     outcome = undefined;
     if (current?.inputSeen) confirm();
+    writeStatus();
   });
 
   pi.on("agent_before_settle", (event) => {
@@ -310,6 +313,7 @@ export function startChildBridge(
   });
 
   pi.on("agent_settled", (event, settledCtx) => {
+    agentRunning = false;
     settleCurrent(event, settledCtx);
     exitIfDrained().catch(() => {});
   });
@@ -317,7 +321,10 @@ export function startChildBridge(
   function settleCurrent(event: AgentSettledEvent, settledCtx: ExtensionContext): void {
     const settledOutcome = outcome;
     outcome = undefined;
-    if (!current?.confirmed) return;
+    if (!current?.confirmed) {
+      writeStatus();
+      return;
+    }
     const { humanIntervened } = current;
     const located = findRequestAnswer(settledCtx.sessionManager.getBranch(), {
       dispatchLeaf: current.dispatchLeaf,

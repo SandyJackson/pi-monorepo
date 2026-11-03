@@ -69,5 +69,12 @@ The binding does not set these for you.
   normal use: from `run-shell`, tmux finds your server through `TMUX`. Tests
   set it to a disposable server.
 
+The state directory binds to its first socket in `tmux-socket.json`. Parents,
+children, and the CLI must use the same `PI_SUBAGENT_TMUX_SOCKET`; a mismatch
+is rejected before opening or stopping a child. For another socket, use a
+separate `PI_CODING_AGENT_DIR`. Existing unbound state adopts the socket on
+first use. Restart existing parents and children after upgrading so they all
+use the check.
+
 A child resumed from the picker gets the environment of the process that ran
 the CLI, which under `run-shell` is your outer tmux server's.

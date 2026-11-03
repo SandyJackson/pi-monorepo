@@ -279,7 +279,11 @@ it.skipIf(!hasTmux)(
       tmux: createTmuxExec(socket),
     });
     const launcherEnv = { ...process.env };
-    Object.assign(process.env, { PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" });
+    Object.assign(process.env, {
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_SUBAGENT_TMUX_SOCKET: socket,
+      PI_OFFLINE: "1",
+    });
     let asked: Awaited<ReturnType<typeof runtime.ask>>;
     try {
       asked = await runtime.ask(alphaId, "say AGAIN", { timeoutMs: 60_000 });

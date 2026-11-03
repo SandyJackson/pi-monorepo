@@ -21,7 +21,7 @@ import {
   type RequestResult,
   type Store,
 } from "./store.ts";
-import { createTmuxExec, projectTrustFor, type TmuxExec } from "./tmux.ts";
+import { createTmuxExec, projectTrustFor, type TmuxExec, tmuxSocket } from "./tmux.ts";
 
 // ---------------------------------------------------------------------------
 // Delegation types (§5)
@@ -309,6 +309,7 @@ export function createParentRuntime(options: {
   tmux?: TmuxExec;
 }): ParentRuntime {
   const store = options.store ?? createStore();
+  if (!options.tmux) store.bindSocket(tmuxSocket());
   const tmux = options.tmux ?? createTmuxExec();
 
   // Report delivery (§6): sent once per process, confirmed by message_end.

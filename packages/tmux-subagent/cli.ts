@@ -158,6 +158,7 @@ async function list(worktree: string, deps: CliDeps): Promise<Listing> {
 
 /** End a child's Pi process. Its records and transcript stay; the next request or `open` resumes it. */
 async function stop(childId: ChildId, deps: CliDeps, quiet = false): Promise<void> {
+  deps.store.bindSocket(deps.socket);
   const killed = await deps.tmux(["kill-session", "-t", sessionTarget(childId)]);
   if (killed.code === 0) deps.stdout(`Stopped ${childId}\n`);
   else if (await isLive(deps.tmux, childId)) {
@@ -258,6 +259,7 @@ async function pick(pane: string, deps: CliDeps): Promise<void> {
  * operator can see why it is not ready.
  */
 async function open(childId: ChildId, pane: string, deps: CliDeps): Promise<void> {
+  deps.store.bindSocket(deps.socket);
   deps.store.readChild(childId);
   const live = await ensureLive(childId, { store: deps.store, tmux: deps.tmux, env: deps.env });
   if (live.status === "failed") throw new Error(live.error);

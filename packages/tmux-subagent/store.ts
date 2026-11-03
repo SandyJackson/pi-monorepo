@@ -110,6 +110,8 @@ export type NewChild = Omit<ChildRecord, "version" | "childId" | "createdAt">;
 
 export interface Store {
   readonly root: string;
+  /** Claim this state directory for one private tmux socket; reject mismatches. */
+  bindSocket(socket: string): void;
   childDir(childId: ChildId): string;
   /** Allocate a child ID by exclusive `mkdir`, then write child.json and system-prompt.md. */
   createChild(child: NewChild, systemPrompt: string): ChildRecord;
@@ -452,6 +454,16 @@ export function createStore(root: string = defaultStoreRoot()): Store {
   return {
     root,
     childDir,
+
+    bindSocket(socket) {
+      fs.mkdirSync(root, { recursive: true, mode: DIR_MODE });
+      const file = path.join(root, "tmux-socket.json");
+      if (writeJsonOnce(file, socket)) return;
+      const bound = readJson<string>(file, (value) =>
+        isString(value) ? undefined : "invalid socket name",
+      );
+      if (bound !== socket) throw new Error(text.socketMismatch(bound, socket));
+    },
 
     createChild(child, systemPrompt) {
       fs.mkdirSync(childrenDir, { recursive: true, mode: DIR_MODE });

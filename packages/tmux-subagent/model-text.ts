@@ -438,6 +438,11 @@ export function reportQueued(reportId: string): string {
 // Store: answers to IDs the model supplies, and ID allocation
 // ---------------------------------------------------------------------------
 
+// store.ts bindSocket(): another private server must not write the same children
+export function socketMismatch(bound: string | undefined, requested: string): string {
+  return `This subagent state directory is bound to tmux socket "${bound}", not "${requested}". Use the same PI_SUBAGENT_TMUX_SOCKET as the parent, or a separate PI_CODING_AGENT_DIR.`;
+}
+
 // store.ts createStore() childDir(): a child ID that could address a path outside the state directory
 export function invalidChildId(childId: string): string {
   return `Invalid child ID: ${childId}`;

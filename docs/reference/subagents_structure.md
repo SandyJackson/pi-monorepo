@@ -40,6 +40,11 @@ Test seams: `ExecuteDelegation` for the tool, a scripted `TmuxExec`, a `Store` r
 
 State lives in `<agentDir>/subagents/children/<childId>/`. Every file has one writer: the parent writes `child.json`, `system-prompt.md`, `drain`, and `request.json`; the child writes `status.json`, `result.json`, and reports. No lock is needed. Records are written to a temporary file and renamed, so readers never see partial JSON. A record with the wrong version or shape is an error, never absence.
 
+The store atomically binds its root to one private socket in `tmux-socket.json`.
+Parent and child startup, and CLI open and stop, reject a different socket
+before accessing that server. No child record changes or automatic socket
+migration are needed.
+
 Live tmux state is discovered, never stored. A child is live when its tmux session exists. `status.json` counts as readiness only when its nonce equals the live session's `PI_SUBAGENT_NONCE`.
 
 ## Callable agent catalog
@@ -63,6 +68,7 @@ Live tmux state is discovered, never stored. A child is live when its tmux sessi
 - **Readiness:** at `session_start` the bridge marks any `running` result from an older nonce `interrupted`, then writes `status.json`. It never re-runs interrupted work.
 - **Dispatch:** when Pi is idle with no pending messages or open prompt, the lowest unsettled request is sent with `sendUserMessage` and `expandPromptTemplates`, so `/skill:` and prompt-template instructions expand as typed input does. It counts as started only after `agent_start` follows the matching `input`; the `before_agent_start` prompt between them is the expanded text the request entry is bound by. An `input` that arrives while a run is streaming is taken back (`handled`) and dispatched again when idle. Without confirmation, and once Pi is idle again, it settles `failed` / `error` and is never resent.
 - **Settlement:** on `agent_settled`, the request's user entry (text equal to the expanded request text) is located on the current branch after the dispatch leaf. The answer is the latest terminal assistant entry after it. Operator input during the request sets `humanIntervened`.
+- **Activity:** every `agent_start` marks the child running, including operator work; `agent_settled` marks it idle. Only a confirmed parent request supplies the optional current request ID.
 - **Blocked:** `ui_prompt_start`/`ui_prompt_end` and the `herdr:blocked` event from `@pi-workspace/herdr-contract` set and clear `blocked` in `status.json`.
 - **Drain:** the child exits only when `drain` exists, it is idle, has no unsettled request or open prompt, and no client is attached. The check runs on transitions, never at startup. A blocked child stays.
 

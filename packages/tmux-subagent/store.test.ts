@@ -47,6 +47,48 @@ function overwrite(file: string, value: unknown): void {
   fs.writeFileSync(file, JSON.stringify(value));
 }
 
+describe("socket binding", () => {
+  it("keeps one socket across store instances and rejects a different one", () => {
+    store.bindSocket("socket-a");
+    const reopened = createStore(store.root);
+
+    expect(() => reopened.bindSocket("socket-a")).not.toThrow();
+    expect(() => reopened.bindSocket("socket-b")).toThrow(/socket-a.*socket-b/);
+    expect(() => reopened.bindSocket("socket-a")).not.toThrow();
+    expect(mode(path.join(store.root, "tmux-socket.json"))).toBe(0o600);
+  });
+
+  it("does not replace a competing writer's socket binding", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(fs.writeFileSync).mockImplementationOnce((...args) => {
+      createStore(store.root).bindSocket("socket-a");
+      actual.writeFileSync(...args);
+    });
+
+    expect(() => store.bindSocket("socket-b")).toThrow(/socket-a.*socket-b/);
+    expect(() => store.bindSocket("socket-a")).not.toThrow();
+    expect(fs.readdirSync(store.root)).toEqual(["tmux-socket.json"]);
+  });
+
+  it("refuses a corrupt binding rather than replacing it", () => {
+    store.bindSocket("socket-a");
+    const file = path.join(store.root, "tmux-socket.json");
+    overwrite(file, { socket: "socket-a" });
+
+    expect(() => store.bindSocket("socket-b")).toThrow(/invalid socket name/);
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ socket: "socket-a" });
+  });
+
+  it("binds existing unbound children without changing their records", () => {
+    const child = store.createChild(childInput, "Keep this conversation");
+
+    store.bindSocket("socket-a");
+
+    expect(store.readChild(child.childId)).toEqual(child);
+    expect(store.listChildIds()).toEqual([child.childId]);
+  });
+});
+
 describe("children", () => {
   it("allocates a slugged child ID and writes child.json and system-prompt.md privately", () => {
     const child = store.createChild(childInput, "Be thorough.");

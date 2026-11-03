@@ -62,6 +62,7 @@ The **owning worktree** is the canonical path (`realpath` of `git rev-parse --sh
 ```text
 ~/.pi/agent/subagents/
   tmux.conf                          launcher, rewritten on each server start
+  tmux-socket.json                    first user, write-once socket name
   children/<childId>/
     child.json                       parent, write-once
     system-prompt.md                 parent, write-once
@@ -74,7 +75,9 @@ The **owning worktree** is the canonical path (`realpath` of `git rev-parse --sh
     reports/<reportId>.json          child, write-once
 ```
 
-Each file has exactly one writer. No file is updated by both parent and child, so no lock is needed. Directories are `0700`, files `0600`. Every record carries `version: 1`; readers validate shape and identity fields and treat a mismatch as an error, never as absence.
+Each file has exactly one writer. No file is updated by both parent and child, so no lock is needed. Directories are `0700`, files `0600`. Child, request, result, status, and report records carry `version: 1`; readers validate shape and identity fields and treat a mismatch as an error, never as absence.
+
+The state directory binds to one socket via `tmux-socket.json`, a JSON string published with the store's existing atomic write-once helper. Parent and child startup, and CLI `open` and `stop`, reject a different socket before using it. Existing unbound state adopts the first socket without rewriting child records. Another socket requires a separate state directory. Explicitly injected `TmuxExec` functions are test seams; their callers manage their disposable sockets.
 
 Live tmux state is discovered, never stored. A child is **live** when `tmux -L pi-subagents has-session -t =sa-<childId>` succeeds. `status.json` is meaningful only when its nonce equals the live session's `PI_SUBAGENT_NONCE` environment value.
 
@@ -490,7 +493,9 @@ Reset the recorded outcome at each `agent_start`, and keep the last `agent_befor
 
 Write the settled record, clear `current`, and update `status.json`. **Verify:** `agent_settled` fires once, after any operator follow-ups queued during the run, so the answer can reply to the operator's message. In that case `humanIntervened` is true and the parent sees the latest answer. This is deliberate: an earlier answer may be stale.
 
-### Blocked state
+### Activity and blocked state
+
+`status.json` reports all Pi activity, including work started by the operator. `agent_start` sets `state: "running"`; `agent_settled` returns it to `"idle"`. The optional `current` field still names only a confirmed parent request, so an operator-only run has no request ID. Blocked indicators remain independent of both.
 
 `ui_prompt_start` / `ui_prompt_end` and the existing `herdr:blocked` event (`@pi-workspace/herdr-contract`, still emitted by `bash-permission`) set and clear `status.json` `blocked`. The event name is unchanged.
 

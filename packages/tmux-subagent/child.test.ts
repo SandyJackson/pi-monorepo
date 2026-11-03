@@ -149,6 +149,33 @@ async function nextPoll(): Promise<void> {
   await vi.advanceTimersByTimeAsync(POLL_MS);
 }
 
+describe("operator activity", () => {
+  it("reports operator work as running without assigning it a parent request", async () => {
+    await start();
+    await fake.emit("input", { text: "Inspect this manually", source: "interactive" });
+    fake.state.idle = false;
+    await fake.emit("agent_start");
+
+    expect(store.readStatus(child.childId)).toMatchObject({ state: "running" });
+    expect(store.readStatus(child.childId)).not.toHaveProperty("current");
+    expect(store.listRequestIds(child.childId)).toEqual([]);
+
+    await fake.emit("ui_prompt_start", { title: "Permission needed" });
+    expect(store.readStatus(child.childId)).toMatchObject({
+      state: "running",
+      blocked: { label: "Permission needed" },
+    });
+    await fake.emit("ui_prompt_end");
+    expect(store.readStatus(child.childId)).toMatchObject({ state: "running" });
+    expect(store.readStatus(child.childId)).not.toHaveProperty("blocked");
+
+    fake.state.idle = true;
+    await fake.emit("agent_settled", { aborted: false });
+    expect(store.readStatus(child.childId)).toMatchObject({ state: "idle" });
+    expect(store.readStatus(child.childId)).not.toHaveProperty("current");
+  });
+});
+
 describe("child bridge dispatch and settlement", () => {
   beforeEach(() => {
     fake.append(assistantEntry("a0", "Before the request"));

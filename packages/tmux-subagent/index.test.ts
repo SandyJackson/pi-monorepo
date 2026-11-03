@@ -82,6 +82,17 @@ async function listing(tool: Tool): Promise<string> {
 }
 
 describe("parent mode", () => {
+  it("rejects a state directory bound to a different socket before starting the runtime", async () => {
+    const store = createStore(path.join(path.dirname(userAgentsDir), "subagents"));
+    store.bindSocket("another-socket");
+    const fake = harness(true);
+
+    await expect(fake.emit("session_start", { reason: "startup" })).rejects.toThrow(
+      /another-socket/,
+    );
+    expect(fake.tools).toEqual([]);
+  });
+
   it("keeps description, listing, and resolution on one catalog snapshot until the next session", async () => {
     writeAgent(userAgentsDir, "stable.md", "stable", "initial definition");
     writeAgent(
