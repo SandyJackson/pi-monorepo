@@ -248,6 +248,16 @@ describe("/subagents", () => {
     expect(result.outer.calls).toEqual([attachArgs(reviewer.childId)]);
   });
 
+  it("searches labels in any script", async () => {
+    addChild({ label: "issue #12" });
+    const fix = addChild({ label: "修复登录" });
+    liven(fix);
+
+    const result = await run(["修", "复", "x", KEY.backspace, KEY.enter]);
+
+    expect(result.outer.calls).toEqual([attachArgs(fix.childId)]);
+  });
+
   it("stops the selected child with Ctrl+X once confirmed, keeping its records", async () => {
     const first = addChild();
     const second = addChild();

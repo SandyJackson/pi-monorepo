@@ -126,12 +126,14 @@ function pick(ctx: ExtensionCommandContext, rows: PickerChild[]): Promise<Choice
           return;
         }
         if (matchesKey(data, "backspace")) {
-          if (filter) setFilter(filter.slice(0, -1));
+          if (filter) setFilter(Array.from(filter).slice(0, -1).join(""));
           return;
         }
-        const printable = decodeKittyPrintable(data) ?? data;
-        if (printable.length === 1 && printable >= " " && printable <= "~") {
-          setFilter(filter + printable);
+        // Any text without control characters, so labels in any script can be searched.
+        const text = decodeKittyPrintable(data) ?? data;
+        // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are keys, not text
+        if (text && !/[\x00-\x1f\x7f]/.test(text)) {
+          setFilter(filter + text);
           return;
         }
         list.handleInput(data);
