@@ -1,8 +1,8 @@
 /**
- * The picker, float, and stop against real tmux on disposable servers:
+ * The inspection float, list, and stop against real tmux on disposable servers:
  *
  * - `host` gives the outer client a real terminal,
- * - `outer` stands in for the operator's server, with the README binding,
+ * - `outer` stands in for the operator's server, where Pi runs,
  * - `private` stands in for `pi-subagents`.
  *
  * The child "Pi" is a small script that reports readiness with its launch
@@ -15,7 +15,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
+import { openFloat } from "./inspect.ts";
 import { createStore, type Store } from "./store.ts";
+import { createOuterTmuxExec, createTmuxExec } from "./tmux.ts";
 
 const hasTmux = (() => {
   try {
@@ -108,15 +110,10 @@ beforeAll(async () => {
   const outerConf = path.join(root, "outer.conf");
   fs.writeFileSync(
     outerConf,
-    [
-      "set -g status off",
-      "set -s extended-keys on",
-      "set -s extended-keys-format csi-u",
-      `bind-key -n F12 run-shell -b '${process.execPath} ${cliPath} pick --pane "#{pane_id}"'`,
-      "",
-    ].join("\n"),
+    ["set -g status off", "set -s extended-keys on", "set -s extended-keys-format csi-u", ""].join(
+      "\n",
+    ),
   );
-  // The outer server copies this environment, so the binding's CLI sees the test sockets.
   await tmux(
     "outer",
     "-f",
@@ -179,7 +176,7 @@ afterAll(() => {
 });
 
 it.skipIf(!hasTmux)(
-  "picks a child from the binding, floats it, refuses a second float, and stops the worktree",
+  "floats a child, refuses a second float, closes on Escape leaving the child running, and stops the worktree",
   async () => {
     const fakePi = path.join(root, "fake-pi.mjs");
     // Report readiness the way the child bridge does, then stay up.
@@ -219,17 +216,15 @@ setInterval(() => {}, 1000);
       },
     ]);
 
-    // The README binding opens the menu on the client's window.
-    await tmux("host", "send-keys", "-t", "=h:", "F12");
-    const menu = await waitFor(async () => {
-      const text = await screen();
-      return text.includes(child.childId) ? text : undefined;
-    }, "the menu");
-    expect(menu).toContain("planning");
-    expect(menu).toContain("issue #12");
-
-    // Choosing the item resumes the child and floats an attach client.
-    await tmux("host", "send-keys", "-t", "=h:", "1");
+    // Opening resumes the child and floats an attach client over Pi's pane.
+    const open = async () =>
+      openFloat(child.childId, await paneId(false), createOuterTmuxExec(env), {
+        store,
+        tmux: createTmuxExec(sockets.private),
+        socket: sockets.private,
+        env,
+      });
+    await open();
     await waitFor(
       async () => ((await attached(child.childId)) === "1" ? true : undefined),
       "the float",
@@ -242,13 +237,12 @@ setInterval(() => {}, 1000);
     expect(fs.existsSync(drain)).toBe(true);
 
     // A second open on the same window is refused and leaves the float alone.
-    const again = await cli("open", child.childId, "--pane", await paneId(false));
-    expect(again.code).toBe(1);
-    expect(again.stderr).toContain("window already has a modal pane");
+    await expect(open()).rejects.toThrow("window already has a modal pane");
     expect(await floats()).toBe(1);
 
-    // Dismissing the float leaves the child running.
-    await tmux("outer", "kill-pane", "-t", await paneId(true));
+    // Escape closes the float and leaves the child running.
+    await tmux("host", "send-keys", "-t", "=h:", "Escape");
+    await waitFor(async () => ((await floats()) === 0 ? true : undefined), "the float to close");
     await waitFor(
       async () => ((await attached(child.childId)) === "0" ? true : undefined),
       "detach",

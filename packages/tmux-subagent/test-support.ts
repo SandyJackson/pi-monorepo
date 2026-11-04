@@ -13,6 +13,7 @@ export function createFakePi() {
   const sent: Array<{ text: string; deliverAs?: string; expandPromptTemplates?: boolean }> = [];
   const customMessages: Array<{ message: Record<string, unknown>; options?: unknown }> = [];
   const tools: Array<{ name: string }> = [];
+  const commands: string[] = [];
   const flags: Record<string, string | boolean | undefined> = {};
   const state = {
     idle: true,
@@ -70,6 +71,9 @@ export function createFakePi() {
     registerTool(tool: { name: string }) {
       tools.push(tool);
     },
+    registerCommand(name: string) {
+      commands.push(name);
+    },
     events: {
       emit(channel: string, data: unknown) {
         for (const handler of busHandlers.get(channel) ?? []) handler(data);
@@ -99,7 +103,7 @@ export function createFakePi() {
     state.leafId = entry.id as string;
   }
 
-  return { pi, ctx, state, sent, customMessages, tools, flags, emit, append };
+  return { pi, ctx, state, sent, customMessages, tools, commands, flags, emit, append };
 }
 
 export function userEntry(id: string, text: string): Record<string, unknown> {

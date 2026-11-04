@@ -1,57 +1,32 @@
 /**
- * cli.ts — the operator's picker, inspection float, and stop command (§10).
+ * cli.ts — the operator's worktree-wide list and stop commands (§10).
  *
- *   node cli.ts pick  --pane <outer pane id>
- *   node cli.ts open  <childId> --pane <outer pane id>
  *   node cli.ts list  [--worktree <path>] [--json]
  *   node cli.ts stop  <childId> | --worktree <path>
  *
  * Runs under plain `node` (native type stripping). It imports only
- * `store.ts`, `tmux.ts`, `launch.ts`, and the text-only `model-text.ts`,
- * never Pi runtime modules.
+ * `inspect.ts`, `store.ts`, `tmux.ts`, `launch.ts`, and the text-only
+ * `model-text.ts`, never Pi runtime modules.
  */
 
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { ensureLive, isDirectory, isLive, readNonce } from "./launch.ts";
 import {
-  type ChildId,
-  type ChildRecord,
-  createStore,
-  owningWorktree,
-  type Store,
-} from "./store.ts";
-import {
-  createOuterTmuxExec,
-  createTmuxExec,
-  sessionTarget,
-  type TmuxExec,
-  tmuxSocket,
-} from "./tmux.ts";
+  displayLabel,
+  type InspectDeps,
+  type ListedChild,
+  listChild,
+  readChildren,
+  stopChild,
+} from "./inspect.ts";
+import { isDirectory } from "./launch.ts";
+import { type ChildId, type ChildRecord, createStore, owningWorktree } from "./store.ts";
+import { createTmuxExec, tmuxSocket } from "./tmux.ts";
 
-export interface CliDeps {
-  store: Store;
-  /** The private server. */
-  tmux: TmuxExec;
-  /** The operator's server, where menus, messages, and floats are shown. */
-  outer: TmuxExec;
-  /** Private socket name, for the float's attach client. */
-  socket: string;
-  /** Argv prefix that runs this CLI, used by menu items. */
-  cliCommand: string[];
+export interface CliDeps extends InspectDeps {
   cwd: string;
-  env: NodeJS.ProcessEnv;
   stdout(text: string): void;
   stderr(text: string): void;
-}
-
-type ChildState = "running" | "idle" | "blocked" | "stopped";
-
-interface ListedChild {
-  childId: ChildId;
-  agent: string;
-  label?: string;
-  state: ChildState;
 }
 
 interface ListedGroup {
@@ -66,25 +41,14 @@ interface Listing {
 
 class UsageError extends Error {}
 
-const EMPTY_SCOPE = "No subagents for this worktree";
-
 /** The §3 owning worktree of `dir`. Errors rather than guessing when `dir` is unusable. */
 function resolveWorktree(dir: string): string {
   if (!dir || !isDirectory(dir)) throw new Error(`Cannot resolve the worktree of "${dir}".`);
   return owningWorktree(dir);
 }
 
-async function childState(child: ChildRecord, deps: CliDeps): Promise<ChildState> {
-  if (!(await isLive(deps.tmux, child.childId))) return "stopped";
-  const nonce = await readNonce(deps.tmux, child.childId);
-  const status = deps.store.readStatus(child.childId);
-  // A live session without a status of its own launch is a Pi process still starting.
-  if (nonce === undefined || status?.nonce !== nonce) return "running";
-  return status.blocked ? "blocked" : status.state;
-}
-
 function formatListing(listing: Listing): string {
-  if (listing.groups.length === 0) return `${EMPTY_SCOPE}\n`;
+  if (listing.groups.length === 0) return "No subagents for this worktree\n";
   const lines: string[] = [];
   for (const group of listing.groups) {
     lines.push(displayLabel(group.title));
@@ -97,24 +61,11 @@ function formatListing(listing: Listing): string {
   return lines.map((line) => `${line}\n`).join("");
 }
 
-/**
- * The children owned by `worktree`, oldest first. A child whose record cannot
- * be read is named on stderr and skipped, so it cannot hide every other child.
- */
+/** The children owned by `worktree`, oldest first. Unreadable records are named on stderr. */
 function worktreeChildren(worktree: string, deps: CliDeps): ChildRecord[] {
-  const children: ChildRecord[] = [];
-  for (const childId of deps.store.listChildIds()) {
-    try {
-      children.push(deps.store.readChild(childId));
-    } catch (error) {
-      deps.stderr(
-        `Skipped child ${childId}: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    }
-  }
-  return children
-    .filter((child) => child.worktree === worktree)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return readChildren(deps.store, (childId, error) =>
+    deps.stderr(`Skipped child ${childId}: ${error}\n`),
+  ).filter((child) => child.worktree === worktree);
 }
 
 async function list(worktree: string, deps: CliDeps): Promise<Listing> {
@@ -132,12 +83,7 @@ async function list(worktree: string, deps: CliDeps): Promise<Listing> {
       group = { title, children: [] };
       groups.set(key, group);
     }
-    group.children.push({
-      childId: child.childId,
-      agent: child.agent.name,
-      ...(child.label === undefined ? {} : { label: child.label }),
-      state: await childState(child, deps),
-    });
+    group.children.push(await listChild(child, deps));
   }
 
   // Each creating child's group follows the group that lists that child.
@@ -156,145 +102,9 @@ async function list(worktree: string, deps: CliDeps): Promise<Listing> {
   return { worktree, groups: ordered };
 }
 
-/** End a child's Pi process. Its records and transcript stay; the next request or `open` resumes it. */
 async function stop(childId: ChildId, deps: CliDeps, quiet = false): Promise<void> {
-  deps.store.bindSocket(deps.socket);
-  const killed = await deps.tmux(["kill-session", "-t", sessionTarget(childId)]);
-  if (killed.code === 0) deps.stdout(`Stopped ${childId}\n`);
-  else if (await isLive(deps.tmux, childId)) {
-    throw new Error(`tmux could not stop ${childId}: ${killed.stderr.trim()}`);
-  } else if (!quiet) deps.stdout(`${childId} is not running\n`);
-}
-
-// ---------------------------------------------------------------------------
-// Operator's server
-// ---------------------------------------------------------------------------
-
-const MAX_LABEL_LENGTH = 40;
-const MENU_KEYS = "123456789";
-
-/** tmux expands formats in menu names, commands, and messages. */
-function escapeFormat(text: string): string {
-  return text.replaceAll("#", "##");
-}
-
-function displayLabel(label: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally strips control characters
-  const clean = label.replace(/[\x00-\x1f\x7f]/g, "");
-  return clean.length > MAX_LABEL_LENGTH ? `${clean.slice(0, MAX_LABEL_LENGTH - 1)}…` : clean;
-}
-
-/** A shell word in double quotes; `$`, backquote, `"` and `\` are escaped. */
-function shellQuote(word: string): string {
-  return `"${word.replace(/["\\$`]/g, "\\$&")}"`;
-}
-
-/**
- * The tmux command a menu item runs. tmux single quotes have no escapes, so
- * the shell words use double quotes and a `'` cannot be represented.
- */
-function openCommand(childId: ChildId, pane: string, deps: CliDeps): string {
-  const shell = [...deps.cliCommand.map(shellQuote), "open", childId, "--pane", pane].join(" ");
-  if (shell.includes("'")) throw new Error(`Cannot quote the CLI path for tmux: ${shell}`);
-  return escapeFormat(`run-shell -b '${shell}'`);
-}
-
-function parsePane(value: string | true | undefined): string {
-  if (typeof value !== "string" || !/^%[0-9]+$/.test(value)) {
-    throw new UsageError("--pane needs a tmux pane ID such as %3.");
-  }
-  return value;
-}
-
-async function paneWorktree(pane: string, deps: CliDeps): Promise<string> {
-  const result = await deps.outer(["display-message", "-p", "-t", pane, "#{pane_current_path}"]);
-  if (result.code !== 0) {
-    throw new Error(`Cannot read the path of pane ${pane}: ${result.stderr.trim()}`);
-  }
-  return resolveWorktree(result.stdout.replace(/\n$/, ""));
-}
-
-function menuItems(listing: Listing, pane: string, deps: CliDeps): string[] {
-  if (listing.groups.length === 0) return [`-${EMPTY_SCOPE}`, "", ""];
-  const items: string[] = [];
-  let index = 0;
-  for (const group of listing.groups) {
-    if (items.length > 0) items.push("");
-    items.push(`-${escapeFormat(displayLabel(group.title))}`, "", "");
-    for (const child of group.children) {
-      const fields = [child.childId, child.agent, child.state];
-      if (child.label !== undefined) fields.push(displayLabel(child.label));
-      items.push(
-        escapeFormat(fields.join("  ")),
-        MENU_KEYS[index++] ?? "",
-        openCommand(child.childId, pane, deps),
-      );
-    }
-  }
-  return items;
-}
-
-async function pick(pane: string, deps: CliDeps): Promise<void> {
-  const listing = await list(await paneWorktree(pane, deps), deps);
-  const shown = await deps.outer([
-    "display-menu",
-    "-t",
-    pane,
-    "-T",
-    "Subagents",
-    "-x",
-    "C",
-    "-y",
-    "C",
-    // Disabled items start with "-", so options must end first.
-    "--",
-    ...menuItems(listing, pane, deps),
-  ]);
-  if (shown.code !== 0) throw new Error(`tmux could not show the menu: ${shown.stderr.trim()}`);
-}
-
-/**
- * Resume the child if needed, then float an attach client over the pane.
- * An indeterminate launch still has a live session, so it is shown: the
- * operator can see why it is not ready.
- */
-async function open(childId: ChildId, pane: string, deps: CliDeps): Promise<void> {
-  deps.store.bindSocket(deps.socket);
-  deps.store.readChild(childId);
-  const live = await ensureLive(childId, { store: deps.store, tmux: deps.tmux, env: deps.env });
-  if (live.status === "failed") throw new Error(live.error);
-  const opened = await deps.outer([
-    "new-pane",
-    "-O",
-    "-x",
-    "90%",
-    "-y",
-    "90%",
-    "-t",
-    pane,
-    "--",
-    "env",
-    "-u",
-    "TMUX",
-    "-u",
-    "TMUX_PANE",
-    "tmux",
-    "-L",
-    deps.socket,
-    "attach",
-    "-t",
-    sessionTarget(childId),
-  ]);
-  if (opened.code !== 0) {
-    throw new Error(
-      `tmux could not open the float: ${opened.stderr.trim() || `exit ${opened.code}`}`,
-    );
-  }
-}
-
-/** Report a failure where the operator is looking: on the pane, and on stderr. */
-async function showError(pane: string, error: string, deps: CliDeps): Promise<void> {
-  await deps.outer(["display-message", "-t", pane, escapeFormat(`Subagents: ${error}`)]);
+  if (await stopChild(childId, deps)) deps.stdout(`Stopped ${childId}\n`);
+  else if (!quiet) deps.stdout(`${childId} is not running\n`);
 }
 
 function parseOptions(args: string[], flags: string[], valued: string[]) {
@@ -315,25 +125,8 @@ function parseOptions(args: string[], flags: string[], valued: string[]) {
 
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const [command, ...rest] = argv;
-  let pane: string | undefined;
   try {
     switch (command) {
-      case "pick": {
-        const { options } = parseOptions(rest, [], ["--pane"]);
-        pane = parsePane(options["--pane"]);
-        await pick(pane, deps);
-        return 0;
-      }
-      case "open": {
-        const { options, positional } = parseOptions(rest, [], ["--pane"]);
-        pane = parsePane(options["--pane"]);
-        const [childId, ...extra] = positional;
-        if (childId === undefined || extra.length > 0) {
-          throw new UsageError("Usage: open <childId> --pane <pane>");
-        }
-        await open(childId, pane, deps);
-        return 0;
-      }
       case "stop": {
         const { options, positional } = parseOptions(rest, [], ["--worktree"]);
         const dir = options["--worktree"];
@@ -364,7 +157,6 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
     deps.stderr(`${text}\n`);
-    if (pane !== undefined) await showError(pane, text, deps);
     return error instanceof UsageError ? 2 : 1;
   }
 }
@@ -384,9 +176,7 @@ if (isEntryPoint()) {
   process.exitCode = await runCli(process.argv.slice(2), {
     store: createStore(),
     tmux: createTmuxExec(socket),
-    outer: createOuterTmuxExec(),
     socket,
-    cliCommand: [process.execPath, fileURLToPath(import.meta.url)],
     cwd: process.cwd(),
     env: process.env,
     stdout: (text) => process.stdout.write(text),

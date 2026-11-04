@@ -15,10 +15,10 @@ V1 provides:
 - Interactive Pi children, each in its own session on one private tmux server, out of the operator's normal navigation.
 - Follow-up requests to an existing child (`subagent_ask`) and later retrieval of a request result (`subagent_retrieve`).
 - Child-to-parent reports (`subagent_report`), delivered as parent follow-ups, never as steering.
-- A worktree-scoped picker and an inspection float for attaching to a child.
+- A `/subagents` picker in Pi's TUI, listing the current conversation's children and their grandchildren, and an inspection float for attaching to one.
 - Saved children that resume on demand.
 - Drain on clean parent departure; reload is never a departure.
-- A worktree-scoped stop command for cleanup.
+- A worktree-scoped `list` and `stop` CLI for inspection and orphan cleanup.
 - One level of nesting: a child may delegate to grandchildren, which cannot delegate further (§8 Nesting).
 
 Not in V1: attention floats, OS notifications, status-line indicators, delegation deeper than grandchildren, steering, all-worktree views, automatic orphan cleanup, Herdr parity.
@@ -571,31 +571,24 @@ Presentation keeps the existing rules: answers resolved from references at prese
 
 ## 10. Picker, inspection, and stop
 
-`cli.ts` runs with `node` (native type stripping). It imports only `store.ts`, `tmux.ts`, and `launch.ts`, never Pi runtime modules.
+`inspect.ts` lists children with their live state and opens the inspection float. It imports only `store.ts`, `tmux.ts`, and `launch.ts`, never Pi runtime modules, so both `index.ts` and `cli.ts` can use it.
+
+- **`/subagents`:** registered only in parent mode. It needs `ctx.mode === "tui"` and `TMUX_PANE`; if either is missing it shows an error notification and does nothing else. It opens a searchable list of the current conversation's children (`parent.sessionId` equals the session ID), each followed by its own children (indented). Other conversations' children are not shown. Each row shows child ID, agent, state (`running` / `idle` / `blocked` / `stopped`), and label. Enter opens the selected child. Escape cancels. The list is built when the command runs and is not refreshed while open. An empty scope shows `No subagents for this conversation`.
+- **Open:** `ensureLive`, then on the outer server run `new-pane -O -D -x 90% -y 90% -t $TMUX_PANE -- env -u TMUX -u TMUX_PANE tmux -L <socket> attach -t =sa-<childId>`. The variables are cleared in the executed command as hygiene: tmux 3.8 sets `TMUX_PANE` for the new pane regardless of `-e`, and the attach client has no use for the outer server's values. Clearing them is not what allows the attach; tmux refuses a nested attach only to the server that owns the client's pane, and `pi-subagents` is a different server (ticket 03). If `new-pane -O` fails because the window already has a modal pane, the error is shown as a notification; the existing float is not closed or reused. Do not pass `-K` (the outer prefix must still work). If the child exits, the attach client exits and the pane closes. Opening never deletes `drain`.
+- **Dismiss:** `-D` closes the float on Escape or Ctrl-C. Both keys are taken by tmux, so they cannot reach the child Pi from the float. Closing ends only the attach client; the child keeps running.
+- **Stop:** Ctrl+X on a selected child asks for confirmation, then stops it as `cli.ts stop` does.
+
+`cli.ts` runs with `node` (native type stripping) and has the same import limits.
 
 ```text
-node cli.ts pick  --pane <outer pane id>
-node cli.ts open  <childId> --pane <outer pane id>
 node cli.ts list  [--worktree <path>] [--json]
 node cli.ts stop  <childId> | --worktree <path>
 ```
 
-- **Worktree resolution:** from `#{pane_current_path}` of `--pane`, using the §3 rule. If resolution fails, show an error with `display-message`. Never fall back to listing all children.
-- **`list`:** children of the worktree grouped by parent (`name` or short session ID). Grandchildren are listed under their creating child, labelled `child <childId>`. Each entry shows child ID, agent, label, and `running` / `idle` / `blocked` / `stopped`. Read-only; never starts Pi. A child whose `child.json` cannot be read is skipped by `list`, `pick`, and `stop --worktree` and named on stderr (`Skipped child <childId>: <error>`); the command still succeeds.
-- **`pick`:** builds a `tmux display-menu` from `list`, one titled group per parent. Each item runs `open`. An empty scope shows `No subagents for this worktree`. `display-menu` is run with `-t <--pane>`. In tmux 3.8 the menu belongs to that pane's window and shows on every client viewing it; `-c` does not choose where it is drawn.
-- **`open`:** `ensureLive`, then on the outer server run `new-pane -O -x 90% -y 90% -t <pane> -- env -u TMUX -u TMUX_PANE tmux -L pi-subagents attach -t =sa-<childId>`. The variables are cleared in the executed command as hygiene: tmux 3.8 sets `TMUX_PANE` for the new pane regardless of `-e`, and the attach client has no use for the outer server's values. Clearing them is not what allows the attach; tmux refuses a nested attach only to the server that owns the client's pane, and `pi-subagents` is a different server (ticket 03). If `new-pane -O` fails because the window already has a modal pane (`window already has a modal pane`, exit 1), `open` shows that error with `display-message` and does nothing else. It does not close or reuse the existing float. Do not pass `-K` (the outer prefix must still work) or `-D` (Escape and Ctrl-C belong to Pi). If the child exits, the attach client exits and the pane closes. Opening never deletes `drain`.
-- **Dismiss:** close the float with the outer server's `kill-pane` (for example `prefix x`). This kills only the attach client.
-- **`stop`:** `kill-session` for the child or each child in the worktree. Work in progress is lost; transcripts and records are kept. The next request or `open` resumes it.
+- **`list`:** children of the worktree grouped by parent (`name` or short session ID). Grandchildren are listed under their creating child, labelled `child <childId>`. Each entry shows child ID, agent, label, and `running` / `idle` / `blocked` / `stopped`. Read-only; never starts Pi. A child whose `child.json` cannot be read is skipped by `list` and `stop --worktree` and named on stderr (`Skipped child <childId>: <error>`); the command still succeeds.
+- **`stop`:** `kill-session` for the child or each child in the worktree. Work in progress is lost; transcripts and records are kept. The next request or `/subagents` open resumes it.
 
-Installation snippet, supplied in the package README and never installed automatically:
-
-```tmux
-bind-key S run-shell -b 'node /path/to/packages/tmux-subagent/cli.ts pick --pane "#{pane_id}"'
-```
-
-The outer server also needs Pi's documented key settings (`extended-keys on`, `extended-keys-format csi-u`) for modified keys to reach the nested client. The README states this; the snippet does not change it.
-
-Verified (ticket 03): `display-menu -t <pane>` from `run-shell -b` shows on the invoking pane's window, and `new-pane -O` works when the window is zoomed without `-A`.
+The outer server also needs Pi's documented key settings (`extended-keys on`, `extended-keys-format csi-u`) for modified keys to reach the nested client. The README states this.
 
 ## 11. Package structure
 
@@ -612,7 +605,8 @@ packages/tmux-subagent/
   launch.ts           ensureLive
   parent.ts           createParentRuntime: delegate, ask, retrieveResult, drain, report delivery
   child.ts            startChildBridge and subagent_report
-  cli.ts              pick, open, list, stop
+  inspect.ts          child listing with live state; inspection float
+  cli.ts              list, stop
 ```
 
 Test seams: `ExecuteDelegation` for the tool, `TmuxExec` scripted in tests, `Store` rooted in a temp directory, and fake timers. No classes, scheduler, lock manager, or event journal.
@@ -638,7 +632,7 @@ Deterministic (scripted tmux, temp store):
 9. Reload never writes `drain`; quit, new, resume, and fork do.
 10. Reports: delivered once per process; not redelivered when present in history; delivered after the parent restarts if absent.
 11. Ownership: `ask` and `retrieveResult` against another parent's child are rejected.
-12. Picker scope: ambiguous worktree errors; empty worktree shows an empty menu; children grouped by parent; grandchildren listed under their creating child.
+12. Picker scope: only this conversation's children, with grandchildren under their creator; other parents' children excluded; empty scope message; outside tmux shows an error. Closing the float with Escape leaves the child running (integration).
 13. Dispatch without an `input` confirmation settles `failed` / `error` and is not re-dispatched. A request entry missing from the branch at settlement yields `superseded`.
 14. An unconfirmed in-flight report is resent after the parent is observed idle; a confirmed one is not.
 15. Child `/reload` keeps the same nonce, and `status.json` stays valid for readiness.
