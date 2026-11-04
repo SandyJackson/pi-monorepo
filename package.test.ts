@@ -63,8 +63,8 @@ describe("Pi workspace package", () => {
     expect(manifest.pi.extensions).toContain("./packages/ketch/index.ts");
   });
 
-  it("registers existing skill directories", () => {
-    expect(manifest.pi.skills).toContain("./skills");
+  it("declares no dangling skill directories (skills are centralised)", () => {
+    expect(manifest.pi.skills).not.toContain("./skills");
     for (const entry of manifest.pi.skills) {
       expect(statSync(resolve(root, entry)).isDirectory(), entry).toBe(true);
     }

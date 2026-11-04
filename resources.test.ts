@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { loadSkills, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { parseAgentFileContent } from "./packages/tmux-subagent/agents.ts";
 
@@ -11,38 +11,11 @@ it("ships prompt templates through the aggregate package", () => {
   expect(manifest.pi.prompts).toEqual(["./prompts"]);
 });
 
-it("resolves code-review to the workspace skill", () => {
-  const { skills } = loadSkills({
-    cwd: ROOT,
-    skillPaths: manifest.pi.skills,
-    includeDefaults: false,
-  });
-  expect(skills.find((skill) => skill.name === "code-review")?.filePath).toBe(
-    path.join(ROOT, "skills/code-review/SKILL.md"),
-  );
+it("no longer ships a workspace skills directory (skills are centralised)", () => {
+  expect(manifest.pi.skills).not.toContain("./skills");
+  expect(fs.existsSync(path.join(ROOT, "skills"))).toBe(false);
 });
 
-it("resolves web-research to the workspace skill", () => {
-  const { skills } = loadSkills({
-    cwd: ROOT,
-    skillPaths: manifest.pi.skills,
-    includeDefaults: false,
-  });
-  expect(skills.find((skill) => skill.name === "web-research")?.filePath).toBe(
-    path.join(ROOT, "skills/web-research/SKILL.md"),
-  );
-});
-
-function findSkillFiles(directory: string): string[] {
-  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    if (entry.name.startsWith(".") || !entry.isDirectory()) return [];
-    const child = path.join(directory, entry.name);
-    const skill = path.join(child, "SKILL.md");
-    return [...(fs.existsSync(skill) ? [skill] : []), ...findSkillFiles(child)];
-  });
-}
-
-const skills = findSkillFiles(path.join(ROOT, "skills"));
 const promptsDirectory = path.join(ROOT, "prompts");
 const prompts = fs.existsSync(promptsDirectory)
   ? fs
@@ -74,7 +47,6 @@ describe("agent tool provisioning", () => {
 });
 
 for (const [kind, files] of [
-  ["Skills", skills],
   ["Agents", agents],
   ["Prompt templates", prompts],
 ] as const) {

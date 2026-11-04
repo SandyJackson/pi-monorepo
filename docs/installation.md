@@ -106,7 +106,7 @@ The workspace exposes these resources through its `package.json`:
 | Resource type | Entry point | Contents |
 |---|---|---|
 | Extensions | `pi.extensions` array | 5 child packages (tmux-subagent, session-auto-name, code-actions, worktree-trust, ketch) |
-| Skills | `pi.skills` array | `skills/` directory with 35 skills |
+| Skills | `pi.skills` array | none — skills are centralised outside the repo (previous tree archived as `skills-old/`) |
 | Agents | `agents/` directory | Workspace definitions discovered by tmux-subagent |
 | Documentation | `docs/` directory | Bash policy, agent discovery, installation guide |
 

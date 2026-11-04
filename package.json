@@ -29,9 +29,7 @@
       "./packages/worktree-trust/index.ts",
       "./packages/ketch/index.ts"
     ],
-    "skills": [
-      "./skills"
-    ],
+    "skills": [],
     "prompts": [
       "./prompts"
     ]

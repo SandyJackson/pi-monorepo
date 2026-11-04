@@ -11,7 +11,7 @@ My Pi setup in one repo. Extensions, skills, and agents I use day to day.
 | [session-auto-name](./packages/session-auto-name) | Names untitled sessions after the first exchange. |
 | [tmux-subagent](./packages/tmux-subagent) | Delegates work to interactive Pi subagents on a private tmux server, with a picker and inspection float. |
 
-Skills live in [skills](./skills). Agent definitions live in [agents](./agents). Shared vocabulary is in [GLOSSARY.md](./GLOSSARY.md).
+Skills are centralised outside this repo; the previous `skills/` tree is archived under `skills-old/`. Agent definitions live in [agents](./agents). Shared vocabulary is in [GLOSSARY.md](./GLOSSARY.md).
 
 ## Installation
 
