@@ -24,8 +24,10 @@ import {
   REPORT_TYPE,
   reportEnvelope,
 } from "./parent.ts";
+import { runSubagentsCommand } from "./picker.ts";
 import { createStore, type Store } from "./store.ts";
 import { createSubagentTool } from "./subagent-tool.ts";
+import { createOuterTmuxExec, createTmuxExec, tmuxSocket } from "./tmux.ts";
 
 const CHILD_FLAG = "subagent-child";
 
@@ -113,7 +115,21 @@ export default function (pi: ExtensionAPI): void {
     runtime = undefined;
     const childDir = pi.getFlag(CHILD_FLAG);
     if (typeof childDir !== "string" || !childDir) {
-      runtime = startParent(ctx, createStore());
+      const store = createStore();
+      runtime = startParent(ctx, store);
+      // Only a top-level Pi: a child runs on the private server, where a float would nest.
+      const socket = tmuxSocket();
+      pi.registerCommand("subagents", {
+        description: "Open or stop a subagent of this conversation",
+        handler: (_args, commandCtx) =>
+          runSubagentsCommand(commandCtx, {
+            store,
+            tmux: createTmuxExec(socket),
+            outer: createOuterTmuxExec(),
+            socket,
+            env: process.env,
+          }),
+      });
       return;
     }
 

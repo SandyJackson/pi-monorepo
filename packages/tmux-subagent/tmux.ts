@@ -31,8 +31,8 @@ export function createTmuxExec(socket: string = tmuxSocket(), binary = "tmux"): 
 }
 
 /**
- * The operator's tmux server, for the CLI's menus, messages, and floats.
- * Without an override, tmux finds it through `TMUX`, which `run-shell` sets.
+ * The operator's tmux server, where the inspection float is shown. Without
+ * an override, tmux finds it through `TMUX`, set for a Pi running inside tmux.
  * `PI_SUBAGENT_OUTER_TMUX_SOCKET` names a disposable server for tests.
  */
 export function createOuterTmuxExec(

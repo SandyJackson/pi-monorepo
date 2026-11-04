@@ -129,6 +129,15 @@ describe("parent mode", () => {
     await fake.emit("session_shutdown", { reason: "quit" });
   });
 
+  it("registers the /subagents picker", async () => {
+    const fake = harness(true);
+
+    await fake.emit("session_start", { reason: "startup" });
+
+    expect(fake.commands).toEqual(["subagents"]);
+    await fake.emit("session_shutdown", { reason: "quit" });
+  });
+
   it("leaves session switching and forking to the operator", async () => {
     const fake = harness(true);
 
@@ -557,6 +566,16 @@ describe("child mode", () => {
       }
     },
   );
+
+  it("never registers /subagents in a child, which runs on the private server", async () => {
+    process.env.PI_SUBAGENT_NONCE = "launch-nonce";
+    const { fake } = childHarness({ depth: 1 });
+
+    await fake.emit("session_start", { reason: "startup" });
+
+    expect(fake.commands).toEqual([]);
+    await fake.emit("session_shutdown", { reason: "quit" });
+  });
 
   it("gives a depth-2 child no parent tools and drains nothing when it exits", async () => {
     process.env.PI_SUBAGENT_NONCE = "launch-nonce";
